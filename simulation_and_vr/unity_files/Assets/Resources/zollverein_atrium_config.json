@@ -7,11 +7,11 @@
   "sampleNum": 1,
   "tasks": [
     {
-      "start": "Goal 1",
-      "end": "Goal 2",
-      "pointsOfInterest": "Goal 3",
+      "start": "MyGoal 1",
+      "end": "MyGoal 2",
+      "pointsOfInterest": "MyGoal 3",
       "numberOfAgents": 8,
-      "spawnInterval": 2.0,
+      "spawnInterval": 2,
       "taskName": "traverse_atrium",
       "agentType": "visitor",
       "numberOfNeeds": 1,
