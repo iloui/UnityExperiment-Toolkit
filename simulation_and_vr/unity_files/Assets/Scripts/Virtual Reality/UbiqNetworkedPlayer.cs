@@ -17,13 +17,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>
 */
 
 // Uncomment once the Ubiq package is present in the project:
-#define UBIQ_PRESENT
+// #define UBIQ_PRESENT
 
 using UnityEngine;
 
-#if UBIQ_PRESENT
-using Ubiq.Messaging;
-#endif
+// #if UBIQ_PRESENT
+// using Ubiq.Messaging;
+// #endif
 
 /// <summary>
 /// Synchronises a player's body position/rotation and camera orientation over

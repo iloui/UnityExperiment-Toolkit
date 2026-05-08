@@ -9,14 +9,14 @@ the Free Software Foundation, either version 3 of the License, or
 */
 
 // Uncomment once the Ubiq package is present in the project:
-#define UBIQ_PRESENT
+// #define UBIQ_PRESENT
 
 using System;
 using UnityEngine;
 
-#if UBIQ_PRESENT
-using Ubiq.Messaging;
-#endif
+// #if UBIQ_PRESENT
+// using Ubiq.Messaging;
+// #endif
 
 namespace Assets.Scripts
 {

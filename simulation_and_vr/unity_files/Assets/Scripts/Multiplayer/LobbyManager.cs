@@ -9,7 +9,7 @@ the Free Software Foundation, either version 3 of the License, or
 */
 
 // Uncomment once the Ubiq package is present in the project:
-#define UBIQ_PRESENT
+// #define UBIQ_PRESENT
 
 using System;
 using System.Collections;
@@ -19,10 +19,11 @@ using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.SceneManagement;
 
-#if UBIQ_PRESENT
-using Ubiq.Messaging;
-using Ubiq.Peers;
-#endif
+// #if UBIQ_PRESENT
+// using Ubiq.Messaging;
+// using Ubiq.Rooms;
+// using Ubiq.NetworkedBehaviour;
+// #endif
 
 /// <summary>
 /// Manages the lobby scene that gates entry into the collaborative VR experiment.
@@ -39,7 +40,7 @@ using Ubiq.Peers;
 /// the lobby transitions immediately without waiting for remote peers.
 ///
 /// Scene setup:
-///   - Add a Ubiq NetworkScene to the lobby scene.
+///   - Add an Ubiq NetworkScene to the lobby scene.
 ///   - Attach this component to a persistent GameObject.
 ///   - Wire StatusText and set ConfigUrl in the Inspector.
 /// </summary>

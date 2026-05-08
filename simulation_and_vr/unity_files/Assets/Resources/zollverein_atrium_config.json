@@ -1,0 +1,28 @@
+{
+  "Scene": "Zollverein_Atrium",
+  "Scenario": "simple_pedestrian_flow",
+  "Purpose": "basic_test",
+  "EngineScript_sampleInterval": 1,
+  "simId": 42001,
+  "sampleNum": 1,
+  "tasks": [
+    {
+      "start": "Goal 1",
+      "end": "Goal 2",
+      "pointsOfInterest": "Goal 3",
+      "numberOfAgents": 8,
+      "spawnInterval": 2.0,
+      "taskName": "traverse_atrium",
+      "agentType": "visitor",
+      "numberOfNeeds": 1,
+      "agentSpeed": 1.2,
+      "agentSize": 0.3,
+      "agentRadius": 0.25,
+      "privacyRadius": 0.8,
+      "poiTime": 3.0,
+      "revisit": false,
+      "chooseNonDeterministically": false,
+      "taskColor": "#3498DB"
+    }
+  ]
+}
