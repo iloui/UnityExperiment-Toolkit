@@ -1,0 +1,3 @@
+AgentType;TaskName;Distance;Collisions;Collisions_traverse_atrium;Duration;pos0x;pos0y;pos0z;pos1x;pos1y;pos1z;pos2x;pos2y;pos2z
+visitor;traverse_atrium;2.393966;0;0;3.002782;5.909563;6.045197;-4.683571;6.676136;6.045197;-5.60661;7.440069;6.045197;-6.524392
+visitor;traverse_atrium;1.102901;0;0;1.006321;5.4;6.045197;-4.07;6.104633;6.045197;-4.918458;;;

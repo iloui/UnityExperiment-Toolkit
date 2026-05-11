@@ -58,12 +58,13 @@ public class EngineScript : MonoBehaviour
     public bool visualizePOIs;                      // Set if you want to visualize POIs.
     public bool visualizeTrajectories;              // Set if you want to visualize trajectories.
     public bool visualizePaths;                     // Set if you want to visualize the paths that the agent will take.
+    public bool saveHeatMap;                        // Toggle for automated heatmap export.
     public int fontSize;                            // Size of the font displayed above each POI.
     public float resize;                            // Factor used to resize the font above each POI.
     public float offset;                            // Factor to multiply offset with.
     public int traceLength;                         // Length of the trace in positions to be visualized.
     private Vector3 baseOffset;                     // Base offset at which the first text mesh gets displayed.
-    
+
     // IO-related fields.
     public string dataFolder;                       // Directory where data file gets saved to.
     public string fileName;                         // Name of the file where data gets written to.
@@ -101,11 +102,11 @@ public class EngineScript : MonoBehaviour
             {
                 DestroyImmediate(c_task);
             }
-               
+
             foreach (TaskData t_task in ConfigManager.Instance.Config.tasks)
             {
                 TaskScript mytask = gameObject.AddComponent<TaskScript>();
-                Debug.Log("Task Name: " + t_task.taskName); 
+                Debug.Log("Task Name: " + t_task.taskName);
                 mytask.numberOfAgents=t_task.numberOfAgents;
                 mytask.spawnInterval=t_task.spawnInterval;
                 mytask.taskName=t_task.taskName;
@@ -218,7 +219,7 @@ public class EngineScript : MonoBehaviour
         else if (colorString.Contains(","))
         {
             string[] rgb = colorString.Split(',');
-            if (rgb.Length == 3 && 
+            if (rgb.Length == 3 &&
                 int.TryParse(rgb[0], out int r) &&
                 int.TryParse(rgb[1], out int g) &&
                 int.TryParse(rgb[2], out int b))
@@ -264,12 +265,12 @@ public void ShowSimInfo()
         GameObject canvasObj = new GameObject("HUDCanvas");
         Canvas canvas = canvasObj.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.ScreenSpaceCamera;
-        
+
         // Add a CanvasScaler for responsive UI scaling.
         CanvasScaler scaler = canvasObj.AddComponent<CanvasScaler>();
         scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
         scaler.referenceResolution = new Vector2(800, 600);
-        
+
         // Ensure the Canvas fills the entire screen.
         RectTransform canvasRect = canvasObj.GetComponent<RectTransform>();
         canvasRect.anchorMin = Vector2.zero;
@@ -287,7 +288,7 @@ public void ShowSimInfo()
         simIdText.fontSize = 24;
         simIdText.alignment = TextAnchor.UpperLeft;
         simIdText.color = Color.white;
-        
+
         // Configure the RectTransform for proper positioning.
         RectTransform textRect = simIdText.GetComponent<RectTransform>();
         textRect.anchorMin = new Vector2(0, 1);  // Top-left corner
@@ -332,11 +333,11 @@ public void ShowSimInfo()
             }
         }
 
-        objArray = tempList.ToArray(); 
+        objArray = tempList.ToArray();
 
         Debug.Log("Populated array with " + objArray.Length + " elements.");
     }
-    
+
     string CreateDataPath(params string[] pathSegments)
     {
         return Path.Combine(pathSegments.Select(SanitizeName).ToArray());
@@ -353,8 +354,8 @@ public void ShowSimInfo()
         /* Go through all agents per task and check,
          * if the agents want to be destroyed. In that case, save their data and destroy them.
          */
-        bool anyAgentsLeft = false; 
-         
+        bool anyAgentsLeft = false;
+
         Boolean record = lastSample + sampleInterval < Time.realtimeSinceStartup;
         if (record) {
             lastSample = Time.realtimeSinceStartup;
@@ -413,9 +414,17 @@ public void ShowSimInfo()
         //if (activeTasks == 0 && !allTasksCompleted) {
         //    allTasksCompleted = true;
         //}
-        
+
         if(!anyAgentsLeft && allTasksCompleted){
         Debug.Log("# No Agents Left!");
+        
+        if (saveHeatMap)
+        {
+            // Use the same base filename as the CSV, but with .png extension
+            string pngPath = path.Substring(0, path.LastIndexOf('.')) + ".png";
+            AnalyticsManager.ExportHeatMap(agentToPos, POIs, pngPath);
+        }
+
         #if UNITY_EDITOR
         EditorApplication.ExitPlaymode();  // Exit Play mode in Unity Editor
         #else
@@ -470,8 +479,8 @@ public void ShowSimInfo()
 
     // Checks for new POIs in list and adds if new.
     private void checkAndInsert(TaskScript taskScript, GameObject[] toBeChecked) {
-       for (int i = 0; i < toBeChecked.Length; i++) { 
-            
+       for (int i = 0; i < toBeChecked.Length; i++) {
+
             // If the POI is not in the list, we add it and remember which task it corresponds to.
             int index = POIs.IndexOf(toBeChecked[i]);
             if (index == -1) {
@@ -496,16 +505,16 @@ public void ShowSimInfo()
 
         // This is the path the file will be written to.
         string path = dirName + Path.DirectorySeparatorChar + fileName + "." + format;
-        
+
         // Check if specified file exists yet and if user wants to overwrite.
         if (File.Exists(path))
         {
             /* In this case we need to make the filename unique.
-             * We will achiece that by:
+             * We will achieve that by:
              * foldername + sep + filename + . + format -> foldername + sep + filename + _x + . format
              * x will be increased in case of multiple overwrites.
              */
-            
+
             // Check if there was a previous overwrite and get highest identifier.
             int id = 0;
             while (File.Exists(dirName + Path.DirectorySeparatorChar + fileName + "_" + id.ToString() + "." + format))
@@ -523,7 +532,7 @@ public void ShowSimInfo()
 
         // Find longest trajectory.
         int maxLen = 0;
-        
+
         for (int i = 0; i < agentToPos.Length; i++) {
             for (int j = 0; j < agentToPos[i].Count; j++) {
                 maxLen = agentToPos[i][j].Count > maxLen ? agentToPos[i][j].Count : maxLen;
@@ -570,7 +579,7 @@ public void ShowSimInfo()
                 line += (lastSample - agentToTime[i][j]).ToString(CultureInfo.InvariantCulture) + ";";
                 int k = 0;
                 for (; k < agentToPos[i][j].Count; k++) {
-                    line += agentToPos[i][j][k].x.ToString(CultureInfo.InvariantCulture) + ";" + 
+                    line += agentToPos[i][j][k].x.ToString(CultureInfo.InvariantCulture) + ";" +
                             agentToPos[i][j][k].y.ToString(CultureInfo.InvariantCulture) + ";" +
                             agentToPos[i][j][k].z.ToString(CultureInfo.InvariantCulture) + ";";
                 }
@@ -610,10 +619,10 @@ public void ShowSimInfo()
 
     /**
      * @brief Returns an array of collision numbers for the agent identified by taskIdx and agentIdx.
-     * 
+     *
      * @param taskIdx: Index for the task this agent belongs to.
      * @param agentIdx: Index for the agent within that task.
-     * 
+     *
      * @returns An array where each entry corresponds to the number collisions at this moment of the simulation for each
      * task.
      */
@@ -633,7 +642,7 @@ public void ShowSimInfo()
 
                 // Distance to the other agent.
                 float dist = Vector3.Distance(currAgent.transform.position, agents[t][j].transform.position);
-                
+
                 // Only count collisions if the agent is closer than the current agent's privacy radius.
                 if (dist < tasks[taskIdx].privacyRadius)
                 {
