@@ -25,6 +25,7 @@ public class AgentScript : MonoBehaviour
 {
     public TaskScript task;                         // The task this agent is pursuing.
     private NavMeshAgent navMeshAgent;              // The NavMeshAgent component of this agent.
+    private MeshRenderer meshRenderer;              // The MeshRenderer component of this agent.
 
     // Task-locations.
     private GameObject[] start;                     // The start of this agent.
@@ -72,6 +73,7 @@ public class AgentScript : MonoBehaviour
     private int needsFulfilled;                     // Number needs that this agent has already fulfilled.
     private float arrivalTime;                      // The last time the agent arrived at a POI.
     public int startIndex;
+    private NavMeshPath lastDrawnPath;              // Store the last path for drawing in pause mode
 
     // Start is called before the first frame update
     void Start()
@@ -95,6 +97,7 @@ public class AgentScript : MonoBehaviour
         // Initializing technical stuff.
         lastDisplacementTime=Time.realtimeSinceStartup;
         trajectory = new List<Vector3>();
+        lastDrawnPath = new NavMeshPath();
 
         // Initializing the state of the agent.
         poiMask = new bool[POIs.Length];
@@ -116,7 +119,8 @@ public class AgentScript : MonoBehaviour
 
         // Initializing the visualisation-related field.
         initializeAgentColor();
-        GetComponent<MeshRenderer>().material.color = agentColor;
+        meshRenderer = GetComponent<MeshRenderer>();
+        meshRenderer.material.color = agentColor;
         firstPos = hit.position;
         gradient = new Gradient();
         GradientColorKey[] colorKey = new GradientColorKey[2];
@@ -183,10 +187,6 @@ public class AgentScript : MonoBehaviour
                     throw new System.Exception($"No valid path was found to POI {currPOI}");
                 }
 
-                // TODO
-                //if (visualizePaths) {
-                //    visualizePath(path);
-                //}
                 // Setting the new path of the agent.
                 navMeshAgent.path = path;
                 choosingPOI = false;
@@ -202,8 +202,6 @@ public class AgentScript : MonoBehaviour
                 while (!navMeshAgent.CalculatePath(chosenEnd.transform.position, path)) {
                     throw new System.Exception(task.name + ": End is not located properly. Please readjust its position.");
                 }
-                // TODO
-                //visualizePath(path);
                 navMeshAgent.path = path;
                 choosingPOI = false;
                 taskCompleted = true;
@@ -212,6 +210,11 @@ public class AgentScript : MonoBehaviour
 
         // State: Agent is currently walking towards the POI.
         else if (findingPOI) {
+            
+            // Visualize path during movement
+            if (visualizePaths) {
+                visualizePath(navMeshAgent.path);
+            }
             
             // Has completed the search.
             if (hasArrivedAtPOI()) {
@@ -224,6 +227,12 @@ public class AgentScript : MonoBehaviour
 
         // State: Agent is fulfilling need.
         else if (fulfillingNeed) {
+            
+            // Visualize path while waiting at POI
+            if (visualizePaths) {
+                visualizePath(navMeshAgent.path);
+            }
+            
             if (hasFulfilledNeed()) {
                 needsFulfilled++;
                 if (!revisit) {
@@ -236,6 +245,12 @@ public class AgentScript : MonoBehaviour
 
         // State: Task is completed.
         else if (taskCompleted) {
+            
+            // Visualize path during final movement to end
+            if (visualizePaths) {
+                visualizePath(navMeshAgent.path);
+            }
+            
             if (hasArrivedAtPOI()) {
                 destroyRequest = true;
             }
@@ -317,16 +332,76 @@ public class AgentScript : MonoBehaviour
     }
 
     public void visualizePath(NavMeshPath path) {
+        // Store the path for drawing in pause mode
+        lastDrawnPath = path;
+        
+        // Determine the color based on path validity and agent selection
+        Color pathColor = GetPathColor();
+        
+        // Draw line segments for each corner of the path
         for (int i = 1; i < path.corners.Length; i++) {
-            Debug.DrawLine(path.corners[i-1] + new Vector3(0.0f, 1.0f, 0.0f), path.corners[i] + new Vector3(0.0f, 1.0f, 0.0f), Color.red, 10.0f);
+            Vector3 startPoint = path.corners[i-1] + Vector3.up * 1.0f;
+            Vector3 endPoint = path.corners[i] + Vector3.up * 1.0f;
+            
+            // Draw with duration 0 to redraw every frame, using the determined color
+            Debug.DrawLine(startPoint, endPoint, pathColor, 0.0f);
         }
     }
 
+    // Helper function to determine the path color based on path validity and selection state
+    private Color GetPathColor() {
+        Color color = agentColor;
+        
+        // Check if the path is invalid and apply blinking effect
+        if (navMeshAgent.pathStatus == NavMeshPathStatus.PathInvalid || navMeshAgent.pathStatus == NavMeshPathStatus.PathPartial) {
+            // Blink between agent color and red
+            float blinkSpeed = 1.5f; // Controls blink frequency
+            float blinkValue = Mathf.Sin(Time.time * blinkSpeed * Mathf.PI) * 0.5f + 0.5f;
+            color = Color.Lerp(agentColor, Color.red, blinkValue);
+        }
+        
+        // Check if agent is selected in editor to highlight the path
+        #if UNITY_EDITOR
+        if (UnityEditor.Selection.Contains(gameObject)) {
+            // Brighten the color when selected
+            color = Color.Lerp(color, Color.white, 0.5f);
+            // Also highlight the agent material
+            meshRenderer.material.color = Color.Lerp(agentColor, Color.white, 0.5f);
+        } else {
+            // Restore original material color when not selected
+            meshRenderer.material.color = agentColor;
+        }
+        #endif
+        
+        return color;
+    }
+    
+    /*
+    // OnDrawGizmos is called in pause mode to visualize paths
+    private void OnDrawGizmos() {
+        #if UNITY_EDITOR
+        if (lastDrawnPath != null && lastDrawnPath.corners.Length > 0) {
+            // Determine the color based on path validity and agent selection
+            Color pathColor = GetPathColor();
+            
+            // Draw line segments for each corner of the path
+            for (int i = 1; i < lastDrawnPath.corners.Length; i++) {
+                Vector3 startPoint = lastDrawnPath.corners[i-1] + Vector3.up * 1.0f;
+                Vector3 endPoint = lastDrawnPath.corners[i] + Vector3.up * 1.0f;
+                
+                // Draw gizmo line (visible in pause mode)
+                Gizmos.color = pathColor;
+                Gizmos.DrawLine(startPoint, endPoint);
+            }
+        }
+        #endif
+    }
+    */
+    
     private void displace() {
-
         // Enough time has passed such that we can attempt displacment.
         if (Time.realtimeSinceStartup >= lastDisplacementTime + displacementInterval) {
-            GetComponent<NavMeshAgent>().avoidancePriority = Random.Range(0, 99);
+            navMeshAgent.avoidancePriority = Random.Range(0, 99);
             // But only if the distance to the last position is small enough and the agent is not currently fulfilling its needs.
             if (Vector3.Distance(trajectory[trajectory.Count - 2], trajectory[trajectory.Count - 1]) < displacementDelta && !fulfillingNeed) {
 
@@ -334,7 +409,7 @@ public class AgentScript : MonoBehaviour
                 lastDisplacementTime = Time.realtimeSinceStartup;
 
                 // Add a randomized vector on the x-z plane.
-                transform.position += new Vector3(Random.value * displacement, 0.0f, Random.value * displacement);
+                transform.position += new Vector3(Random.value * displacement, 0.05f, Random.value * displacement);
             }
         }
     }
