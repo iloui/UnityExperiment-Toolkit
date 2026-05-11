@@ -43,7 +43,7 @@ public class AgentScript : MonoBehaviour
     private float agentRadius;                      // Radius from center in which no other agent can intrude.
     private float agentSpeed;                       // Speed of this agent.
 
-    // Attributes for visualisation.
+    // Attributes for visualization.
     public bool visualizeTrajectories;              // Set if you want to visualize trajectories.
     public bool visualizePaths;                     // Set if you want to visualize paths.
     public int traceLength;                         // How many past positions should be considered.
@@ -54,9 +54,9 @@ public class AgentScript : MonoBehaviour
     // Technical stuff.
     //private int failSave = 100;                     // Upper bound on the retries in a while loop to avoid infinity-loop.
     private float displacementInterval = 10.0f;      // After how many seconds should we change the agents position a bit to avoid deadlock.
-    private float displacement = 0.1f;              // In this range the x and z component of the deplacement-vector will be chosen.
+    private float displacement = 0.1f;              // In this range the x and z component of the displacement-vector will be chosen.
     public float lastDisplacementTime;                 // Last time the agent was displaced.
-    private float displacementDelta = 0.1f;         // Length of the vector that the agents needs to have travelled to not be displaced.
+    private float displacementDelta = 0.1f;         // Length of the vector that the agents needs to have traveled to not be displaced.
     public List<Vector3> trajectory;                // A list of past positions of the agent, constituting the trajectories.
     private float sampleInterval;                   // Interval that needs to pass until new location gets sampled.
     private float lastSample;                       // Last time a sample was taken.
@@ -65,7 +65,7 @@ public class AgentScript : MonoBehaviour
     // State of the agent.
     private bool choosingPOI = false;               // True: Needs to choose new POI.
     private bool findingPOI = false;                // Is currently walking towards the POI.
-    private bool fulfillingNeed = false;            // Is currently fullfilling its need.
+    private bool fulfillingNeed = false;            // Is currently fulfilling its need.
     private bool taskCompleted = false;             // Has fulfilled all needs.
     public bool destroyRequest = false;             // Indicates to the engine if this agent wants to be destroyed.
     private bool[] poiMask;                         // Masks the POIs that are invalid.
@@ -117,7 +117,7 @@ public class AgentScript : MonoBehaviour
         navMeshAgent = GetComponent<NavMeshAgent>();
         navMeshAgent.Warp(hit.position);
 
-        // Initializing the visualisation-related field.
+        // Initializing the visualization-related field.
         initializeAgentColor();
         meshRenderer = GetComponent<MeshRenderer>();
         meshRenderer.material.color = agentColor;
@@ -153,7 +153,7 @@ public class AgentScript : MonoBehaviour
 
     void Update()
     {
-         // Remembering current position and attempt to displace to avoid deadlock (only if the agents has travelled at least one update).
+         // Remembering current position and attempt to displace to avoid deadlock (only if the agents has traveled at least one update).
         trajectory.Add(transform.position);
         if (trajectory.Count > 1) {
             displace();
@@ -163,9 +163,9 @@ public class AgentScript : MonoBehaviour
 
         //TODO
         // Visualize trajectories.
-        //if (visualizeTrajectories) {
-        //    visualizeTrajectory();
-        //}
+        if (visualizeTrajectories) {
+            visualizeTrajectoryHeatMap();
+        }
 
         // State: Agent is currently choosing a new point of interest.
         if (choosingPOI) {
@@ -177,7 +177,7 @@ public class AgentScript : MonoBehaviour
                 currPOI = choosePOI();
                 NavMeshPath path = new NavMeshPath();
 
-                // Find closest point on NavMesh for current and goal location. This is necessary, as goal locations
+                // Find the closest point on NavMesh for current and goal location. This is necessary, as goal locations
                 // are not necessarily placed on NavMesh.
                 Vector3 startPos = ClosestPointOnNavMesh(transform.position);
                 Vector3 endPos = ClosestPointOnNavMesh(POIs[currPOI].transform.position);
@@ -193,7 +193,7 @@ public class AgentScript : MonoBehaviour
                 findingPOI = true;
             }
 
-            // Else we have fulfilled all needs and we can set the end as target.
+            // Else we have fulfilled all needs, and we can set the end as target.
             else {
                 NavMeshPath path = new NavMeshPath();
                 //Debug.Log("@@@#")
@@ -259,7 +259,7 @@ public class AgentScript : MonoBehaviour
     }
 
     // Returns the index of the next point of interest.
-    public int choosePOI() {
+    private int choosePOI() {
 
         // If we choose non-deterministically, we identify all valid POIs and choose one randomly.
         if (cnd) {
@@ -293,7 +293,7 @@ public class AgentScript : MonoBehaviour
     }
 
     // Checks if agent has arrived at POI.
-    public bool hasArrivedAtPOI() {
+    private bool hasArrivedAtPOI() {
 
         // Check that the path is not pending.
         bool c1 = !navMeshAgent.pathPending;
@@ -313,7 +313,7 @@ public class AgentScript : MonoBehaviour
     }
 
     // Checks if agent has fulfilled need.
-    public bool hasFulfilledNeed() {
+    private bool hasFulfilledNeed() {
         return Time.realtimeSinceStartup - arrivalTime >= poiTime;
     }
 
@@ -399,7 +399,7 @@ public class AgentScript : MonoBehaviour
     */
     
     private void displace() {
-        // Enough time has passed such that we can attempt displacment.
+        // Enough time has passed such that we can attempt displacement.
         if (Time.realtimeSinceStartup >= lastDisplacementTime + displacementInterval) {
             navMeshAgent.avoidancePriority = Random.Range(0, 99);
             // But only if the distance to the last position is small enough and the agent is not currently fulfilling its needs.
@@ -414,22 +414,81 @@ public class AgentScript : MonoBehaviour
         }
     }
 
-    // Draws trajectory of agent.
     private void visualizeTrajectory() {
-        Vector3[] trace = new Vector3[traceLength];
-        if (trajectory.Count < traceLength) {
-            for (int i = 0; i < traceLength - trajectory.Count; i++) {
-                trace[i] = firstPos;
-            }
-            for (int i = traceLength - trajectory.Count; i < traceLength; i++) {
-                trace[i] = trajectory[i - (traceLength - trajectory.Count)];
-            }
-        } else {
-            trace = trajectory.GetRange(trajectory.Count - traceLength, traceLength).ToArray();
-        }
-        lineRenderer.SetPositions(trace);
+        
     }
-
+    // Draws trajectory of agent with heatmap visualization showing dwell time at locations.
+    // Warm colors (red/yellow) indicate areas where the agent spent more time.
+    // Cool colors (blue/cyan) indicate transit corridors.
+    private void visualizeTrajectoryHeatMap() {
+        if (trajectory.Count < 2) return;
+        
+        // Determine if agent is selected for highlighting
+        #if UNITY_EDITOR
+        bool isSelected = UnityEditor.Selection.Contains(gameObject);
+        #else
+        bool isSelected = false;
+        #endif
+        
+        // Calculate dwell time at each position (how many times the agent was near it)
+        float dwellThreshold = 0.5f; // Distance threshold for considering same location
+        float[] dwellTimes = new float[trajectory.Count];
+        
+        // Korrigierte Version:
+        for (int i = 0; i < trajectory.Count; i++) {
+            int dwellCount = 0;
+            // Wir vergleichen Punkt 'i' mit allen anderen Punkten 'j'
+            for (int j = 0; j < trajectory.Count; j++) {
+                if (Vector3.Distance(trajectory[i], trajectory[j]) < dwellThreshold) {
+                    dwellCount++;
+                }
+            }
+            dwellTimes[i] = (float)dwellCount / trajectory.Count;
+        }
+        
+        // Find max dwell time for normalization
+        float maxDwellTime = Mathf.Max(dwellTimes);
+        if (maxDwellTime == 0) maxDwellTime = 1f;
+        
+        // Draw the complete trajectory with heatmap coloring
+        for (int i = 1; i < trajectory.Count; i++) {
+            Vector3 startPoint = trajectory[i-1] + Vector3.up * 1.0f;
+            Vector3 endPoint = trajectory[i] + Vector3.up * 1.0f;
+            
+            // Calculate heatmap color based on average dwell time of the two points
+            float avgDwell = (dwellTimes[i-1] + dwellTimes[i]) / 2.0f;
+            float normalizedDwell = avgDwell / maxDwellTime;
+            
+            // Create heatmap color: Blue (low dwell) -> Green -> Yellow -> Red (high dwell)
+            Color heatmapColor = GetHeatmapColor(normalizedDwell, agentColor);
+            
+            // Highlight when agent is selected
+            if (isSelected) {
+                heatmapColor = Color.Lerp(heatmapColor, Color.white, 0.4f);
+            }
+            
+            // Draw line with slight transparency (duration 0 for continuous redraw)
+            Debug.DrawLine(startPoint, endPoint, heatmapColor, 0.0f);
+        }
+    }
+    
+    // Helper function to convert normalized dwell time (0-1) to a heatmap color
+    private Color GetHeatmapColor(float normalizedDwell, Color baseColor) {
+        if (normalizedDwell < 0.25f) {
+            // Cool: Blue/Cyan - transit corridors
+            return Color.Lerp(new Color(0.0f, 0.5f, 1.0f), new Color(0.0f, 1.0f, 1.0f), normalizedDwell * 4f);
+        } else if (normalizedDwell < 0.5f) {
+            // Green - moderate dwell time
+            return Color.Lerp(new Color(0.0f, 1.0f, 1.0f), new Color(0.0f, 1.0f, 0.0f), (normalizedDwell - 0.25f) * 4f);
+        } else if (normalizedDwell < 0.75f) {
+            // Yellow - higher dwell time
+            return Color.Lerp(new Color(0.0f, 1.0f, 0.0f), new Color(1.0f, 1.0f, 0.0f), (normalizedDwell - 0.5f) * 4f);
+        } else {
+            // Red/Orange - hotspots (long dwell times)
+            return Color.Lerp(new Color(1.0f, 1.0f, 0.0f), new Color(1.0f, 0.0f, 0.0f), (normalizedDwell - 0.75f) * 4f);
+        }
+    }
+    
     // Modifies agent color.
     private void initializeAgentColor() {
         Color taskColor = task.taskColor;
