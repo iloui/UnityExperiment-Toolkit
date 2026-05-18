@@ -4,6 +4,7 @@ using TMPro;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+using Assets.Scripts.DataRecording;
 using Random = UnityEngine.Random;
 
 namespace Assets.Scripts

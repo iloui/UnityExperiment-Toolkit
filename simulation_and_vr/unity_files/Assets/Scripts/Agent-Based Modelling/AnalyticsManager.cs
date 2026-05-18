@@ -32,7 +32,17 @@ public static class AnalyticsManager
         cam.farClipPlane = clipAbove + clipBelow;
 
         // Set orthographic size to fit bounds
-        cam.orthographicSize = Mathf.Max(bounds.extents.x, bounds.extents.z);
+        float boundsAspect = bounds.size.x / bounds.size.z;
+        if (boundsAspect > 1f)
+        {
+            // Width is larger, fit based on extents.x
+            cam.orthographicSize = bounds.extents.x;
+        }
+        else
+        {
+            // Depth is larger, fit based on extents.z
+            cam.orthographicSize = bounds.extents.z;
+        }
         
         // 3. Render Floorplan to Texture
         int res = 2048;
@@ -149,8 +159,9 @@ public static class AnalyticsManager
     {
         // Convert world to pixel coords
         float camSize = cam.orthographicSize;
-        Vector2 start = WorldToPixel(p1, bounds.center, camSize, res);
-        Vector2 end = WorldToPixel(p2, bounds.center, camSize, res);
+        float boundsAspect = bounds.size.x / bounds.size.z;
+        Vector2 start = WorldToPixel(p1, bounds.center, camSize, res, boundsAspect);
+        Vector2 end = WorldToPixel(p2, bounds.center, camSize, res, boundsAspect);
 
         // Simple Bresenham-like line drawing
         int steps = Mathf.CeilToInt(Vector2.Distance(start, end) * 2); // Over-sample for continuity
@@ -181,7 +192,8 @@ public static class AnalyticsManager
     private static void DrawPOIMarker(Color[] pixels, int res, Bounds bounds, Camera cam, Vector3 pos, Color color)
     {
         float camSize = cam.orthographicSize;
-        Vector2 pixelPos = WorldToPixel(pos, bounds.center, camSize, res);
+        float boundsAspect = bounds.size.x / bounds.size.z;
+        Vector2 pixelPos = WorldToPixel(pos, bounds.center, camSize, res, boundsAspect);
         int px = Mathf.RoundToInt(pixelPos.x);
         int py = Mathf.RoundToInt(pixelPos.y);
 
@@ -205,11 +217,20 @@ public static class AnalyticsManager
         }
     }
 
-    private static Vector2 WorldToPixel(Vector3 pos, Vector3 center, float orthSize, int res)
+    private static Vector2 WorldToPixel(Vector3 pos, Vector3 center, float orthSize, int res, float boundsAspect)
     {
-        float x = (pos.x - (center.x - orthSize)) / (orthSize * 2);
-        float z = (pos.z - (center.z - orthSize)) / (orthSize * 2);
-        return new Vector2(x * res, z * res);
+        if (boundsAspect > 1f)
+        {
+            float x = (pos.x - (center.x - orthSize)) / (orthSize * 2);
+            float z = (pos.z - (center.z - orthSize / boundsAspect)) / (orthSize * 2 / boundsAspect);
+            return new Vector2(x * res, z * res);
+        }
+        else
+        {
+            float x = (pos.x - (center.x - orthSize * boundsAspect)) / (orthSize * 2 * boundsAspect);
+            float z = (pos.z - (center.z - orthSize)) / (orthSize * 2);
+            return new Vector2(x * res, z * res);
+        }
     }
 
     private static Color GetHeatmapColor(float normDwell)
@@ -224,6 +245,17 @@ public static class AnalyticsManager
     {
         Bounds b = new Bounds();
         bool initialized = false;
+
+        // First encapsulate all geometry in the scene to get the full building dimensions
+        Renderer[] allRenderers = Object.FindObjectsOfType<Renderer>();
+        foreach (Renderer r in allRenderers)
+        {
+            if (r.gameObject.activeInHierarchy)
+            {
+                if (!initialized) { b.center = r.bounds.center; b.size = r.bounds.size; initialized = true; }
+                else b.Encapsulate(r.bounds);
+            }
+        }
 
         foreach (var taskList in agentPositions)
         {

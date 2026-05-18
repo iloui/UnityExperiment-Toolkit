@@ -9,7 +9,7 @@ using UnityEngine.Networking;
 using UnityTools.Components;
 using System.Text.RegularExpressions;
 
-namespace Assets.Scripts
+namespace Assets.Scripts.DataRecording
 {
     public class DataUploadHandler
     {
@@ -136,6 +136,15 @@ namespace Assets.Scripts
             builder.Append(Prepare(entry.ViewAzimuth));
             builder.Append(',');
             builder.Append(Prepare(entry.ViewElevation));
+            if (entry.ObservationSpace != null && entry.ObservationSpace.Length > 0)
+            {
+                builder.Append(',');
+                for (int i = 0; i < entry.ObservationSpace.Length; i++)
+                {
+                    builder.Append(Prepare(entry.ObservationSpace[i]));
+                    if (i < entry.ObservationSpace.Length - 1) builder.Append(';');
+                }
+            }
             builder.AppendLine();
 
             var chars = new char[builder.Length];
@@ -271,7 +280,7 @@ namespace Assets.Scripts
             activeRequests.Add(request);
             // TODO, does it need to yield "request.SendWebRequest()"
             // TODO Similar code code be reused from other parts
-            if (request.isNetworkError || request.isHttpError)
+            if (request.result == UnityWebRequest.Result.ConnectionError || request.result == UnityWebRequest.Result.ProtocolError)
             {
                 Debug.Log(request.error);
             }
@@ -283,11 +292,11 @@ namespace Assets.Scripts
             {
                 var request = activeRequests[i];
 
-                if (request.isNetworkError)
+                if (request.result == UnityWebRequest.Result.ConnectionError)
                 {
                     Debug.Log("Network error while sending: " + request.error);
                 }
-                else if (request.isHttpError)
+                else if (request.result == UnityWebRequest.Result.ProtocolError)
                 {
                     Debug.Log("Http error while sending: " + request.error);
                 }
