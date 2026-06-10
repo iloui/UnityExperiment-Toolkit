@@ -169134,6 +169134,11 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 1410823295791616019, guid: 4fc5ddad70a48434db7b299a1e2b909d,
         type: 3}
+      propertyPath: AutoStartForTesting
+      value: 1
+      objectReference: {fileID: 0}
+    - target: {fileID: 1410823295791616019, guid: 4fc5ddad70a48434db7b299a1e2b909d,
+        type: 3}
       propertyPath: ArchitectureLayerMask.m_Bits
       value: 4294967295
       objectReference: {fileID: 0}
