@@ -77615,7 +77615,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 915274420}
-  m_Enabled: 0
+  m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: c2a0329a2f5adbb44ac23a18e928d611, type: 3}
   m_Name: 
@@ -125246,6 +125246,12 @@ Transform:
     type: 3}
   m_PrefabInstance: {fileID: 1256837487}
   m_PrefabAsset: {fileID: 0}
+--- !u!20 &1257163991 stripped
+Camera:
+  m_CorrespondingSourceObject: {fileID: 1410823295836523291, guid: 4fc5ddad70a48434db7b299a1e2b909d,
+    type: 3}
+  m_PrefabInstance: {fileID: 1885409176}
+  m_PrefabAsset: {fileID: 0}
 --- !u!23 &1258490113
 MeshRenderer:
   m_ObjectHideFlags: 0
@@ -148182,7 +148188,7 @@ Transform:
   m_GameObject: {fileID: 1446305618}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 5.27, y: 6.06, z: -24.36}
+  m_LocalPosition: {x: 18.65, y: 7.07, z: -22.36}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -169129,9 +169135,24 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 1410823295791616019, guid: 4fc5ddad70a48434db7b299a1e2b909d,
         type: 3}
+      propertyPath: m_Enabled
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 1410823295791616019, guid: 4fc5ddad70a48434db7b299a1e2b909d,
+        type: 3}
+      propertyPath: MainVRCamera
+      value: 
+      objectReference: {fileID: 1257163991}
+    - target: {fileID: 1410823295791616019, guid: 4fc5ddad70a48434db7b299a1e2b909d,
+        type: 3}
       propertyPath: EnableDebugRays
       value: 1
       objectReference: {fileID: 0}
+    - target: {fileID: 1410823295791616019, guid: 4fc5ddad70a48434db7b299a1e2b909d,
+        type: 3}
+      propertyPath: CurrentPOITarget
+      value: 
+      objectReference: {fileID: 1446305619}
     - target: {fileID: 1410823295791616019, guid: 4fc5ddad70a48434db7b299a1e2b909d,
         type: 3}
       propertyPath: AutoStartForTesting
