@@ -83,7 +83,7 @@ namespace Agent_Based_Modelling
         private bool isModelLoaded = false;
         private object modelLock = new object(); // Structural lock safeguarding background hot-swapping threads
 
-        [Header("Automated Python Lifecycle Pipeline (Option A)")]
+        [Header("Automated Python Lifecycle Pipeline")]
         [Tooltip("Absolute path to your python executable (e.g. C:/miniconda3/envs/ml/python.exe)")]
         public string PythonExecutablePath = "python";
         [Tooltip("Absolute path to your Python fine-tuning script.")]
@@ -92,7 +92,7 @@ namespace Agent_Based_Modelling
         public string OutputOnnxModelPath = "C:/Project/Assets/Models/ImitationAgentModel.onnx";
 
         private bool isRetrainingBackgroundActive = false;
-        private string pendingHotSwapModelPath = "";
+        private DateTime lastModelWriteTime; // Option A: Tracks the file system write timestamp
 
         // Trajectory Mechanics
         public List<Vector3> trajectory;
@@ -188,6 +188,16 @@ namespace Agent_Based_Modelling
             {
                 Debug.LogWarning("ImitationAgent: No initial Baseline Model Asset assigned! Running on mock fallback until hot-swapped.");
             }
+
+            // Cache the initial timestamp of the target model file if it already exists
+            if (File.Exists(OutputOnnxModelPath))
+            {
+                lastModelWriteTime = File.GetLastWriteTime(OutputOnnxModelPath);
+            }
+            else
+            {
+                lastModelWriteTime = DateTime.MinValue;
+            }
         }
 
         void Update()
@@ -197,7 +207,7 @@ namespace Agent_Based_Modelling
 
             EvaluateStateSequencer();
             CaptureCurrentObservations();
-            CheckForPendingModelHotSwaps();
+            CheckForPendingModelHotSwaps(); // Constantly checks disk modification timestamp
 
             if (stateHistoryQueue.Count == TemporalWindowSize)
             {
@@ -283,9 +293,11 @@ namespace Agent_Based_Modelling
                 float vAngle = (((ImageHeight > 1) ? ((float)y / (ImageHeight - 1)) - 0.5f : 0f)) * fovRadV;
                 for (int x = 0; x < ImageWidth; x++)
                 {
+                    // Fixed clean math:
                     float hAngle = (((ImageWidth > 1) ? ((float)x / (ImageWidth - 1)) - 0.5f : 0f)) * fovRadH;
+        
                     Vector3 localDir = new Vector3(Mathf.Tan(hAngle), Mathf.Tan(vAngle), 1.0f).normalized;
-                    
+        
                     rayCommands[index] = new RaycastCommand(
                         origin, 
                         AgentHeadAnchor.TransformDirection(localDir), 
@@ -345,18 +357,17 @@ namespace Agent_Based_Modelling
                     }
                 }
 
-                // 2. Sentis 2.0+ Tensor Allocation: Allocation uses the new explicit generic class structure.
+                // 2. Sentis Tensor Allocation
                 TensorShape tensorShape = new TensorShape(1, totalSensoryInputs);
                 using (Tensor<float> sensoryTensor = new Tensor<float>(tensorShape, flattenedFeatureArray)) 
                 {
-                    // 3. Inference Execution: worker.Execute() is now worker.Schedule()
+                    // 3. Inference Execution
                     inferenceEngine.Schedule(sensoryTensor);
                     
-                    // 4. Retrieve Actions Safely via Output download
+                    // 4. Retrieve Actions Safely
                     var outputTensor = inferenceEngine.PeekOutput() as Tensor<float>;
                     if (outputTensor != null)
                     {
-                        // In Sentis 2.0+, DownloadToArray() downloads from GPU safely and creates/returns an array
                         float[] outputData = outputTensor.DownloadToArray();
                         
                         networkForwardAction = outputData[0]; 
@@ -418,11 +429,7 @@ namespace Agent_Based_Modelling
                         string error = process.StandardError.ReadToEnd();
                         process.WaitForExit();
 
-                        if (process.ExitCode == 0)
-                        {
-                            pendingHotSwapModelPath = OutputOnnxModelPath;
-                        }
-                        else
+                        if (process.ExitCode != 0)
                         {
                             Debug.LogError($"ImitationAgent Python Pipeline Error: {error}");
                         }
@@ -439,30 +446,45 @@ namespace Agent_Based_Modelling
             });
         }
 
+        /// <summary>
+        /// Option A Implementation: Proactively monitors the target model's file metadata
+        /// on disk every frame. Intercepts modifications automatically from any source.
+        /// </summary>
         private void CheckForPendingModelHotSwaps()
         {
-            if (!string.IsNullOrEmpty(pendingHotSwapModelPath))
+            if (File.Exists(OutputOnnxModelPath))
             {
-                if (File.Exists(pendingHotSwapModelPath))
+                try
                 {
-                    lock (modelLock)
-                    {
-                        if (inferenceEngine != null) inferenceEngine.Dispose();
+                    DateTime currentWriteTime = File.GetLastWriteTime(OutputOnnxModelPath);
 
-                        try
+                    if (currentWriteTime > lastModelWriteTime)
+                    {
+                        // Instantly update variable to prevent duplicate hot-swap triggers on subsequent frames
+                        lastModelWriteTime = currentWriteTime;
+
+                        lock (modelLock)
                         {
-                            runtimeModel = ModelLoader.Load(pendingHotSwapModelPath);
+                            if (inferenceEngine != null) inferenceEngine.Dispose();
+
+                            // Sentis direct file-path model compilation
+                            runtimeModel = ModelLoader.Load(OutputOnnxModelPath);
                             inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute);
                             isModelLoaded = true;
-                            Debug.Log($"SUCCESS: Silent hot-swap completed! Path: {pendingHotSwapModelPath}");
-                        }
-                        catch (Exception ex)
-                        {
-                            Debug.LogError($"ImitationAgent: Hot-Swap loading failed on main frame boundary: {ex.Message}");
+                            
+                            Debug.Log($"[HOT-SWAP SUCCESS] Intercepted new NN file modification! Silent hot-swap completed. Path: {OutputOnnxModelPath}");
                         }
                     }
                 }
-                pendingHotSwapModelPath = ""; 
+                catch (IOException)
+                {
+                    // Catching sharing violations (e.g. if Python is still dumping/finalizing bytes to disk).
+                    // The loop safely defers the hot-swap to the next frame when the file handles unlock.
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"ImitationAgent: Hot-Swap loading failed on frame boundary: {ex.Message}");
+                }
             }
         }
 

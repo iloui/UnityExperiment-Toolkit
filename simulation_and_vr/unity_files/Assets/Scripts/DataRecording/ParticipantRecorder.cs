@@ -92,6 +92,13 @@ namespace Assets.Scripts.DataRecording
                 csvWriter.Flush();
                 csvWriter.Close();
                 csvWriter = null;
+                
+                // --------------------------------------------------------------------------
+                // LIFECYCLE AUTOMATION TRIGGER HOOK
+                // --------------------------------------------------------------------------
+                // The file is officially saved and closed. We can now pass it safely 
+                // to our local Python pipeline script without data collisions!
+                TriggerPythonPipeline(currentCsvPath);
             }
 
             if (rayCommands.IsCreated) rayCommands.Dispose();
@@ -100,6 +107,55 @@ namespace Assets.Scripts.DataRecording
             if (hiddenCaptureCamera != null) Destroy(hiddenCaptureCamera.gameObject);
             if (colorRenderTexture != null) colorRenderTexture.Release();
             if (colorReadbackTex != null) Destroy(colorReadbackTex);
+        }
+
+        /// <summary>
+        /// Spawns an asynchronous background worker thread to execute the Python script.
+        /// This prevents your VR scene or active agent simulation from freezing during training.
+        /// </summary>
+        private void TriggerPythonPipeline(string savedCsvPath)
+        {
+            // Define your project file structure configurations here
+            string pythonExe = "python"; // or path to your custom miniconda/venv binary
+            string pythonScript = "C:/Project/ML/incremental_train.py";
+            string targetOnnxOutput = "C:/Project/Assets/Models/ImitationAgentModel.onnx";
+
+            Debug.Log($"[Lifecycle Engine] Human data finalized. Launching training pipeline for: {savedCsvPath}");
+
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    System.Diagnostics.ProcessStartInfo startInfo = new System.Diagnostics.ProcessStartInfo();
+                    startInfo.FileName = pythonExe;
+                    // Passes the explicit, newly generated file string as an argument
+                    startInfo.Arguments = $"\"{pythonScript}\" --csv_input \"{savedCsvPath}\" --model_output \"{targetOnnxOutput}\"";
+                    startInfo.UseShellExecute = false;
+                    startInfo.RedirectStandardOutput = true;
+                    startInfo.RedirectStandardError = true;
+                    startInfo.CreateNoWindow = true;
+
+                    using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(startInfo))
+                    {
+                        string output = process.StandardOutput.ReadToEnd();
+                        string error = process.StandardError.ReadToEnd();
+                        process.WaitForExit();
+
+                        if (process.ExitCode == 0)
+                        {
+                            Debug.Log($"[Lifecycle Engine] SUCCESS: Model fine-tuned and exported back to: {targetOnnxOutput}");
+                        }
+                        else
+                        {
+                            Debug.LogError($"[Lifecycle Engine] Python Error: {error}");
+                        }
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogError($"[Lifecycle Engine] Pipeline Exception: {ex.Message}");
+                }
+            });
         }
 
         private void InitializeHardwareReplication()
