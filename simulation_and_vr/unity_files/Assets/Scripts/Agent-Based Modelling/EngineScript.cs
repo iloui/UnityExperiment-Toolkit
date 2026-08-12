@@ -32,6 +32,15 @@ using UnityEditor;
 
 public class EngineScript : MonoBehaviour
 {
+    public enum AgentSimulationMode { RuleBasedNavMesh, ImitationLearning }
+
+    [Header("Simulation Core Configuration")]
+    [Tooltip("Choose whether to power agents with traditional NavMesh paths or the ONNX Neural Network.")]
+    public AgentSimulationMode simulationMode = AgentSimulationMode.RuleBasedNavMesh;
+
+    [Tooltip("Assign the default ONNX model asset if using Imitation Learning mode.")]
+    public Unity.Sentis.ModelAsset defaultBaselineModel;
+
     private TaskScript[] tasks;                     // The list of tasks that are active on this object.
 
     // State of the engine.
@@ -91,8 +100,6 @@ public class EngineScript : MonoBehaviour
             Time.timeScale = 1.0f;
             QualitySettings.vSyncCount = 0;
             Application.targetFrameRate = -1; // Unlimited frame rate
-            // foreach (Camera cam in Camera.allCameras)
-            //     cam.enabled = false;
 
             // Load external configuration if it exists
             TaskScript[] c_tasks = GetComponents<TaskScript>();
@@ -152,8 +159,6 @@ public class EngineScript : MonoBehaviour
             }
         }
 
-        //
-
         // Collect all POIs.
         POIs = new List<GameObject>();
         taskPerPOI = new List<List<TaskScript>>();
@@ -203,10 +208,9 @@ public class EngineScript : MonoBehaviour
         if (string.IsNullOrEmpty(colorString))
         {
             Debug.LogWarning("Color string is empty, defaulting to black.");
-            return Color.black; // Default color if empty
+            return Color.black;
         }
 
-        // HEX format (e.g., "#FF5733")
         if (colorString.StartsWith("#"))
         {
             if (ColorUtility.TryParseHtmlString(colorString, out Color hexColor))
@@ -214,8 +218,6 @@ public class EngineScript : MonoBehaviour
                 return hexColor;
             }
         }
-
-        // RGB format (e.g., "255,128,0")
         else if (colorString.Contains(","))
         {
             string[] rgb = colorString.Split(',');
@@ -227,8 +229,6 @@ public class EngineScript : MonoBehaviour
                 return new Color(r / 255f, g / 255f, b / 255f);
             }
         }
-
-        // Named color format (e.g., "red", "blue", "yellow")
         else
         {
             Dictionary<string, Color> namedColors = new Dictionary<string, Color>(StringComparer.OrdinalIgnoreCase)
@@ -256,68 +256,61 @@ public class EngineScript : MonoBehaviour
         }
 
         Debug.LogWarning($"Invalid color format: {colorString}, defaulting to white.");
-        return Color.black; // Fallback color
+        return Color.black;
     }
 
-public void ShowSimInfo()
+    public void ShowSimInfo()
     {
-        // Create a new Canvas GameObject.
         GameObject canvasObj = new GameObject("HUDCanvas");
         Canvas canvas = canvasObj.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.ScreenSpaceCamera;
 
-        // Add a CanvasScaler for responsive UI scaling.
         CanvasScaler scaler = canvasObj.AddComponent<CanvasScaler>();
         scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
         scaler.referenceResolution = new Vector2(800, 600);
 
-        // Ensure the Canvas fills the entire screen.
         RectTransform canvasRect = canvasObj.GetComponent<RectTransform>();
         canvasRect.anchorMin = Vector2.zero;
         canvasRect.anchorMax = Vector2.one;
         canvasRect.offsetMin = Vector2.zero;
         canvasRect.offsetMax = Vector2.zero;
 
-        // Create a new GameObject for the Text element.
         GameObject textObj = new GameObject("SimIdText");
         textObj.transform.SetParent(canvasObj.transform);
 
-        // Add the Text component and set its properties.
         Text simIdText = textObj.AddComponent<Text>();
         simIdText.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
         simIdText.fontSize = 24;
         simIdText.alignment = TextAnchor.UpperLeft;
         simIdText.color = Color.white;
 
-        // Configure the RectTransform for proper positioning.
         RectTransform textRect = simIdText.GetComponent<RectTransform>();
-        textRect.anchorMin = new Vector2(0, 1);  // Top-left corner
+        textRect.anchorMin = new Vector2(0, 1);
         textRect.anchorMax = new Vector2(0, 1);
         textRect.pivot = new Vector2(0, 1);
-        textRect.anchoredPosition = new Vector2(10, -10); // 10 pixels offset from top-left
+        textRect.anchoredPosition = new Vector2(10, -10);
         textRect.sizeDelta = new Vector2(400, 100);
 
-        // Display the simId value.
-        simIdText.text = "simId: " + ConfigManager.Instance.Config.simId;
+        if (ConfigManager.Instance != null && ConfigManager.Instance.Config != null)
+        {
+            simIdText.text = "simId: " + ConfigManager.Instance.Config.simId;
+        }
     }
-
-
 
     public void PopulateObjectArray(string allObjectNames, out GameObject[] objArray)
     {
         List<GameObject> tempList = new List<GameObject>();
+        string[] names = allObjectNames.Split(',');
 
-        string[] names = allObjectNames.Split(','); // Split string by comma
-
-        foreach (string objectName in names) // loop over names
+        foreach (string objectName in names)
         {
-            string trimmedName = objectName.Trim(); // Remove extra spaces
+            string trimmedName = objectName.Trim();
             GameObject targetObject = GameObject.Find(trimmedName);
 
             if (targetObject == null)
             {
                 Debug.LogWarning("Object not found: " + trimmedName);
-                continue; // Skip to the next name instead of returning immediately
+                continue;
             }
 
             if (targetObject.transform.childCount > 0)
@@ -329,12 +322,11 @@ public void ShowSimInfo()
             }
             else
             {
-                tempList.Add(targetObject); // No children, add only the object itself
+                tempList.Add(targetObject);
             }
         }
 
         objArray = tempList.ToArray();
-
         Debug.Log("Populated array with " + objArray.Length + " elements.");
     }
 
@@ -351,21 +343,33 @@ public void ShowSimInfo()
     // Update is called once per frame
     void Update()
     {
-        /* Go through all agents per task and check,
-         * if the agents want to be destroyed. In that case, save their data and destroy them.
-         */
         bool anyAgentsLeft = false;
 
-        Boolean record = lastSample + sampleInterval < Time.realtimeSinceStartup;
+        bool record = lastSample + sampleInterval < Time.realtimeSinceStartup;
         if (record) {
             lastSample = Time.realtimeSinceStartup;
         }
+
         for (int i = 0; i < agents.Length; i++) {
             for (int j = 0; j < agents[i].Count; j++) {
-                AgentScript currAgent = agents[i][j].GetComponent<AgentScript>();
                 GameObject currAgentHolder = agents[i][j];
-                int containerIdx = currAgent.startIndex;
-                //Debug.Log("# i: "+i+" j:"+j+" - "+currAgentHolder.transform.position);
+                int containerIdx = 0;
+                bool destroyRequest = false;
+
+                // Branch information lookup depending on active simulation driver model
+                if (simulationMode == AgentSimulationMode.RuleBasedNavMesh)
+                {
+                    AgentScript currAgent = currAgentHolder.GetComponent<AgentScript>();
+                    containerIdx = currAgent.startIndex;
+                    destroyRequest = currAgent.destroyRequest;
+                }
+                else if (simulationMode == AgentSimulationMode.ImitationLearning)
+                {
+                    Agent_Based_Modelling.ImitationAgent currAgent = currAgentHolder.GetComponent<Agent_Based_Modelling.ImitationAgent>();
+                    containerIdx = currAgent.startIndex;
+                    destroyRequest = currAgent.destroyRequest;
+                }
+
                 if (record) {
                     agentToPos[i][containerIdx].Add(currAgentHolder.transform.position);
                     agentToColl[i][containerIdx] += collisions(currAgentHolder, i, j);
@@ -375,12 +379,13 @@ public void ShowSimInfo()
                         agentToAllColl[i][j][t] += cs[t];
                     }
                 }
-                if (currAgent.destroyRequest) {
+
+                if (destroyRequest) {
                     Destroy(agents[i][j]);
                     agents[i].RemoveAt(j);
                     j--;
                 } else {
-                    anyAgentsLeft = true; // At least one agent is still active
+                    anyAgentsLeft = true; 
                 }
             }
         }
@@ -388,7 +393,6 @@ public void ShowSimInfo()
         // Go through all tasks.
         for (int i = 0; i < tasks.Length; i++) {
             activeTasks = 0;
-            // Check if we need to spawn a new agent for this task.
             if (tasks[i].agentsSpawned < tasks[i].numberOfAgents) {
                 activeTasks++;
                 if ((Time.realtimeSinceStartup - startTime)  > tasks[i].agentsSpawned * tasks[i].spawnInterval) {
@@ -400,36 +404,28 @@ public void ShowSimInfo()
                     agentToTime[i].Add(Time.realtimeSinceStartup);
                     agentToAllColl[i].Add(new int[tasks.Length]);
                     tasks[i].agentsSpawned++;
-                    anyAgentsLeft = true; // A new agent has been added
+                    anyAgentsLeft = true;
 
                 }
-            }else {
-                //TODO
+            } else {
                 allTasksCompleted = true;
             }
         }
 
-
-        // If there are no more active tasks, we can stop the simulation.
-        //if (activeTasks == 0 && !allTasksCompleted) {
-        //    allTasksCompleted = true;
-        //}
-
         if(!anyAgentsLeft && allTasksCompleted){
-        Debug.Log("# No Agents Left!");
-        
-        if (saveHeatMap)
-        {
-            // Use the same base filename as the CSV, but with .png extension
-            string pngPath = path.Substring(0, path.LastIndexOf('.')) + ".png";
-            AnalyticsManager.ExportHeatMap(agentToPos, POIs, pngPath);
-        }
+            Debug.Log("# No Agents Left!");
+            
+            if (saveHeatMap)
+            {
+                string pngPath = path.Substring(0, path.LastIndexOf('.')) + ".png";
+                AnalyticsManager.ExportHeatMap(agentToPos, POIs, pngPath);
+            }
 
-        #if UNITY_EDITOR
-        EditorApplication.ExitPlaymode();  // Exit Play mode in Unity Editor
-        #else
-        Application.Quit();  // Quit application in standalone build
-        #endif
+            #if UNITY_EDITOR
+            EditorApplication.ExitPlaymode();
+            #else
+            Application.Quit();
+            #endif
         }
     }
 
@@ -439,57 +435,58 @@ public void ShowSimInfo()
 
     // Spawns an agent from a task.
     private GameObject SpawnAgent(TaskScript task, int startIdx) {
-
         if (task == null)
         {
             Debug.LogError("Error: Trying to spawn an agent without a task assigned.");
             return null;
         }
 
-        // Create the GameObject that will be the agent.
         GameObject agent = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-
-        // Apply a material in the with the color of the specific task.
-        //Shader shader = Shader.Find("Standard");
         Shader shader = Shader.Find("Diffuse");
-        //Debug.Log(shader != null ? "Shader found!" : "Shader is null!");
-        //Material material = new Material(Shader.Find("Diffuse"));
         Material material = new Material(shader);
         material.color = task.taskColor;
         agent.GetComponent<MeshRenderer>().material = material;
 
-        // Set the position to somewhere on the NavMesh, else Unity complains about NavMeshAgent component being added
-        // despite the agent being far away from the NavMesh.
         NavMeshHit hit;
         NavMesh.SamplePosition(agent.transform.position, out hit, 1000.0f, NavMesh.AllAreas);
         agent.transform.position = hit.position;
 
-        // Add the necessary components to execute the task.
-        agent.AddComponent<NavMeshAgent>();
-        agent.AddComponent<AgentScript>();
+        // Configure dynamic script execution attachment setup
+        if (simulationMode == AgentSimulationMode.RuleBasedNavMesh)
+        {
+            agent.AddComponent<NavMeshAgent>();
+            AgentScript scriptInstance = agent.AddComponent<AgentScript>();
 
-        // Set the attributes of the agent.
-        agent.GetComponent<AgentScript>().task = task;
-        agent.GetComponent<AgentScript>().traceLength = traceLength;
-        agent.GetComponent<AgentScript>().visualizePaths = visualizePaths;
-        agent.GetComponent<AgentScript>().visualizeTrajectories = visualizeTrajectories;
-        agent.GetComponent<AgentScript>().startIndex = startIdx;
+            scriptInstance.task = task;
+            scriptInstance.traceLength = traceLength;
+            scriptInstance.visualizePaths = visualizePaths;
+            scriptInstance.visualizeTrajectories = visualizeTrajectories;
+            scriptInstance.startIndex = startIdx;
+        }
+        else if (simulationMode == AgentSimulationMode.ImitationLearning)
+        {
+            Agent_Based_Modelling.ImitationAgent scriptInstance = agent.AddComponent<Agent_Based_Modelling.ImitationAgent>();
+
+            scriptInstance.task = task;
+            scriptInstance.TemporalWindowSize = 3;
+            if (defaultBaselineModel != null)
+            {
+                scriptInstance.BaselineModelAsset = defaultBaselineModel;
+            }
+            scriptInstance.startIndex = startIdx; 
+        }
+
         return agent;
     }
 
-    // Checks for new POIs in list and adds if new.
     private void checkAndInsert(TaskScript taskScript, GameObject[] toBeChecked) {
        for (int i = 0; i < toBeChecked.Length; i++) {
-
-            // If the POI is not in the list, we add it and remember which task it corresponds to.
             int index = POIs.IndexOf(toBeChecked[i]);
             if (index == -1) {
                 POIs.Add(toBeChecked[i]);
                 taskPerPOI.Add(new List<TaskScript>());
                 taskPerPOI[taskPerPOI.Count - 1].Add(taskScript);
             }
-
-            // Else it could still be that it gets referenced in a different task.
             else {
                 if (!taskPerPOI[index].Contains(taskScript)) {
                     taskPerPOI[index].Add(taskScript);
@@ -500,57 +497,32 @@ public void ShowSimInfo()
 
     string makeFileNameUnique(string dirName, string fileName, string format)
     {
-        // Create directory if does not exist.
         Directory.CreateDirectory(dirName);
-
-        // This is the path the file will be written to.
         string path = dirName + Path.DirectorySeparatorChar + fileName + "." + format;
 
-        // Check if specified file exists yet and if user wants to overwrite.
         if (File.Exists(path))
         {
-            /* In this case we need to make the filename unique.
-             * We will achieve that by:
-             * foldername + sep + filename + . + format -> foldername + sep + filename + _x + . format
-             * x will be increased in case of multiple overwrites.
-             */
-
-            // Check if there was a previous overwrite and get highest identifier.
             int id = 0;
             while (File.Exists(dirName + Path.DirectorySeparatorChar + fileName + "_" + id.ToString() + "." + format))
             {
                 id++;
             }
-
-            // Now we have found a unique identifier and create the new name.
             path = dirName + Path.DirectorySeparatorChar + fileName + "_" + id.ToString() + "." + format;
         }
         return path;
     }
 
     void OnDestroy() {
-
-        // Find longest trajectory.
         int maxLen = 0;
-
         for (int i = 0; i < agentToPos.Length; i++) {
             for (int j = 0; j < agentToPos[i].Count; j++) {
                 maxLen = agentToPos[i][j].Count > maxLen ? agentToPos[i][j].Count : maxLen;
             }
         }
 
-        // For each agent, create a new line.
         List<string> lines = new List<string>();
+        string header = "AgentType;TaskName;Distance;Collisions;";
 
-        // Create header-line.
-        string header = "";
-        header += "AgentType;";
-        header += "TaskName;";
-        header += "Distance;";
-        header += "Collisions;";
-
-        // Add new columns for each combination of possible collisions. Each column corresponds to the other agent group
-        // the current agent was colliding with.
         for (int t = 0; t < tasks.Length; t++)
         {
             header += "Collisions_" + tasks[t].taskName + ";";
@@ -593,23 +565,55 @@ public void ShowSimInfo()
             }
         }
 
-        File.WriteAllLines(path, lines);
+        if (!string.IsNullOrEmpty(path))
+        {
+            File.WriteAllLines(path, lines);
+        }
         Debug.Log("# DONE!");
     }
 
     private int collisions(GameObject refAgent, int I, int J) {
         int collCount = 0;
+        float refPrivacyRadius = 1.0f;
+        string refAgentType = "";
+
+        if (simulationMode == AgentSimulationMode.RuleBasedNavMesh)
+        {
+            var s = refAgent.GetComponent<AgentScript>();
+            refPrivacyRadius = s.task.privacyRadius;
+            refAgentType = s.task.agentType;
+        }
+        else
+        {
+            var s = refAgent.GetComponent<Agent_Based_Modelling.ImitationAgent>();
+            refPrivacyRadius = s.task.privacyRadius;
+            refAgentType = s.task.agentType;
+        }
+
         for (int i = 0; i < agents.Length; i++) {
             for (int j = 0; j < agents[i].Count; j++) {
                 if (i == I && j == J) {
                     continue;
                 }
 
-                // Only count collisions if:
-                // - the other agent is closer than privacy-radius.
-                // - the tasks of the agents differ.
-                if (Vector3.Distance(refAgent.transform.position, agents[i][j].transform.position) < refAgent.GetComponent<AgentScript>().task.privacyRadius
-                                    && refAgent.GetComponent<AgentScript>().task.agentType != agents[i][j].GetComponent<AgentScript>().task.agentType) {
+                float trackingPrivacyRadius = 1.0f;
+                string trackingAgentType = "";
+
+                if (simulationMode == AgentSimulationMode.RuleBasedNavMesh)
+                {
+                    var comp = agents[i][j].GetComponent<AgentScript>();
+                    trackingPrivacyRadius = comp.task.privacyRadius;
+                    trackingAgentType = comp.task.agentType;
+                }
+                else
+                {
+                    var comp = agents[i][j].GetComponent<Agent_Based_Modelling.ImitationAgent>();
+                    trackingPrivacyRadius = comp.task.privacyRadius;
+                    trackingAgentType = comp.task.agentType;
+                }
+
+                if (Vector3.Distance(refAgent.transform.position, agents[i][j].transform.position) < refPrivacyRadius
+                                    && refAgentType != trackingAgentType) {
                     collCount++;
                 }
             }
@@ -617,34 +621,33 @@ public void ShowSimInfo()
         return collCount;
     }
 
-    /**
-     * @brief Returns an array of collision numbers for the agent identified by taskIdx and agentIdx.
-     *
-     * @param taskIdx: Index for the task this agent belongs to.
-     * @param agentIdx: Index for the agent within that task.
-     *
-     * @returns An array where each entry corresponds to the number collisions at this moment of the simulation for each
-     * task.
-     */
     private int[] CheckCollisions(int taskIdx, int agentIdx)
     {
         GameObject currAgent = agents[taskIdx][agentIdx];
         int[] collisionsPerTask = new int[tasks.Length];
+        float currentPrivacyRadius = 1.0f;
+
+        if (simulationMode == AgentSimulationMode.RuleBasedNavMesh)
+        {
+            currentPrivacyRadius = currAgent.GetComponent<AgentScript>().task.privacyRadius;
+        }
+        else
+        {
+            currentPrivacyRadius = currAgent.GetComponent<Agent_Based_Modelling.ImitationAgent>().task.privacyRadius;
+        }
+
         for (int t = 0; t < tasks.Length; t++)
         {
             for (int j = 0; j < agents[t].Count; j++)
             {
                 if (t == taskIdx && j == agentIdx)
                 {
-                    // Ignore collisions with itself.
                     continue;
                 }
 
-                // Distance to the other agent.
                 float dist = Vector3.Distance(currAgent.transform.position, agents[t][j].transform.position);
 
-                // Only count collisions if the agent is closer than the current agent's privacy radius.
-                if (dist < tasks[taskIdx].privacyRadius)
+                if (dist < currentPrivacyRadius)
                 {
                     collisionsPerTask[t] += 1;
                 }

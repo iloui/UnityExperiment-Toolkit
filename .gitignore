@@ -38,3 +38,29 @@ unity_files/Assets/Scenes/DoNotGetLost.unity
 unity_files/Assets/Scenes/DoNotGetLost.unity.meta
 unity_files/Assets/Prefabs/WestageShoppingMall.prefab
 unity_files/Assets/Prefabs/WestageShoppingMall.prefab.meta
+
+# Simulation output data
+simulation_and_vr/unity_files/data_abm_batch/
+
+# Python embedded environment
+simulation_and_vr/imitationagent_training/python_embedded/
+
+# Training outputs (user-generated)
+simulation_and_vr/imitationagent_training/vr_recordings/
+simulation_and_vr/imitationagent_training/imitation_agent_model/
+
+# Unity build artifacts
+simulation_and_vr/unity_files/Library/
+simulation_and_vr/unity_files/Logs/
+simulation_and_vr/unity_files/obj/
+simulation_and_vr/unity_files/UserSettings/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# OS files
+.DS_Store
+Thumbs.db

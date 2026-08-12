@@ -77620,6 +77620,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: c2a0329a2f5adbb44ac23a18e928d611, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  simulationMode: 1
+  defaultBaselineModel: {fileID: 5022602860645237092, guid: 1cb8e1432fd474bf397a44f8a76af1ca,
+    type: 3}
   visualizePOIs: 1
   visualizeTrajectories: 1
   visualizePaths: 1
@@ -169221,6 +169224,11 @@ PrefabInstance:
     - target: {fileID: 1410823295837017371, guid: 4fc5ddad70a48434db7b299a1e2b909d,
         type: 3}
       propertyPath: m_LocalEulerAnglesHint.z
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 1410823295843826907, guid: 4fc5ddad70a48434db7b299a1e2b909d,
+        type: 3}
+      propertyPath: m_Enabled
       value: 0
       objectReference: {fileID: 0}
     m_RemovedComponents: []

@@ -115,25 +115,60 @@ namespace Assets.Scripts.DataRecording
         /// </summary>
         private void TriggerPythonPipeline(string savedCsvPath)
         {
-            // Define your project file structure configurations here
-            string pythonExe = "python"; // or path to your custom miniconda/venv binary
-            string pythonScript = "C:/Project/ML/incremental_train.py";
-            string targetOnnxOutput = "C:/Project/Assets/Models/ImitationAgentModel.onnx";
+            // Traverses up from 'unity-files/Assets/' to 'simulation_and_vr/'
+            string rootDir = Path.GetFullPath(Path.Combine(Application.dataPath, "../../"));
+            string trainingDir = Path.Combine(rootDir, "imitationagent_training");
+            
+            string pipelineDir = Path.Combine(trainingDir, "training_pipeline");
+            string localEnvPackages = Path.Combine(trainingDir, "python_embedded");
+            
+            string bootstrapScript = Path.Combine(pipelineDir, "bootstrap_env.py");
+            string pythonScript = Path.Combine(pipelineDir, "incremental_train.py");
+            string targetOnnxOutput = Path.Combine(rootDir, "unity_files", "Assets", "ImitationModel", "ImitationAgentModel.onnx");
 
-            Debug.Log($"[Lifecycle Engine] Human data finalized. Launching training pipeline for: {savedCsvPath}");
+            // --------------------------------------------------------------------------
+            // CROSS-PLATFORM PYTHON RESOLUTION ENGINE
+            // --------------------------------------------------------------------------
+            string nativePythonCmd = "python3";
+            if (Application.platform == RuntimePlatform.WindowsEditor || Application.platform == RuntimePlatform.WindowsPlayer)
+            {
+                nativePythonCmd = "python";
+            }
+
+            Debug.Log($"[Lifecycle Engine] Activating background pipeline on platform: {Application.platform}");
 
             System.Threading.Tasks.Task.Run(() =>
             {
                 try
                 {
+                    // Step A: Silently trigger the bootstrap script to guarantee packages exist
+                    System.Diagnostics.ProcessStartInfo bootstrapInfo = new System.Diagnostics.ProcessStartInfo();
+                    bootstrapInfo.FileName = nativePythonCmd;
+                    bootstrapInfo.Arguments = $"\"{bootstrapScript}\"";
+                    bootstrapInfo.UseShellExecute = false;
+                    bootstrapInfo.CreateNoWindow = true;
+                    
+                    using (System.Diagnostics.Process bootstrapProcess = System.Diagnostics.Process.Start(bootstrapInfo))
+                    {
+                        bootstrapProcess.WaitForExit();
+                        if (bootstrapProcess.ExitCode != 0)
+                        {
+                            Debug.LogError("[Lifecycle Engine] Critical Error: Environment Bootstrapping verification failed.");
+                            return;
+                        }
+                    }
+
+                    // Step B: Fire off the dummy pipeline with PYTHONPATH targeted to local environment packages
                     System.Diagnostics.ProcessStartInfo startInfo = new System.Diagnostics.ProcessStartInfo();
-                    startInfo.FileName = pythonExe;
-                    // Passes the explicit, newly generated file string as an argument
+                    startInfo.FileName = nativePythonCmd;
                     startInfo.Arguments = $"\"{pythonScript}\" --csv_input \"{savedCsvPath}\" --model_output \"{targetOnnxOutput}\"";
                     startInfo.UseShellExecute = false;
                     startInfo.RedirectStandardOutput = true;
                     startInfo.RedirectStandardError = true;
                     startInfo.CreateNoWindow = true;
+                    
+                    // Injecting python_embedded directory directly into the Python import path environment variable
+                    startInfo.EnvironmentVariables["PYTHONPATH"] = localEnvPackages;
 
                     using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(startInfo))
                     {
@@ -143,17 +178,17 @@ namespace Assets.Scripts.DataRecording
 
                         if (process.ExitCode == 0)
                         {
-                            Debug.Log($"[Lifecycle Engine] SUCCESS: Model fine-tuned and exported back to: {targetOnnxOutput}");
+                            Debug.Log($"[Lifecycle Engine] PYTHON PIPELINE SUCCESS:\n{output}");
                         }
                         else
                         {
-                            Debug.LogError($"[Lifecycle Engine] Python Error: {error}");
+                            Debug.LogError($"[Lifecycle Engine] Python Pipeline Error (Exit Code {process.ExitCode}): {error}");
                         }
                     }
                 }
                 catch (System.Exception ex)
                 {
-                    Debug.LogError($"[Lifecycle Engine] Pipeline Exception: {ex.Message}");
+                    Debug.LogError($"[Lifecycle Engine] Cross-Platform Execution Exception: {ex.Message}");
                 }
             });
         }
@@ -184,26 +219,46 @@ namespace Assets.Scripts.DataRecording
 
         private void InitializeCsvFile()
         {
-            string dirPath = Path.Combine(Application.dataPath, SaveDirectoryName);
-            if (!Directory.Exists(dirPath)) Directory.CreateDirectory(dirPath);
-
-            string filename = $"BC_Run_{System.DateTime.Now:yyyyMMdd_HHmmss}.csv";
-            currentCsvPath = Path.Combine(dirPath, filename);
-            csvWriter = new StreamWriter(currentCsvPath, false, Encoding.UTF8);
-
-            StringBuilder header = new StringBuilder();
-            header.Append("Timestamp,Pos_X,Pos_Y,Pos_Z,Goal_Dir_X,Goal_Dir_Y,Goal_Dir_Z,");
-            header.Append("Action_Vel_X,Action_Vel_Y,Action_Vel_Z,Action_DeltaRot_X,Action_DeltaRot_Y,Action_DeltaRot_Z,");
-
-            for (int w = 0; w < TemporalWindowSize; w++)
+            try
             {
-                for (int p = 0; p < TotalPixels; p++)
+                // Traverses up from 'unity-files/Assets/' to 'simulation_and_vr/'
+                string rootDir = Path.GetFullPath(Path.Combine(Application.dataPath, "../../"));
+        
+                // Explicitly targets the standalone VR_Recordings directory inside imitationagent_training
+                // Change "VR_Recordings" to "vr_recordings"
+                string dirPath = Path.Combine(rootDir, "imitationagent_training", "vr_recordings");
+                if (!Directory.Exists(dirPath))
                 {
-                    header.Append($"F{w}_P{p}_R,F{w}_P{p}_G,F{w}_P{p}_B,F{w}_P{p}_Depth,");
+                    Directory.CreateDirectory(dirPath);
                 }
+
+                string filename = $"BC_Run_{System.DateTime.Now:yyyyMMdd_HHmmss}.csv";
+                currentCsvPath = Path.Combine(dirPath, filename);
+        
+                csvWriter = new StreamWriter(currentCsvPath, false, Encoding.UTF8);
+
+                // Serialize primary tabular structural headers
+                StringBuilder headerBuilder = new StringBuilder();
+                headerBuilder.Append("Timestamp,Pos_X,Pos_Y,Pos_Z,Goal_Dir_X,Goal_Dir_Y,Goal_Dir_Z,Action_Vel_X,Action_Vel_Y,Action_Vel_Z,Action_Rot_X,Action_Rot_Y,Action_Rot_Z,");
+
+                // Dynamically flatten multi-dimensional matrix dimensions across historical frames
+                for (int t = 0; t < TemporalWindowSize; t++)
+                {
+                    for (int i = 0; i < TotalPixels; i++)
+                    {
+                        headerBuilder.Append($"F{t}_P{i}_R,F{t}_P{i}_G,F{t}_P{i}_B,F{t}_P{i}_Depth,");
+                    }
+                }
+
+                headerBuilder.Length--; // Strip trailing comma
+                csvWriter.WriteLine(headerBuilder.ToString());
+                
+                Debug.Log($"[Lifecycle Engine] Data-stream channel established at: {currentCsvPath}");
             }
-            header.Length--; 
-            csvWriter.WriteLine(header.ToString());
+            catch (IOException ex)
+            {
+                Debug.LogError($"[Lifecycle Engine] Failed to initialize data tracking matrix target: {ex.Message}");
+            }
         }
 
         private IEnumerator LockedSamplingLoop()

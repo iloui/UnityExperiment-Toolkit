@@ -48,6 +48,9 @@ namespace Agent_Based_Modelling
         private float arrivalTime;
         private Transform currentActiveTargetTransform;
 
+        [HideInInspector]
+        public int startIndex; // <-- Added to allow telemetry data indexing alignment with EngineScript tracking maps
+
         [Header("Hardware Simulation (64x64 Complete Eyes)")]
         public Transform AgentHeadAnchor; 
         public float HorizonalFovOverride = 90f;
@@ -78,20 +81,19 @@ namespace Agent_Based_Modelling
         [Tooltip("Drag your baseline or trained .onnx file here.")]
         public ModelAsset BaselineModelAsset;
         
+        //[Header("Neural Inference Core")]
+        //[Tooltip("Drag the imported ImitationAgentModel ONNX asset here from the Project view.")]
+        //public ModelAsset modelAsset;
+        
         private Model runtimeModel;
         private Worker inferenceEngine;
         private bool isModelLoaded = false;
         private object modelLock = new object(); // Structural lock safeguarding background hot-swapping threads
 
         [Header("Automated Python Lifecycle Pipeline")]
-        [Tooltip("Absolute path to your python executable (e.g. C:/miniconda3/envs/ml/python.exe)")]
-        public string PythonExecutablePath = "python";
-        [Tooltip("Absolute path to your Python fine-tuning script.")]
-        public string PythonScriptPath = "C:/Project/ML/incremental_train.py";
         [Tooltip("The path to the newly exported model that Python writes out.")]
-        public string OutputOnnxModelPath = "C:/Project/Assets/Models/ImitationAgentModel.onnx";
-
-        private bool isRetrainingBackgroundActive = false;
+        public string OutputOnnxModelPath = "C:/../../imitationagent_training/imitation_agent_model/ImitationAgentModel.onnx";
+        
         private DateTime lastModelWriteTime; // Option A: Tracks the file system write timestamp
 
         // Trajectory Mechanics
@@ -172,31 +174,30 @@ namespace Agent_Based_Modelling
             rayCommands = new NativeArray<RaycastCommand>(TotalPixels, Allocator.Persistent);
             rayResults = new NativeArray<RaycastHit>(TotalPixels, Allocator.Persistent);
         }
-
+        
         private void InitializeSentisEngine()
         {
-            if (BaselineModelAsset != null)
+            try
             {
-                lock (modelLock)
+                // 1. Ensure the researcher didn't forget to drag the asset into the inspector
+                if (BaselineModelAsset == null)
                 {
-                    runtimeModel = ModelLoader.Load(BaselineModelAsset);
-                    inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute); // Sentis 2.0+ constructor
-                    isModelLoaded = true;
+                    Debug.LogError("[Neural Inference Core] CRITICAL: ModelAsset is not assigned in the Inspector!");
+                    return;
                 }
-            }
-            else
-            {
-                Debug.LogWarning("ImitationAgent: No initial Baseline Model Asset assigned! Running on mock fallback until hot-swapped.");
-            }
 
-            // Cache the initial timestamp of the target model file if it already exists
-            if (File.Exists(OutputOnnxModelPath))
-            {
-                lastModelWriteTime = File.GetLastWriteTime(OutputOnnxModelPath);
+                Debug.Log($"[Neural Inference Core] Loading Sentis asset infrastructure natively...");
+
+                // 2. Load the asset directly. Unity Sentis already compiled this in the background!
+                runtimeModel = ModelLoader.Load(BaselineModelAsset);
+        
+                // 3. Bind worker engine (using GPUCompute backend as configured in your original script)
+                inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute); 
+                Debug.Log("[Neural Inference Core] Sentis Engine successfully bound and ready for execution.");
             }
-            else
+            catch (Exception e)
             {
-                lastModelWriteTime = DateTime.MinValue;
+                Debug.LogError($"[Neural Inference Core] Sentis loading exception: {e.Message}");
             }
         }
 
@@ -207,14 +208,12 @@ namespace Agent_Based_Modelling
 
             EvaluateStateSequencer();
             CaptureCurrentObservations();
-            CheckForPendingModelHotSwaps(); // Constantly checks disk modification timestamp
 
             if (stateHistoryQueue.Count == TemporalWindowSize)
             {
                 ExecuteNeuralNetworkInference();
             }
 
-            // Apply Motor controls via physical adjustments frame-by-frame
             MoveAgentLocomotion(networkForwardAction, networkYawAction, networkPitchAction);
         }
 
@@ -261,7 +260,6 @@ namespace Agent_Based_Modelling
                 if (HasArrivedAtTarget())
                 {
                     destroyRequest = true;
-                    OnSimulationRunCompleted(); // Trigger automated lifecycle hook
                 }
             }
         }
@@ -293,7 +291,6 @@ namespace Agent_Based_Modelling
                 float vAngle = (((ImageHeight > 1) ? ((float)y / (ImageHeight - 1)) - 0.5f : 0f)) * fovRadV;
                 for (int x = 0; x < ImageWidth; x++)
                 {
-                    // Fixed clean math:
                     float hAngle = (((ImageWidth > 1) ? ((float)x / (ImageWidth - 1)) - 0.5f : 0f)) * fovRadH;
         
                     Vector3 localDir = new Vector3(Mathf.Tan(hAngle), Mathf.Tan(vAngle), 1.0f).normalized;
@@ -337,42 +334,38 @@ namespace Agent_Based_Modelling
                     return;
                 }
 
-                // 1. Construct feature array
-                int totalSensoryInputs = (TemporalWindowSize * TotalPixels * 4) + 3;
-                float[] flattenedFeatureArray = new float[totalSensoryInputs];
-                int ptr = 0;
+                int totalSensoryInputs = (TemporalWindowSize * TotalPixels * 4) + 3; //
+                float[] flattenedFeatureArray = new float[totalSensoryInputs]; //
+                int ptr = 0; //
 
-                flattenedFeatureArray[ptr++] = localGoalVector3D.x;
-                flattenedFeatureArray[ptr++] = localGoalVector3D.y;
-                flattenedFeatureArray[ptr++] = localGoalVector3D.z;
+                flattenedFeatureArray[ptr++] = localGoalVector3D.x; //
+                flattenedFeatureArray[ptr++] = localGoalVector3D.y; //
+                flattenedFeatureArray[ptr++] = localGoalVector3D.z; //
 
                 foreach (var frame in stateHistoryQueue)
                 {
                     for (int i = 0; i < TotalPixels; i++)
                     {
-                        flattenedFeatureArray[ptr++] = frame.colorMatrix[i].r / 255f;
-                        flattenedFeatureArray[ptr++] = frame.colorMatrix[i].g / 255f;
-                        flattenedFeatureArray[ptr++] = frame.colorMatrix[i].b / 255f;
-                        flattenedFeatureArray[ptr++] = frame.depthMatrix[i];
+                        flattenedFeatureArray[ptr++] = frame.colorMatrix[i].r / 255f; //
+                        flattenedFeatureArray[ptr++] = frame.colorMatrix[i].g / 255f; //
+                        flattenedFeatureArray[ptr++] = frame.colorMatrix[i].b / 255f; //
+                        flattenedFeatureArray[ptr++] = frame.depthMatrix[i]; //
                     }
                 }
 
-                // 2. Sentis Tensor Allocation
-                TensorShape tensorShape = new TensorShape(1, totalSensoryInputs);
-                using (Tensor<float> sensoryTensor = new Tensor<float>(tensorShape, flattenedFeatureArray)) 
+                TensorShape tensorShape = new TensorShape(1, totalSensoryInputs); //
+                using (Tensor<float> sensoryTensor = new Tensor<float>(tensorShape, flattenedFeatureArray)) //
                 {
-                    // 3. Inference Execution
-                    inferenceEngine.Schedule(sensoryTensor);
+                    inferenceEngine.SetInput("sensory_inputs", sensoryTensor);
+                    inferenceEngine.Schedule();
                     
-                    // 4. Retrieve Actions Safely
-                    var outputTensor = inferenceEngine.PeekOutput() as Tensor<float>;
+                    var outputTensor = inferenceEngine.PeekOutput("motor_actions") as Tensor<float>;
                     if (outputTensor != null)
                     {
-                        float[] outputData = outputTensor.DownloadToArray();
-                        
-                        networkForwardAction = outputData[0]; 
-                        networkYawAction     = outputData[1]; 
-                        networkPitchAction   = outputData[2];
+                        float[] outputData = outputTensor.DownloadToArray(); //
+                        networkForwardAction = outputData[0]; //
+                        networkYawAction     = outputData[1]; //
+                        networkPitchAction   = outputData[2]; //
                     }
                 }
             }
@@ -391,65 +384,6 @@ namespace Agent_Based_Modelling
             transform.position += transform.forward * forward * agentSpeed * Time.deltaTime;
         }
 
-        private void OnSimulationRunCompleted()
-        {
-            if (isRetrainingBackgroundActive)
-            {
-                Debug.LogWarning("ImitationAgent: Python pipeline is already processing a training run. Skipping overlapping execution.");
-                return;
-            }
-
-            string csvDirectory = Path.Combine(Application.dataPath, "../VR_Recordings");
-            if (!Directory.Exists(csvDirectory)) return;
-
-            string[] recordedFiles = Directory.GetFiles(csvDirectory, "*.csv");
-            if (recordedFiles.Length == 0) return;
-
-            Array.Sort(recordedFiles, (a, b) => File.GetLastWriteTime(b).CompareTo(File.GetLastWriteTime(a)));
-            string newestCsvPath = recordedFiles[0];
-
-            Debug.Log($"ImitationAgent: Starting background pipeline execution... Training on: {newestCsvPath}");
-            isRetrainingBackgroundActive = true;
-
-            Task.Run(() =>
-            {
-                try
-                {
-                    ProcessStartInfo startInfo = new ProcessStartInfo();
-                    startInfo.FileName = PythonExecutablePath;
-                    startInfo.Arguments = $"\"{PythonScriptPath}\" --csv_input \"{newestCsvPath}\" --model_output \"{OutputOnnxModelPath}\"";
-                    startInfo.UseShellExecute = false;
-                    startInfo.RedirectStandardOutput = true;
-                    startInfo.RedirectStandardError = true;
-                    startInfo.CreateNoWindow = true;
-
-                    using (Process process = Process.Start(startInfo))
-                    {
-                        string output = process.StandardOutput.ReadToEnd();
-                        string error = process.StandardError.ReadToEnd();
-                        process.WaitForExit();
-
-                        if (process.ExitCode != 0)
-                        {
-                            Debug.LogError($"ImitationAgent Python Pipeline Error: {error}");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"ImitationAgent Pipeline Exception: {ex.Message}");
-                }
-                finally
-                {
-                    isRetrainingBackgroundActive = false;
-                }
-            });
-        }
-
-        /// <summary>
-        /// Option A Implementation: Proactively monitors the target model's file metadata
-        /// on disk every frame. Intercepts modifications automatically from any source.
-        /// </summary>
         private void CheckForPendingModelHotSwaps()
         {
             if (File.Exists(OutputOnnxModelPath))
@@ -460,30 +394,24 @@ namespace Agent_Based_Modelling
 
                     if (currentWriteTime > lastModelWriteTime)
                     {
-                        // Instantly update variable to prevent duplicate hot-swap triggers on subsequent frames
                         lastModelWriteTime = currentWriteTime;
 
                         lock (modelLock)
                         {
                             if (inferenceEngine != null) inferenceEngine.Dispose();
 
-                            // Sentis direct file-path model compilation
                             runtimeModel = ModelLoader.Load(OutputOnnxModelPath);
                             inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute);
                             isModelLoaded = true;
                             
-                            Debug.Log($"[HOT-SWAP SUCCESS] Intercepted new NN file modification! Silent hot-swap completed. Path: {OutputOnnxModelPath}");
+                            Debug.Log($"[HOT-SWAP SUCCESS] Silent hot-swap completed. Path: {OutputOnnxModelPath}");
                         }
                     }
                 }
-                catch (IOException)
-                {
-                    // Catching sharing violations (e.g. if Python is still dumping/finalizing bytes to disk).
-                    // The loop safely defers the hot-swap to the next frame when the file handles unlock.
-                }
+                catch (IOException) { }
                 catch (Exception ex)
                 {
-                    Debug.LogError($"ImitationAgent: Hot-Swap loading failed on frame boundary: {ex.Message}");
+                    Debug.LogError($"ImitationAgent: Hot-Swap loading failed: {ex.Message}");
                 }
             }
         }
