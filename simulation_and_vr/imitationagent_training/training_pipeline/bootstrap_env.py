@@ -16,7 +16,7 @@ def main():
         with open(requirements_file) as f:
             required_packages = [line.strip() for line in f if line.strip() and not line.startswith("#")]
     else:
-        required_packages = ["torch", "pandas", "onnx"]
+        required_packages = required_packages = ["torch>=2.8.0", "pandas>=2.3.0", "onnx>=1.19.0"]
     
     # We add target_env_dir to sys.path during verification to see if they are already installed locally
     sys.path.insert(0, target_env_dir)

@@ -1,5 +1,12 @@
 import os
 import sys
+
+# Auto-inject python_embedded directory into sys.path so local packages are found
+current_dir = os.path.dirname(os.path.abspath(__file__))
+python_embedded_dir = os.path.abspath(os.path.join(current_dir, "..", "python_embedded"))
+if python_embedded_dir not in sys.path:
+    sys.path.insert(0, python_embedded_dir)
+
 import argparse
 import tempfile
 import pandas as pd
