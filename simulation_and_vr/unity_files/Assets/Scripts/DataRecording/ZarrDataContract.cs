@@ -41,7 +41,7 @@ namespace Assets.Scripts.DataRecording
         public static class ArrayDtypes
         {
             public const string Rgb = "uint8";
-            public const string Depth = "float16";
+            public const string Depth = "float32";
             public const string Vector = "float32";
             public const string Timestamp = "float64";
         }

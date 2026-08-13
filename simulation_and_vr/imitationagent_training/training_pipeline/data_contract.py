@@ -32,7 +32,7 @@ TIMESTAMP_SHAPE = ("time",)
 
 # Storage types are explicit to avoid implicit conversion bugs during training.
 RGB_DTYPE = "uint8"
-DEPTH_DTYPE = "float16"
+DEPTH_DTYPE = "float32"
 VECTOR_DTYPE = "float32"
 TIMESTAMP_DTYPE = "float64"
 

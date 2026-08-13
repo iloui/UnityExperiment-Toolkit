@@ -24,7 +24,7 @@ The canonical episode structure is deliberately not a single flat CSV file. Each
 ## 2. Canonical array schema
 
 - `rgb`: `uint8`, shape `(time, 64, 64, 3)`
-- `depth`: `float16`, shape `(time, 64, 64)`
+- `depth`: `float32`, shape `(time, 64, 64)`
 - `goal`: `float32`, shape `(time, 3)`
 - `pose`: `float32`, shape `(time, 3)`
 - `action_vel`: `float32`, shape `(time, 3)`
@@ -56,7 +56,7 @@ The `manifest.json` file is the canonical description for one recording. It cont
   "vertical_fov_deg": 90.0,
   "arrays": {
     "rgb": { "shape": ["time", 64, 64, 3], "dtype": "uint8" },
-    "depth": { "shape": ["time", 64, 64], "dtype": "float16" },
+    "depth": { "shape": ["time", 64, 64], "dtype": "float32" },
     "goal": { "shape": ["time", 3], "dtype": "float32" },
     "pose": { "shape": ["time", 3], "dtype": "float32" },
     "action_vel": { "shape": ["time", 3], "dtype": "float32" },
