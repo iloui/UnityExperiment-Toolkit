@@ -8,11 +8,20 @@ using UnityTools.Core;
 
 namespace Assets.Scripts.DataRecording
 {
+    public enum RecordingOutputFormat
+    {
+        Binary,
+        Csv
+    }
+
     public class ParticipantRecorder : MonoBehaviour
     {
         [Header("Linked Framework Components")]
         public Camera MainVRCamera;
         public LayerMask ArchitectureLayerMask;
+
+        [Header("Storage Format")]
+        public RecordingOutputFormat OutputFormat = RecordingOutputFormat.Binary;
 
         [Header("Target Tracking (POIs)")]
         public Transform CurrentPOITarget;
@@ -42,6 +51,8 @@ namespace Assets.Scripts.DataRecording
         private Vector3 lastPosition;
         private string currentEpisodeDir;
         private string currentManifestPath;
+        private string currentCsvPath;
+        private StreamWriter csvWriter;
         private int episodeFrameCount;
 
         private BinaryWriter rgbWriter;
@@ -83,7 +94,15 @@ namespace Assets.Scripts.DataRecording
 
             InitializeHardwareReplication();
             InitializeJobBuffers();
-            InitializeEpisodeStorage();
+
+            if (OutputFormat == RecordingOutputFormat.Csv)
+            {
+                InitializeCsvFile();
+            }
+            else
+            {
+                InitializeEpisodeStorage();
+            }
 
             isRecording = true;
             StartCoroutine(LockedSamplingLoop());
@@ -96,12 +115,25 @@ namespace Assets.Scripts.DataRecording
             isRecording = false;
             StopAllCoroutines();
 
-            CloseBinaryWriters();
-
-            if (!string.IsNullOrEmpty(currentEpisodeDir))
+            if (OutputFormat == RecordingOutputFormat.Csv)
             {
-                WriteEpisodeManifest();
-                TriggerPythonPipeline(currentEpisodeDir);
+                if (csvWriter != null)
+                {
+                    csvWriter.Flush();
+                    csvWriter.Close();
+                    csvWriter = null;
+                    TriggerPythonPipeline(currentCsvPath);
+                }
+            }
+            else
+            {
+                CloseBinaryWriters();
+
+                if (!string.IsNullOrEmpty(currentEpisodeDir))
+                {
+                    WriteEpisodeManifest();
+                    TriggerPythonPipeline(currentEpisodeDir);
+                }
             }
 
             if (rayCommands.IsCreated) rayCommands.Dispose();
@@ -218,6 +250,44 @@ namespace Assets.Scripts.DataRecording
             rayCommands = new NativeArray<RaycastCommand>(TotalPixels, Allocator.Persistent);
             rayResults = new NativeArray<RaycastHit>(TotalPixels, Allocator.Persistent);
             currentRayBuffer = new float[TotalPixels];
+        }
+
+        private void InitializeCsvFile()
+        {
+            try
+            {
+                string rootDir = Path.GetFullPath(Path.Combine(Application.dataPath, "../../"));
+                string dirPath = Path.Combine(rootDir, "imitationagent_training", "vr_recordings");
+                if (!Directory.Exists(dirPath))
+                {
+                    Directory.CreateDirectory(dirPath);
+                }
+
+                string filename = $"BC_Run_{System.DateTime.Now:yyyyMMdd_HHmmss}.csv";
+                currentCsvPath = Path.Combine(dirPath, filename);
+
+                csvWriter = new StreamWriter(currentCsvPath, false, Encoding.UTF8);
+
+                StringBuilder headerBuilder = new StringBuilder();
+                headerBuilder.Append("Timestamp,Pos_X,Pos_Y,Pos_Z,Goal_Dir_X,Goal_Dir_Y,Goal_Dir_Z,Action_Vel_X,Action_Vel_Y,Action_Vel_Z,Action_Rot_X,Action_Rot_Y,Action_Rot_Z,");
+
+                for (int t = 0; t < TemporalWindowSize; t++)
+                {
+                    for (int i = 0; i < TotalPixels; i++)
+                    {
+                        headerBuilder.Append($"F{t}_P{i}_R,F{t}_P{i}_G,F{t}_P{i}_B,F{t}_P{i}_Depth,");
+                    }
+                }
+
+                headerBuilder.Length--;
+                csvWriter.WriteLine(headerBuilder.ToString());
+
+                Debug.Log($"[Lifecycle Engine] Legacy CSV channel established at: {currentCsvPath}");
+            }
+            catch (IOException ex)
+            {
+                Debug.LogError($"[Lifecycle Engine] Failed to initialize legacy CSV target: {ex.Message}");
+            }
         }
 
         private void InitializeEpisodeStorage()
@@ -433,17 +503,45 @@ namespace Assets.Scripts.DataRecording
                 Azimuth = azimuth;
                 Elevation = elevation;
 
-                // --- SERIALIZE FRAME AS FIXED-DIMENSION BINARY SHARDS ---
-                WriteFrameBinary(
-                    colorPixels,
-                    currentRayBuffer,
-                    currentPosition,
-                    localGoalVector,
-                    localVelocityAction,
-                    deltaRotationAction,
-                    timeStamp
-                );
+                if (OutputFormat == RecordingOutputFormat.Csv)
+                {
+                    WriteLegacyCsvRow(currentPosition, localGoalVector, localVelocityAction, deltaRotationAction, timeStamp, colorPixels, currentRayBuffer);
+                }
+                else
+                {
+                    WriteFrameBinary(
+                        colorPixels,
+                        currentRayBuffer,
+                        currentPosition,
+                        localGoalVector,
+                        localVelocityAction,
+                        deltaRotationAction,
+                        timeStamp
+                    );
+                }
             }
+        }
+
+        private void WriteLegacyCsvRow(Vector3 pose, Vector3 goal, Vector3 actionVel, Vector3 actionRot, float timeStamp, Color32[] colorPixels, float[] depthBuffer)
+        {
+            if (csvWriter == null)
+            {
+                return;
+            }
+
+            StringBuilder rowBuilder = new StringBuilder();
+            rowBuilder.Append($"{timeStamp:F3},{pose.x:F3},{pose.y:F3},{pose.z:F3},");
+            rowBuilder.Append($"{goal.x:F4},{goal.y:F4},{goal.z:F4},");
+            rowBuilder.Append($"{actionVel.x:F4},{actionVel.y:F4},{actionVel.z:F4},");
+            rowBuilder.Append($"{actionRot.x:F4},{actionRot.y:F4},{actionRot.z:F4},");
+
+            for (int i = 0; i < TotalPixels; i++)
+            {
+                rowBuilder.Append($"{colorPixels[i].r},{colorPixels[i].g},{colorPixels[i].b},{depthBuffer[i]:F4},");
+            }
+
+            rowBuilder.Length--;
+            csvWriter.WriteLine(rowBuilder.ToString());
         }
 
         private void WriteFrameBinary(Color32[] colorPixels, float[] depthBuffer, Vector3 pose, Vector3 goal, Vector3 actionVel, Vector3 actionRot, float timeStamp)
