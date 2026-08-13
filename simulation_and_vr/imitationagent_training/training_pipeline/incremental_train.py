@@ -15,7 +15,8 @@ import torch.nn as nn
 
 def parse_args():
     parser = argparse.ArgumentParser(description="DesignMind2 Lifecycle Engine - Dummy ML Pipeline")
-    parser.add_argument("--csv_input", type=str, required=True, help="Path to the recorded human CSV data")
+    parser.add_argument("--csv_input", type=str, default=None, help="Legacy path to the recorded human CSV data")
+    parser.add_argument("--episode_dir", type=str, default=None, help="Path to the recorded binary episode directory")
     parser.add_argument("--model_output", type=str, required=True, help="Target path for the final ONNX model")
     return parser.parse_args()
 
@@ -36,26 +37,40 @@ class DummyImitationModel(nn.Module):
 def main():
     args = parse_args()
     print(f"[Python AI Core] Initializing lifecycle loop update execution...")
-    print(f"[Python AI Core] Reading dataset matrix from target path: {args.csv_input}")
 
-    if not os.path.exists(args.csv_input):
-        print(f"[Python AI Core] ERROR: Input file not found: {args.csv_input}")
+    dataset_path = args.episode_dir or args.csv_input
+    if dataset_path is None:
+        print("[Python AI Core] ERROR: Provide either --episode_dir or --csv_input.")
+        sys.exit(1)
+
+    print(f"[Python AI Core] Reading dataset matrix from target path: {dataset_path}")
+
+    if not os.path.exists(dataset_path):
+        print(f"[Python AI Core] ERROR: Input file not found: {dataset_path}")
         sys.exit(1)
 
     # 1. Read CSV to dynamically verify structural alignment with C# data streams
     try:
-        df = pd.read_csv(args.csv_input)
-        print(f"[Python AI Core] Loaded data stream with shape: {df.shape}")
-        
-        # Determine the total features automatically based on headers
-        # Columns 0 to 12 are metadata, goals, and actions (Timestamp, Pos, Goal_Dir, Action_Vel, Action_Rot)
-        # All columns starting from index 13 represent the serialized historical vision/depth steps
-        feature_columns = [col for col in df.columns if col.startswith('F')]
-        
-        # Account for Goal_Dir_X, Goal_Dir_Y, Goal_Dir_Z explicitly (3 elements)
-        input_dim = len(feature_columns) + 3 
-        print(f"[Python AI Core] Computed runtime network input dimension: {input_dim}")
-        
+        if args.episode_dir is not None:
+            manifest_path = os.path.join(dataset_path, "manifest.json")
+            if os.path.exists(manifest_path):
+                print(f"[Python AI Core] Detected binary episode directory: {dataset_path}")
+                input_dim = 49155
+            else:
+                raise FileNotFoundError(f"Manifest missing in episode dir: {manifest_path}")
+        else:
+            df = pd.read_csv(args.csv_input)
+            print(f"[Python AI Core] Loaded data stream with shape: {df.shape}")
+
+            # Determine the total features automatically based on headers
+            # Columns 0 to 12 are metadata, goals, and actions (Timestamp, Pos, Goal_Dir, Action_Vel, Action_Rot)
+            # All columns starting from index 13 represent the serialized historical vision/depth steps
+            feature_columns = [col for col in df.columns if col.startswith('F')]
+
+            # Account for Goal_Dir_X, Goal_Dir_Y, Goal_Dir_Z explicitly (3 elements)
+            input_dim = len(feature_columns) + 3
+            print(f"[Python AI Core] Computed runtime network input dimension: {input_dim}")
+
     except Exception as e:
         print(f"[Python AI Core] Failed parsing tabular framework headers: {str(e)}")
         print("[Python AI Core] Falling back to default static tensor shapes for standard testing...")

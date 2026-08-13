@@ -22,7 +22,7 @@ namespace Assets.Scripts.DataRecording
         public const float HorizontalFovDegrees = 90f;
         public const float VerticalFovDegrees = 90f;
 
-        public static readonly string[] ArrayNames =
+        public static readonly string[] ArrayNames = new[]
         {
             "rgb",
             "depth",
@@ -33,17 +33,9 @@ namespace Assets.Scripts.DataRecording
             "timestamp"
         };
 
-        public static int ExpectedRgbLength => ImageWidth * ImageHeight * 3;
-
-        public static class ArrayShapes
+        public static int ExpectedRgbLength
         {
-            public static readonly int[] Rgb = { 0, ImageHeight, ImageWidth, 3 };
-            public static readonly int[] Depth = { 0, ImageHeight, ImageWidth };
-            public static readonly int[] Goal = { 0, 3 };
-            public static readonly int[] Pose = { 0, 3 };
-            public static readonly int[] ActionVel = { 0, 3 };
-            public static readonly int[] ActionRot = { 0, 3 };
-            public static readonly int[] Timestamp = { 0 };
+            get { return ImageWidth * ImageHeight * 3; }
         }
 
         public static class ArrayDtypes
