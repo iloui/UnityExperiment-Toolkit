@@ -26,7 +26,7 @@ def main():
         with open(requirements_file) as f:
             required_packages = [line.strip() for line in f if line.strip() and not line.startswith("#")]
     else:
-        required_packages = ["torch>=2.8.0", "pandas>=2.3.0", "onnx>=1.19.0", "zarr>=2.18.0", "numcodecs>=0.15.0"]
+        required_packages = ["torch>=2.8.0", "pandas>=2.3.0", "onnx>=1.19.0", "zarr>=2.18,<3", "numcodecs>=0.15.0", "numpy>=1.26.0", "onnxscript>=0.1.0"]
 
     sys.path.insert(0, target_env_dir)
 

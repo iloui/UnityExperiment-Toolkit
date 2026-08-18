@@ -473,7 +473,13 @@ public class EngineScript : MonoBehaviour
             {
                 scriptInstance.BaselineModelAsset = defaultBaselineModel;
             }
-            scriptInstance.startIndex = startIdx; 
+            scriptInstance.startIndex = startIdx;
+
+            if (Agent_Based_Modelling.ImitationAgent.TryLoadNewestModelOnce())
+            {
+                Debug.Log("[Model Swap] Loading the newest exported model before spawning the next imitation agent.");
+                scriptInstance.ApplyLatestExportedModel();
+            }
         }
 
         return agent;

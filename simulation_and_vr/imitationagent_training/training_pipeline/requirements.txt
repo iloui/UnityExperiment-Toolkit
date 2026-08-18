@@ -1,5 +1,7 @@
 torch>=2.8.0,<3.0.0
 pandas>=2.3.0
 onnx>=1.19.0
-zarr>=2.18.0
+zarr>=2.18,<3
 numcodecs>=0.15.0
+numpy>=1.26.0
+onnxscript>=0.1.0

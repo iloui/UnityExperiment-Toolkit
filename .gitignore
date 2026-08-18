@@ -64,3 +64,24 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+
+
+# Machine Learning Models
+*.onnx
+
+# Zarr Data Stores / Metadata
+.zattrs
+.zgroup
+.zarray
+
+# Binary / Raw Data Files
+*.bin
+
+# Zarr numeric data chunk files
+[0-9]*
+[0-9]*.[0-9]*
+[0-9]*.[0-9]*.[0-9]*
+[0-9]*.[0-9]*.[0-9]*.[0-9]*
+
+# Ignore generated dataset manifests (if you don't want them tracked)
+manifest.json

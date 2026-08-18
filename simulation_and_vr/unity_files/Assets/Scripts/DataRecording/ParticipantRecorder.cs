@@ -2,6 +2,7 @@
 using System.IO;
 using System.Collections;
 using System.Collections.Generic;
+using System.Text;
 using Unity.Collections;
 using Unity.Jobs;
 using UnityTools.Core;
@@ -214,6 +215,7 @@ namespace Assets.Scripts.DataRecording
                         if (process.ExitCode == 0)
                         {
                             Debug.Log($"[Lifecycle Engine] PYTHON PIPELINE SUCCESS:\n{output}");
+                            Agent_Based_Modelling.ImitationAgent.NotifyRecordingCompleted(targetOnnxOutput);
                         }
                         else
                         {
@@ -544,7 +546,7 @@ namespace Assets.Scripts.DataRecording
             csvWriter.WriteLine(rowBuilder.ToString());
         }
 
-        private void WriteFrameBinary(Color32[] colorPixels, float[] depthBuffer, Vector3 pose, Vector3 goal, Vector3 actionVel, Vector3 actionRot, float timeStamp)
+        private void WriteFrameBinary(Color32[] colorPixels, float[] depthBuffer, Vector3 pose, Vector3 goal, Vector3 actionVel, Vector3 actionRot, double timeStamp)
         {
             if (rgbWriter == null || depthWriter == null || goalWriter == null || poseWriter == null || actionVelWriter == null || actionRotWriter == null || timestampWriter == null)
             {
@@ -580,7 +582,7 @@ namespace Assets.Scripts.DataRecording
             actionRotWriter.Write(actionRot.y);
             actionRotWriter.Write(actionRot.z);
 
-            timestampWriter.Write(timeStamp);
+            timestampWriter.Write((double) timeStamp);
             episodeFrameCount++;
         }
 

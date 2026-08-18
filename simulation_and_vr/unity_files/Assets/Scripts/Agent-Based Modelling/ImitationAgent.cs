@@ -92,9 +92,82 @@ namespace Agent_Based_Modelling
 
         [Header("Automated Python Lifecycle Pipeline")]
         [Tooltip("The path to the newly exported model that Python writes out.")]
-        public string OutputOnnxModelPath = "C:/../../imitationagent_training/imitation_agent_model/ImitationAgentModel.onnx";
-        
-        private DateTime lastModelWriteTime; // Option A: Tracks the file system write timestamp
+        public string OutputOnnxModelPath = "";
+
+        private static string lastKnownExportPath = "";
+        private static DateTime lastLoadedModelWriteTime = DateTime.MinValue;
+        private static bool pendingModelReload = false;
+        private DateTime lastModelWriteTime; // Tracks the last file system timestamp we actually loaded
+
+        public static void NotifyRecordingCompleted(string exportedModelPath)
+        {
+            if (string.IsNullOrEmpty(exportedModelPath))
+            {
+                return;
+            }
+
+            lastKnownExportPath = exportedModelPath;
+            pendingModelReload = true;
+        }
+
+        public static bool TryLoadNewestModelOnce()
+        {
+            if (!pendingModelReload || string.IsNullOrEmpty(lastKnownExportPath) || !File.Exists(lastKnownExportPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                DateTime currentWriteTime = File.GetLastWriteTime(lastKnownExportPath);
+                if (currentWriteTime <= lastLoadedModelWriteTime)
+                {
+                    pendingModelReload = false;
+                    return false;
+                }
+
+                lastLoadedModelWriteTime = currentWriteTime;
+                pendingModelReload = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[Model Swap] Failed to inspect exported model: {ex.Message}");
+                pendingModelReload = false;
+                return false;
+            }
+        }
+
+        public bool ApplyLatestExportedModel()
+        {
+            if (string.IsNullOrEmpty(lastKnownExportPath) || !File.Exists(lastKnownExportPath))
+            {
+                return false;
+            }
+
+            try
+            {
+                lock (modelLock)
+                {
+                    if (inferenceEngine != null)
+                    {
+                        inferenceEngine.Dispose();
+                    }
+
+                    runtimeModel = ModelLoader.Load(lastKnownExportPath);
+                    inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute);
+                    isModelLoaded = true;
+                    lastModelWriteTime = File.GetLastWriteTime(lastKnownExportPath);
+                    Debug.Log($"[HOT-SWAP SUCCESS] Silent hot-swap completed. Path: {lastKnownExportPath}");
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"ImitationAgent: Hot-Swap loading failed: {ex.Message}");
+                return false;
+            }
+        }
 
         // Trajectory Mechanics
         public List<Vector3> trajectory;
@@ -147,9 +220,23 @@ namespace Agent_Based_Modelling
                 AgentHeadAnchor = headGO.transform;
             }
 
+            if (string.IsNullOrEmpty(OutputOnnxModelPath))
+            {
+                OutputOnnxModelPath = Path.Combine(Application.dataPath, "ImitationModel", "ImitationAgentModel.onnx");
+            }
+
             InitializeHardwareReplication();
             InitializeJobBuffers();
             InitializeSentisEngine();
+
+            if (File.Exists(OutputOnnxModelPath))
+            {
+                lastModelWriteTime = File.GetLastWriteTime(OutputOnnxModelPath);
+            }
+            else
+            {
+                lastModelWriteTime = DateTime.MinValue;
+            }
         }
 
         private void InitializeHardwareReplication()
