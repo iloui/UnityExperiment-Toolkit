@@ -27,12 +27,26 @@ class SimpleImitation2DCNNModel(nn.Module):
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),  # Output: (64, 8, 8)
             nn.BatchNorm2d(64),
             nn.ReLU(), # TODO: Try LeakyReLU()
-            nn.Flatten()                                          # Output: 4096 features
         )
 
-        # +3 for the goal vector, concatenated back in below - without it the network only ever
-        # sees the current camera frame and has no way to know which direction it should be
-        # heading, which is why it was reducing to a purely reactive wall-following habit.
+        # FiLM conditioning (Perez et al. 2017): the goal vector produces a per-channel
+        # scale/shift applied directly to the conv feature maps, instead of only being
+        # concatenated after flattening where it's just 3 of 4099 inputs to the head and easy
+        # for the network to learn to give near-zero weight - which is what previously produced
+        # a purely reactive wall-following policy that ignored where it was supposed to go.
+        # FiLM ties every visual channel's contribution to the goal instead of leaving that
+        # coupling to a single late, easily-bypassed linear layer.
+        self.goal_encoder = nn.Sequential(
+            nn.Linear(3, 32),
+            nn.ReLU(),
+        )
+        self.film_gamma = nn.Linear(32, 64)
+        self.film_beta = nn.Linear(32, 64)
+
+        self.flatten = nn.Flatten()
+
+        # +3 for the goal vector, concatenated back in below on top of the FiLM modulation
+        # above, so the head still gets a direct, unfiltered look at the goal too.
         self.network = nn.Sequential(
             nn.Linear(64 * 8 * 8 + 3, 64),
             nn.ReLU(), # TODO: Try LeakyReLU()
@@ -53,15 +67,23 @@ class SimpleImitation2DCNNModel(nn.Module):
         # 4. Permute to PyTorch CNN layout -> (Batch, C=4, H=64, W=64)
         x_latest = x_latest.permute(0, 3, 1, 2)
 
-        # 5. Pass through 2D CNN, then feed the goal vector into the MLP head alongside the
-        #    visual features so the network actually knows which direction to head toward.
-        vis_features = self.conv2d_encoder(x_latest)
+        # 5. Pass through the 2D CNN, then use the goal vector to modulate the resulting
+        #    feature maps (FiLM) before flattening, then feed the goal vector into the MLP
+        #    head again alongside the modulated visual features.
+        vis_map = self.conv2d_encoder(x_latest)  # (Batch, 64, 8, 8)
+
+        goal_hidden = self.goal_encoder(goal_vec)
+        gamma = self.film_gamma(goal_hidden).unsqueeze(-1).unsqueeze(-1)  # (Batch, 64, 1, 1)
+        beta = self.film_beta(goal_hidden).unsqueeze(-1).unsqueeze(-1)   # (Batch, 64, 1, 1)
+        vis_map = vis_map * (1.0 + gamma) + beta
+
+        vis_features = self.flatten(vis_map)
         combined = torch.cat([vis_features, goal_vec], dim=1)
         return self.network(combined)
 
 # --- 2. Zarr Dataset Loader ---
 class SingleEpisodeDataset(Dataset):
-    def __init__(self, ep_path: Path, window_size: int = 3):
+    def __init__(self, ep_path: Path, window_size: int = 3, augment: bool = False):
         zarr_root = zarr.open(str(ep_path / "dataset.zarr"), mode='r')
         self.rgb = zarr_root['rgb']
         self.depth = zarr_root['depth']
@@ -70,6 +92,7 @@ class SingleEpisodeDataset(Dataset):
         self.action_rot = zarr_root['action_rot']
 
         self.window_size = window_size
+        self.augment = augment
         # action_vel[i]/action_rot[i] (see ParticipantRecorder.LockedSamplingLoop) is the motion
         # that occurred BETWEEN sample i-1 and sample i - i.e. the action that produced
         # observation i, not the action to take from it. The label for the window ending at
@@ -90,15 +113,36 @@ class SingleEpisodeDataset(Dataset):
         rgb_win = np.array(self.rgb[idx:idx+w], dtype=np.float32) / 255.0  # (T, 64, 64, 3)
         depth_win = np.array(self.depth[idx:idx+w], dtype=np.float32)[..., np.newaxis]  # (T, 64, 64, 1)
 
-        rgbd = np.concatenate([rgb_win, depth_win], axis=-1).flatten()
-        sensory_inputs = np.concatenate([goal_vec, rgbd])
-
         # Target Motor Actions: the action to take FROM this observation, i.e. the one recorded
         # one sample after the window (see num_frames comment above).
         forward = np.array(self.action_vel[idx + w][2], dtype=np.float32)   # z = forward/back
         yaw = np.array(self.action_rot[idx + w][0], dtype=np.float32)       # index 0 = azimuth delta = yaw
         yaw = (yaw + 180.0) % 360.0 - 180.0                                 # undo azimuth wraparound (e.g. 357.6 -> -2.4)
         pitch = np.array(self.action_rot[idx + w][1], dtype=np.float32)     # index 1 = elevation delta = pitch
+
+        if self.augment:
+            # Random horizontal (left/right) flip. goal_vec is in the agent's local frame
+            # (x=right, y=up, z=forward - see ParticipantRecorder.LockedSamplingLoop's
+            # InverseTransformDirection), so mirroring the image left/right requires negating
+            # goal_vec's x component and the yaw action; forward, pitch, and the goal's
+            # up/forward components are unaffected by a left/right mirror. On a single fixed
+            # layout this is close to free extra data: it stops the CNN from memorizing which
+            # specific walls/textures mean "turn left" vs "turn right".
+            if random.random() < 0.5:
+                rgb_win = rgb_win[:, :, ::-1, :].copy()
+                depth_win = depth_win[:, :, ::-1, :].copy()
+                goal_vec[0] = -goal_vec[0]
+                yaw = -yaw
+
+            # Photometric jitter on RGB only, to fight overfitting to this layout's specific
+            # lighting/texture rather than the underlying navigation cue.
+            contrast = random.uniform(0.8, 1.2)
+            brightness = random.uniform(0.8, 1.2)
+            rgb_win = np.clip((rgb_win - 0.5) * contrast + 0.5, 0.0, 1.0)
+            rgb_win = np.clip(rgb_win * brightness, 0.0, 1.0)
+
+        rgbd = np.concatenate([rgb_win, depth_win], axis=-1).flatten()
+        sensory_inputs = np.concatenate([goal_vec, rgbd])
         motor_actions = np.array([forward, yaw, pitch], dtype=np.float32)
 
         return torch.from_numpy(sensory_inputs), torch.from_numpy(motor_actions)
@@ -175,8 +219,10 @@ def main():
 
     print(f"[DATASET] Split total {len(episodes)} episodes -> Train: {len(train_episodes)}, Val: {len(val_episodes)}")
 
-    train_dataset = ConcatDataset([SingleEpisodeDataset(ep) for ep in train_episodes])
-    val_dataset = ConcatDataset([SingleEpisodeDataset(ep) for ep in val_episodes])
+    # Augment only the training split - val must stay a clean, deterministic measurement of
+    # generalization to unseen (real, non-mirrored/non-jittered) episodes.
+    train_dataset = ConcatDataset([SingleEpisodeDataset(ep, augment=True) for ep in train_episodes])
+    val_dataset = ConcatDataset([SingleEpisodeDataset(ep, augment=False) for ep in val_episodes])
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
