@@ -1,9 +1,11 @@
+import copy
 import os
 import random
 import argparse
 from pathlib import Path
 import zarr
 import numpy as np
+import onnx
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, ConcatDataset, DataLoader
@@ -18,25 +20,28 @@ class SimpleImitation2DCNNModel(nn.Module):
         self.conv2d_encoder = nn.Sequential(
             nn.Conv2d(4, 16, kernel_size=3, stride=2, padding=1),  # Output: (16, 32, 32)
             nn.BatchNorm2d(16),
-            nn.ReLU(),
+            nn.ReLU(), # TODO: Try LeakyReLU()
             nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),  # Output: (32, 16, 16)
             nn.BatchNorm2d(32),
-            nn.ReLU(),
+            nn.ReLU(), # TODO: Try LeakyReLU()
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),  # Output: (64, 8, 8)
             nn.BatchNorm2d(64),
-            nn.ReLU(),
+            nn.ReLU(), # TODO: Try LeakyReLU()
             nn.Flatten()                                          # Output: 4096 features
         )
 
+        # +3 for the goal vector, concatenated back in below - without it the network only ever
+        # sees the current camera frame and has no way to know which direction it should be
+        # heading, which is why it was reducing to a purely reactive wall-following habit.
         self.network = nn.Sequential(
-            nn.Linear(64 * 8 * 8, 64),
-            nn.ReLU(),
-            nn.Linear(64, 3),   # Motor Outputs: [Forward, Yaw, Pitch]
-            nn.Tanh()            # Clamps predictions to [-1.0, 1.0]
+            nn.Linear(64 * 8 * 8 + 3, 64),
+            nn.ReLU(), # TODO: Try LeakyReLU()
+            nn.Linear(64, 3)    # Motor Outputs: [Forward, Yaw, Pitch] (Unbounded)
         )
 
     def forward(self, sensory_inputs: torch.Tensor) -> torch.Tensor:
-        # 1. Ignore goal vector (first 3 floats)
+        # 1. Split off the goal vector (first 3 floats) from the visual payload
+        goal_vec = sensory_inputs[:, :3]  # Shape: (Batch, 3)
         vis_flat = sensory_inputs[:, 3:]  # Shape: (Batch, 49152)
 
         # 2. Reshape visual payload to (Batch, T=3, H=64, W=64, C=4)
@@ -48,21 +53,24 @@ class SimpleImitation2DCNNModel(nn.Module):
         # 4. Permute to PyTorch CNN layout -> (Batch, C=4, H=64, W=64)
         x_latest = x_latest.permute(0, 3, 1, 2)
 
-        # 5. Pass through 2D CNN & MLP Head
+        # 5. Pass through 2D CNN, then feed the goal vector into the MLP head alongside the
+        #    visual features so the network actually knows which direction to head toward.
         vis_features = self.conv2d_encoder(x_latest)
-        return self.network(vis_features)
+        combined = torch.cat([vis_features, goal_vec], dim=1)
+        return self.network(combined)
 
 # --- 2. Zarr Dataset Loader ---
 class SingleEpisodeDataset(Dataset):
     def __init__(self, ep_path: Path, window_size: int = 3):
-        self.rgb = zarr.open(str(ep_path / "rgb.zarr"), mode='r')
-        self.depth = zarr.open(str(ep_path / "depth.zarr"), mode='r')
-        self.goal = zarr.open(str(ep_path / "goal.zarr"), mode='r')
-        self.action_vel = zarr.open(str(ep_path / "action_vel.zarr"), mode='r')
-        self.action_rot = zarr.open(str(ep_path / "action_rot.zarr"), mode='r')
+        zarr_root = zarr.open(str(ep_path / "dataset.zarr"), mode='r')
+        self.rgb = zarr_root['rgb']
+        self.depth = zarr_root['depth']
+        self.goal = zarr_root['goal']
+        self.action_vel = zarr_root['action_vel']
+        self.action_rot = zarr_root['action_rot']
 
         self.window_size = window_size
-        self.num_frames = len(self.rgb) - window_size + 1
+        self.num_frames = self.rgb.shape[0] - window_size + 1
 
     def __len__(self):
         return max(0, self.num_frames)
@@ -81,14 +89,23 @@ class SingleEpisodeDataset(Dataset):
         sensory_inputs = np.concatenate([goal_vec, rgbd])
 
         # Target Motor Actions
-        forward = np.array(self.action_vel[idx + w - 1][0], dtype=np.float32)
-        yaw = np.array(self.action_rot[idx + w - 1][1], dtype=np.float32)
-        pitch = np.array(self.action_rot[idx + w - 1][0], dtype=np.float32)
+        forward = np.array(self.action_vel[idx + w - 1][2], dtype=np.float32)   # z = forward/back
+        yaw = np.array(self.action_rot[idx + w - 1][0], dtype=np.float32)       # index 0 = azimuth delta = yaw
+        yaw = (yaw + 180.0) % 360.0 - 180.0                                     # undo azimuth wraparound (e.g. 357.6 -> -2.4)
+        pitch = np.array(self.action_rot[idx + w - 1][1], dtype=np.float32)     # index 1 = elevation delta = pitch
         motor_actions = np.array([forward, yaw, pitch], dtype=np.float32)
 
         return torch.from_numpy(sensory_inputs), torch.from_numpy(motor_actions)
 
-# --- 3. ONNX Exporter ---
+# --- 3. Per-channel label scale (forward is m/s, yaw/pitch are degrees - very different natural scales) ---
+def compute_label_stats(dataset: Dataset) -> tuple[torch.Tensor, torch.Tensor]:
+    loader = DataLoader(dataset, batch_size=256, shuffle=False, num_workers=0)
+    all_actions = torch.cat([actions for _, actions in loader], dim=0)
+    mean = all_actions.mean(dim=0)
+    std = all_actions.std(dim=0).clamp_min(1e-6)
+    return mean, std
+
+# --- 5. ONNX Exporter ---
 def export_onnx(model: nn.Module, output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     model.eval()
@@ -108,16 +125,28 @@ def export_onnx(model: nn.Module, output_path: str):
             'motor_actions': {0: 'batch_size'}
         }
     )
+
+    # Recent torch versions transparently split the export into a small .onnx header plus a
+    # separate .onnx.data file once the weights are large enough. Unity Sentis only understands
+    # a single self-contained .onnx file, so re-save with everything embedded in one file.
+    onnx_model = onnx.load(output_path, load_external_data=True)
+    onnx.save(onnx_model, output_path, save_as_external_data=False)
+    data_path = output_path + ".data"
+    if os.path.exists(data_path):
+        os.remove(data_path)
+
     print(f"\n[EXPORT SUCCESS] ONNX model exported to: {output_path}")
 
-# --- 4. Training Loop ---
+# --- 6. Training Loop ---
 def main():
     parser = argparse.ArgumentParser(description="Simplified 2D Behavior Cloning Pipeline")
     parser.add_argument("--recordings_dir", type=str, default="./recordings")
     parser.add_argument("--output_onnx", type=str, default="../Assets/ImitationModel/ImitationAgentModel.onnx")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--grad_clip_norm", type=float, default=1.0)
     parser.add_argument("--val_ratio", type=float, default=0.2, help="Validation ratio (episode level)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -126,7 +155,7 @@ def main():
     torch.manual_seed(args.seed)
 
     recordings_path = Path(args.recordings_dir)
-    episodes = [p for p in recordings_path.iterdir() if p.is_dir() and (p / "rgb.zarr").exists()]
+    episodes = [p for p in recordings_path.iterdir() if p.is_dir() and (p / "dataset.zarr").exists()]
     
     if not episodes:
         print(f"[ERROR] No valid Zarr episode folders found in '{args.recordings_dir}'")
@@ -146,12 +175,40 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
     print(f"[HARDWARE] Training on device: {device}")
 
+    # forward (m/s) and yaw/pitch (degrees) live on very different natural scales; without
+    # normalizing them the shared trunk's loss is dominated by whichever channel has the
+    # largest variance (yaw), starving the others of gradient signal. Normalize only for the
+    # loss - the model itself keeps predicting real-world units, so nothing downstream changes.
+    label_mean, label_std = compute_label_stats(train_dataset)
+    label_mean, label_std = label_mean.to(device), label_std.to(device)
+    print(f"[LABEL STATS] mean(forward,yaw,pitch)={label_mean.tolist()} std={label_std.tolist()}")
+
     model = SimpleImitation2DCNNModel().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # Small weight decay curbs the erratic, out-of-training-range extrapolation the model was
+    # showing on yaw/pitch in live Unity testing (the shared trunk overfitting to the small
+    # 20-episode dataset rather than learning a robust mapping).
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = nn.MSELoss()
+
+    # BatchNorm's running stats (momentum 0.1) and each output channel's scale are still
+    # settling in the first few epochs, so an early epoch can score deceptively well on the
+    # small (4-episode) val split by luck without actually being calibrated yet - e.g. it
+    # picked epoch 4/40 once and shipped a model whose forward output was 4-8x real walking
+    # speed. Don't let the checkpoint search consider epochs before the model's had a real
+    # chance to settle.
+    min_best_epoch = max(1, args.epochs // 4)
+    print(f"[CHECKPOINT] Ignoring epochs before {min_best_epoch} when selecting the best model")
+
+    best_val_loss = float("inf")
+    best_state_dict = None
+    best_epoch = -1
 
     for epoch in range(1, args.epochs + 1):
         # Training Phase
@@ -162,8 +219,11 @@ def main():
 
             optimizer.zero_grad()
             predictions = model(sensory)
-            loss = criterion(predictions, actions)
+            loss = criterion((predictions - label_mean) / label_std, (actions - label_mean) / label_std)
             loss.backward()
+            # Caps any single bad batch from yanking the shared trunk's weights into a regime
+            # that extrapolates wildly on live (slightly out-of-distribution) camera frames.
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
             optimizer.step()
 
             train_loss += loss.item() * sensory.size(0)
@@ -177,13 +237,25 @@ def main():
             for sensory, actions in val_loader:
                 sensory, actions = sensory.to(device), actions.to(device)
                 predictions = model(sensory)
-                loss = criterion(predictions, actions)
+                loss = criterion((predictions - label_mean) / label_std, (actions - label_mean) / label_std)
                 val_loss += loss.item() * sensory.size(0)
 
         epoch_val_loss = val_loss / len(val_dataset)
 
-        print(f"Epoch [{epoch:02d}/{args.epochs:02d}] - Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f}")
+        is_best = epoch >= min_best_epoch and epoch_val_loss < best_val_loss
+        if is_best:
+            best_val_loss = epoch_val_loss
+            best_epoch = epoch
+            best_state_dict = copy.deepcopy(model.state_dict())
 
+        marker = " (best)" if is_best else ""
+        print(f"Epoch [{epoch:02d}/{args.epochs:02d}] - Train Loss: {epoch_train_loss:.6f} | Val Loss: {epoch_val_loss:.6f}{marker}")
+
+    # Validation loss can bounce between epochs on a small dataset; blindly exporting whatever
+    # the final epoch happened to land on (as before) risks shipping a worse-than-typical
+    # snapshot. Export the checkpoint that actually scored best on held-out episodes instead.
+    print(f"\n[CHECKPOINT] Using epoch {best_epoch} (best Val Loss: {best_val_loss:.6f})")
+    model.load_state_dict(best_state_dict)
     model.cpu()
     export_onnx(model, args.output_onnx)
 

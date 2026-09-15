@@ -91,20 +91,16 @@ public class EngineScript : MonoBehaviour
         ShowSimInfo();
         if (ConfigManager.Instance != null)
         {
-            // Initialize Engine Parameters
             Debug.Log("### Engine Script: Config file information found overwriting values");
-            sampleInterval=ConfigManager.Instance.Config.EngineScript_sampleInterval;
-            dataFolder=CreateDataPath("data_abm_batch",ConfigManager.Instance.Config.Purpose,ConfigManager.Instance.Config.Scene, ConfigManager.Instance.Config.Scenario);
-            fileName=SanitizeName(ConfigManager.Instance.Config.Purpose+"_batch_simId_"+ConfigManager.Instance.Config.simId+"_sampleNum_"+ConfigManager.Instance.Config.sampleNum);
+            sampleInterval = ConfigManager.Instance.Config.EngineScript_sampleInterval;
+            dataFolder = CreateDataPath("data_abm_batch", ConfigManager.Instance.Config.Purpose, ConfigManager.Instance.Config.Scene, ConfigManager.Instance.Config.Scenario);
+            fileName = SanitizeName(ConfigManager.Instance.Config.Purpose + "_batch_simId_" + ConfigManager.Instance.Config.simId + "_sampleNum_" + ConfigManager.Instance.Config.sampleNum);
 
             Time.timeScale = 1.0f;
             QualitySettings.vSyncCount = 0;
-            Application.targetFrameRate = -1; // Unlimited frame rate
+            Application.targetFrameRate = -1;
 
-            // Load external configuration if it exists
             TaskScript[] c_tasks = GetComponents<TaskScript>();
-
-            // Remove each component
             foreach (TaskScript c_task in c_tasks)
             {
                 DestroyImmediate(c_task);
@@ -113,53 +109,37 @@ public class EngineScript : MonoBehaviour
             foreach (TaskData t_task in ConfigManager.Instance.Config.tasks)
             {
                 TaskScript mytask = gameObject.AddComponent<TaskScript>();
-                Debug.Log("Task Name: " + t_task.taskName);
-                mytask.numberOfAgents=t_task.numberOfAgents;
-                mytask.spawnInterval=t_task.spawnInterval;
-                mytask.taskName=t_task.taskName;
-                mytask.agentType=t_task.agentType;
-                mytask.numberOfNeeds=t_task.numberOfNeeds;
-                mytask.agentSpeed=t_task.agentSpeed;
-                mytask.agentSize=t_task.agentSize;
-                mytask.agentRadius=t_task.agentRadius;
-                mytask.privacyRadius=t_task.privacyRadius;
-                mytask.poiTime=t_task.poiTime;
-                mytask.revisit=t_task.revisit;
-                mytask.chooseNonDeterministically=t_task.chooseNonDeterministically;
-                PopulateObjectArray(t_task.start,out mytask.start);
-                PopulateObjectArray(t_task.end,out mytask.end);
-                PopulateObjectArray(t_task.pointsOfInterest,out mytask.pointsOfInterest);
+                mytask.numberOfAgents = t_task.numberOfAgents;
+                mytask.spawnInterval = t_task.spawnInterval;
+                mytask.taskName = t_task.taskName;
+                mytask.agentType = t_task.agentType;
+                mytask.numberOfNeeds = t_task.numberOfNeeds;
+                mytask.agentSpeed = t_task.agentSpeed;
+                mytask.agentSize = t_task.agentSize;
+                mytask.agentRadius = t_task.agentRadius;
+                mytask.privacyRadius = t_task.privacyRadius;
+                mytask.poiTime = t_task.poiTime;
+                mytask.revisit = t_task.revisit;
+                mytask.chooseNonDeterministically = t_task.chooseNonDeterministically;
+                PopulateObjectArray(t_task.start, out mytask.start);
+                PopulateObjectArray(t_task.end, out mytask.end);
+                PopulateObjectArray(t_task.pointsOfInterest, out mytask.pointsOfInterest);
                 mytask.taskColor = ParseColor(t_task.taskColor);
             }
         }
 
-        // Get all tasks on this object.
         tasks = GetComponents<TaskScript>();
         tasks = tasks.Where(task => task != null && task.gameObject != null).ToArray();
 
+        // Reset spawn counters cleanly on launch
         foreach (TaskScript task in tasks)
         {
-            if (task == null)
+            if (task != null)
             {
-                Debug.LogError("Error: Found a null TaskScript reference.");
-                continue;
-            }
-
-            // Check if task properties are valid
-            if (string.IsNullOrEmpty(task.taskName))
-            {
-                Debug.LogWarning($"Warning: Task {task} has no name assigned.");
-                continue;
-            }
-
-            if (task.numberOfAgents <= 0)
-            {
-                Debug.LogWarning($"Warning: Task {task.taskName} has zero agents assigned.");
-                continue;
+                task.agentsSpawned = 0;
             }
         }
 
-        // Collect all POIs.
         POIs = new List<GameObject>();
         taskPerPOI = new List<List<TaskScript>>();
         for (int i = 0; i < tasks.Length; i++) {
@@ -168,10 +148,8 @@ public class EngineScript : MonoBehaviour
             checkAndInsert(tasks[i], tasks[i].pointsOfInterest);
         }
 
-        // Initialize Visualisation-related fields.
         baseOffset = Vector3.up * offset;
 
-        // Assign a POIMarkerScript-component to all the POIs and supply the relevant attributes.
         if (visualizePOIs) {
             for (int i = 0; i < POIs.Count; i++) {
                 POIMarkerScript POIMarker = POIs[i].AddComponent<POIMarkerScript>();
@@ -184,23 +162,27 @@ public class EngineScript : MonoBehaviour
 
         startTime = Time.realtimeSinceStartup;
         agents = new List<GameObject>[tasks.Length];
-        for (int i = 0; i < agents.Length; i++) {
-            agents[i] = new List<GameObject>();
-        }
-        path = makeFileNameUnique(dataFolder, fileName, "csv");
-
         agentToPos = new List<List<Vector3>>[tasks.Length];
         agentToColl = new List<int>[tasks.Length];
         agentToTask = new List<TaskScript>[tasks.Length];
         agentToTime = new List<float>[tasks.Length];
         agentToAllColl = new List<int[]>[tasks.Length];
-        for (int i = 0; i < agentToPos.Length; i++) {
+
+        for (int i = 0; i < tasks.Length; i++) {
+            agents[i] = new List<GameObject>();
             agentToPos[i] = new List<List<Vector3>>();
             agentToColl[i] = new List<int>();
             agentToTask[i] = new List<TaskScript>();
             agentToTime[i] = new List<float>();
             agentToAllColl[i] = new List<int[]>();
         }
+
+        if (string.IsNullOrWhiteSpace(dataFolder))
+        {
+            dataFolder = Path.Combine(Application.dataPath, "..", "SimulationLogs");
+            Debug.LogWarning($"[EngineScript] Data Folder was empty; defaulting to '{dataFolder}'.");
+        }
+        path = makeFileNameUnique(dataFolder, fileName, "csv");
     }
 
     Color ParseColor(string colorString)
@@ -350,39 +332,54 @@ public class EngineScript : MonoBehaviour
             lastSample = Time.realtimeSinceStartup;
         }
 
+        // 1. Process active agents
         for (int i = 0; i < agents.Length; i++) {
             for (int j = 0; j < agents[i].Count; j++) {
                 GameObject currAgentHolder = agents[i][j];
-                int containerIdx = 0;
+                
+                if (currAgentHolder == null) {
+                    agents[i].RemoveAt(j);
+                    if (j < agentToAllColl[i].Count) agentToAllColl[i].RemoveAt(j);
+                    j--;
+                    continue;
+                }
+
+                int containerIdx = -1;
                 bool destroyRequest = false;
 
-                // Branch information lookup depending on active simulation driver model
                 if (simulationMode == AgentSimulationMode.RuleBasedNavMesh)
                 {
                     AgentScript currAgent = currAgentHolder.GetComponent<AgentScript>();
-                    containerIdx = currAgent.startIndex;
-                    destroyRequest = currAgent.destroyRequest;
+                    if (currAgent != null) {
+                        containerIdx = currAgent.startIndex;
+                        destroyRequest = currAgent.destroyRequest;
+                    }
                 }
                 else if (simulationMode == AgentSimulationMode.ImitationLearning)
                 {
                     Agent_Based_Modelling.ImitationAgent currAgent = currAgentHolder.GetComponent<Agent_Based_Modelling.ImitationAgent>();
-                    containerIdx = currAgent.startIndex;
-                    destroyRequest = currAgent.destroyRequest;
+                    if (currAgent != null) {
+                        containerIdx = currAgent.startIndex;
+                        destroyRequest = currAgent.destroyRequest;
+                    }
                 }
 
-                if (record) {
+                if (record && containerIdx >= 0 && containerIdx < agentToPos[i].Count) {
                     agentToPos[i][containerIdx].Add(currAgentHolder.transform.position);
                     agentToColl[i][containerIdx] += collisions(currAgentHolder, i, j);
+                    
                     int[] cs = CheckCollisions(i, j);
-                    for (int t = 0; t < cs.Length; t++)
-                    {
-                        agentToAllColl[i][j][t] += cs[t];
+                    if (cs != null && j < agentToAllColl[i].Count) {
+                        for (int t = 0; t < cs.Length; t++) {
+                            agentToAllColl[i][j][t] += cs[t];
+                        }
                     }
                 }
 
                 if (destroyRequest) {
                     Destroy(agents[i][j]);
                     agents[i].RemoveAt(j);
+                    if (j < agentToAllColl[i].Count) agentToAllColl[i].RemoveAt(j);
                     j--;
                 } else {
                     anyAgentsLeft = true; 
@@ -390,33 +387,33 @@ public class EngineScript : MonoBehaviour
             }
         }
 
-        // Go through all tasks.
+        // 2. Process task spawning logic
+        bool allCompleted = true;
         for (int i = 0; i < tasks.Length; i++) {
-            activeTasks = 0;
             if (tasks[i].agentsSpawned < tasks[i].numberOfAgents) {
-                activeTasks++;
-                if ((Time.realtimeSinceStartup - startTime)  > tasks[i].agentsSpawned * tasks[i].spawnInterval) {
+                allCompleted = false;
+                if ((Time.realtimeSinceStartup - startTime) > tasks[i].agentsSpawned * tasks[i].spawnInterval) {
                     GameObject newAgent = SpawnAgent(tasks[i], tasks[i].agentsSpawned);
-                    agents[i].Add(newAgent);
-                    agentToPos[i].Add(new List<Vector3>());
-                    agentToColl[i].Add(0);
-                    agentToTask[i].Add(tasks[i]);
-                    agentToTime[i].Add(Time.realtimeSinceStartup);
-                    agentToAllColl[i].Add(new int[tasks.Length]);
-                    tasks[i].agentsSpawned++;
-                    anyAgentsLeft = true;
-
+                    if (newAgent != null) {
+                        agents[i].Add(newAgent);
+                        agentToPos[i].Add(new List<Vector3>());
+                        agentToColl[i].Add(0);
+                        agentToTask[i].Add(tasks[i]);
+                        agentToTime[i].Add(Time.realtimeSinceStartup);
+                        agentToAllColl[i].Add(new int[tasks.Length]);
+                        tasks[i].agentsSpawned++;
+                        anyAgentsLeft = true;
+                    }
                 }
-            } else {
-                allTasksCompleted = true;
             }
         }
+        allTasksCompleted = allCompleted;
 
-        if(!anyAgentsLeft && allTasksCompleted){
+        // 3. Check completion state
+        if (!anyAgentsLeft && allTasksCompleted) {
             Debug.Log("# No Agents Left!");
             
-            if (saveHeatMap)
-            {
+            if (saveHeatMap) {
                 string pngPath = path.Substring(0, path.LastIndexOf('.')) + ".png";
                 AnalyticsManager.ExportHeatMap(agentToPos, POIs, pngPath);
             }
@@ -435,28 +432,34 @@ public class EngineScript : MonoBehaviour
 
     // Spawns an agent from a task.
     private GameObject SpawnAgent(TaskScript task, int startIdx) {
-        if (task == null)
-        {
-            Debug.LogError("Error: Trying to spawn an agent without a task assigned.");
-            return null;
-        }
+        if (task == null) return null;
 
         GameObject agent = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+    
+        // Disable primitive capsule physics collider so agents do not bump into each other at spawn
+        Collider capCollider = agent.GetComponent<Collider>();
+        if (capCollider != null) {
+            Destroy(capCollider);
+        }
+
         Shader shader = Shader.Find("Diffuse");
-        Material material = new Material(shader);
+        Material material = new Material(shader != null ? shader : Shader.Find("Standard"));
         material.color = task.taskColor;
         agent.GetComponent<MeshRenderer>().material = material;
 
-        NavMeshHit hit;
-        NavMesh.SamplePosition(agent.transform.position, out hit, 1000.0f, NavMesh.AllAreas);
-        agent.transform.position = hit.position;
+        Vector3 spawnPos = (task.start != null && task.start.Length > 0 && task.start[0] != null) 
+            ? task.start[0].transform.position 
+            : transform.position;
 
-        // Configure dynamic script execution attachment setup
+        NavMeshHit hit;
+        if (NavMesh.SamplePosition(spawnPos, out hit, 1000.0f, NavMesh.AllAreas)) {
+            agent.transform.position = hit.position;
+        }
+
         if (simulationMode == AgentSimulationMode.RuleBasedNavMesh)
         {
             agent.AddComponent<NavMeshAgent>();
             AgentScript scriptInstance = agent.AddComponent<AgentScript>();
-
             scriptInstance.task = task;
             scriptInstance.traceLength = traceLength;
             scriptInstance.visualizePaths = visualizePaths;
@@ -466,7 +469,6 @@ public class EngineScript : MonoBehaviour
         else if (simulationMode == AgentSimulationMode.ImitationLearning)
         {
             Agent_Based_Modelling.ImitationAgent scriptInstance = agent.AddComponent<Agent_Based_Modelling.ImitationAgent>();
-
             scriptInstance.task = task;
             scriptInstance.TemporalWindowSize = 3;
             if (defaultBaselineModel != null)
@@ -474,12 +476,6 @@ public class EngineScript : MonoBehaviour
                 scriptInstance.BaselineModelAsset = defaultBaselineModel;
             }
             scriptInstance.startIndex = startIdx;
-
-            if (Agent_Based_Modelling.ImitationAgent.TryLoadNewestModelOnce())
-            {
-                Debug.Log("[Model Swap] Loading the newest exported model before spawning the next imitation agent.");
-                scriptInstance.ApplyLatestExportedModel();
-            }
         }
 
         return agent;
@@ -629,32 +625,30 @@ public class EngineScript : MonoBehaviour
 
     private int[] CheckCollisions(int taskIdx, int agentIdx)
     {
+        if (taskIdx < 0 || taskIdx >= agents.Length || agentIdx < 0 || agentIdx >= agents[taskIdx].Count)
+            return new int[tasks.Length];
+
         GameObject currAgent = agents[taskIdx][agentIdx];
+        if (currAgent == null) return new int[tasks.Length];
+
         int[] collisionsPerTask = new int[tasks.Length];
         float currentPrivacyRadius = 1.0f;
 
-        if (simulationMode == AgentSimulationMode.RuleBasedNavMesh)
-        {
-            currentPrivacyRadius = currAgent.GetComponent<AgentScript>().task.privacyRadius;
-        }
-        else
-        {
-            currentPrivacyRadius = currAgent.GetComponent<Agent_Based_Modelling.ImitationAgent>().task.privacyRadius;
+        if (simulationMode == AgentSimulationMode.RuleBasedNavMesh) {
+            var script = currAgent.GetComponent<AgentScript>();
+            if (script != null && script.task != null) currentPrivacyRadius = script.task.privacyRadius;
+        } else {
+            var script = currAgent.GetComponent<Agent_Based_Modelling.ImitationAgent>();
+            if (script != null && script.task != null) currentPrivacyRadius = script.task.privacyRadius;
         }
 
-        for (int t = 0; t < tasks.Length; t++)
-        {
-            for (int j = 0; j < agents[t].Count; j++)
-            {
-                if (t == taskIdx && j == agentIdx)
-                {
-                    continue;
-                }
+        for (int t = 0; t < tasks.Length; t++) {
+            for (int j = 0; j < agents[t].Count; j++) {
+                if (t == taskIdx && j == agentIdx) continue;
+                if (agents[t][j] == null) continue;
 
                 float dist = Vector3.Distance(currAgent.transform.position, agents[t][j].transform.position);
-
-                if (dist < currentPrivacyRadius)
-                {
+                if (dist < currentPrivacyRadius) {
                     collisionsPerTask[t] += 1;
                 }
             }

@@ -18,7 +18,7 @@ namespace Assets.Scripts.Editor
         UniversityClinicMuenster,    // Doppel-Ring mit Brücke
         Racetrack,                   // Parametric Racetrack / Core layout
         ShiftedGridGrammar,          // Shape-grammar modular hospital layout
-        Comb                        // Kamm-Typologie
+        Comb                         // Kamm-Typologie
     }
 
     public enum KammAlignment
@@ -40,7 +40,7 @@ namespace Assets.Scripts.Editor
     {
         public LayoutTopology Topology;
         public KammAlignment CombAlignment;
-        public float CombAngle; // Added
+        public float CombAngle;
         public Vector2 Dimensions;
         public float WallHeight;
         public GameObject FpsControllerPrefab;
@@ -60,11 +60,14 @@ namespace Assets.Scripts.Editor
         private const float FloorY = 0f;
         private const float AgentSpawnY = 1.05f;
         private const float GoalY = 1.0f;
-        private const float MinCorridorClearance = 2.2f; // Guarantees VR participants have clean clearance
+        private const float MinCorridorClearance = 2.2f;
 
         public static LayoutGenerationData Build(GameObject root, LayoutGenerationSettings settings, Material sharedMaterial)
         {
             if (root == null) throw new ArgumentNullException(nameof(root));
+
+            int effectiveSeed = settings.RandomSeed != 0 ? settings.RandomSeed : 1337;
+            System.Random rng = new System.Random(effectiveSeed);
 
             var floorLayer = SceneExporter.EnsureLayer("Walkable_Floor");
             var obstacleLayer = SceneExporter.EnsureLayer("Architecture_Obstacle");
@@ -84,7 +87,6 @@ namespace Assets.Scripts.Editor
             CreateFloorAndCeiling(root.transform, width, depth, wallHeight, sharedMaterial, floorLayer, obstacleLayer);
             CreatePerimeterWalls(root.transform, width, depth, wallHeight, sharedMaterial, obstacleLayer);
             
-            // Corrected to logical AND (&&) to skip terminal walls for custom topologies
             if (settings.Topology != LayoutTopology.Racetrack && 
                 settings.Topology != LayoutTopology.ShiftedGridGrammar &&
                 settings.Topology != LayoutTopology.Comb)
@@ -106,10 +108,10 @@ namespace Assets.Scripts.Editor
                 RightRoomBoundaryX = rightRoomBoundaryX,
                 CorridorLeftX = corridorLeftX,
                 CorridorRightX = corridorRightX,
-                Seed = settings.RandomSeed,
+                Seed = effectiveSeed,
                 CombAlignment = settings.CombAlignment,
-                CombAngle = settings.CombAngle // Forward angle
-            }, sharedMaterial, obstacleLayer, ref spawnPosition, ref goalPosition);
+                CombAngle = settings.CombAngle
+            }, sharedMaterial, obstacleLayer, ref spawnPosition, ref goalPosition, rng);
 
             return new LayoutGenerationData
             {
@@ -119,7 +121,15 @@ namespace Assets.Scripts.Editor
             };
         }
 
-        private static void BuildTopology(Transform root, LayoutTopology topology, LayoutArea area, Material sharedMaterial, int obstacleLayer, ref Vector3 spawnPosition, ref Vector3 goalPosition)
+        private static void BuildTopology(
+            Transform root, 
+            LayoutTopology topology, 
+            LayoutArea area, 
+            Material sharedMaterial, 
+            int obstacleLayer, 
+            ref Vector3 spawnPosition, 
+            ref Vector3 goalPosition, 
+            System.Random rng)
         {
             switch (topology)
             {
@@ -136,7 +146,7 @@ namespace Assets.Scripts.Editor
                     BuildMultiRoomDoorway(root, area, sharedMaterial, obstacleLayer);
                     break;
                 case LayoutTopology.RandomObstacleGrid:
-                    BuildRandomObstacleGrid(root, area, sharedMaterial, obstacleLayer);
+                    BuildRandomObstacleGrid(root, area, sharedMaterial, obstacleLayer, rng);
                     break;
                 case LayoutTopology.CircleBath:
                     BuildCircleBath(root, area, sharedMaterial, obstacleLayer);
@@ -154,27 +164,25 @@ namespace Assets.Scripts.Editor
                     BuildUniversityClinicMuenster(root, area, sharedMaterial, obstacleLayer);
                     break;
                 case LayoutTopology.Racetrack:
-                    BuildRacetrack(root, area, sharedMaterial, obstacleLayer, ref spawnPosition, ref goalPosition);
+                    BuildRacetrack(root, area, sharedMaterial, obstacleLayer, ref spawnPosition, ref goalPosition, rng);
                     break;
                 case LayoutTopology.ShiftedGridGrammar:
-                    BuildShiftedGridGrammar(root, area, sharedMaterial, obstacleLayer, ref spawnPosition, ref goalPosition);
+                    BuildShiftedGridGrammar(root, area, sharedMaterial, obstacleLayer, ref spawnPosition, ref goalPosition, rng);
                     break;
                 case LayoutTopology.Comb:
-                    var kammParams = ComputeKammParameters(area, area.CombAlignment, area.Seed);
-                    BuildCombTopology(root, area, kammParams, sharedMaterial, obstacleLayer, ref spawnPosition, ref goalPosition);
+                    var kammParams = ComputeKammParameters(area, area.CombAlignment, rng);
+                    BuildCombTopology(root, area, kammParams, sharedMaterial, obstacleLayer, ref spawnPosition, ref goalPosition, rng);
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(topology), topology, null);
             }
         }
 
-        private static void BuildRacetrack(Transform root, LayoutArea area, Material material, int obstacleLayer, ref Vector3 spawnPos, ref Vector3 goalPos)
+        private static void BuildRacetrack(Transform root, LayoutArea area, Material material, int obstacleLayer, ref Vector3 spawnPos, ref Vector3 goalPos, System.Random rng)
         {
-            var rng = new System.Random(area.Seed == 0 ? 1337 : area.Seed);
             const float minRoomLength = 3.0f;
             const float doorWidth = 1.0f;
 
-            // 1. Determine Room Depths
             float depthWest = area.Width * 0.25f;
             float depthEast = area.Width * 0.25f;
             float depthNorth = depthWest * (float)(0.85 + rng.NextDouble() * 0.3);
@@ -185,7 +193,6 @@ namespace Assets.Scripts.Editor
             float innerSouthZ = -area.HalfDepth + depthSouth;
             float innerNorthZ = area.HalfDepth - depthNorth;
 
-            // 2. Partition West (Start) & East (End) Terminal Rooms along Z
             int westSubCount = rng.Next(2, 5);
             spawnPos = BuildTerminalSubRooms(root, "West", -area.HalfWidth, innerWestX, innerSouthZ, innerNorthZ, 
                 westSubCount, true, area.WallHeight, material, obstacleLayer, doorWidth, rng);
@@ -194,7 +201,6 @@ namespace Assets.Scripts.Editor
             goalPos = BuildTerminalSubRooms(root, "East", innerEastX, area.HalfWidth, innerSouthZ, innerNorthZ, 
                 eastSubCount, false, area.WallHeight, material, obstacleLayer, doorWidth, rng);
 
-            // 3. Generate North & South Side Rooms along X
             float availableXSpan = innerEastX - innerWestX;
 
             BuildSideRooms(root, "South", innerWestX, innerEastX, -area.HalfDepth, innerSouthZ, 
@@ -203,30 +209,22 @@ namespace Assets.Scripts.Editor
             BuildSideRooms(root, "North", innerWestX, innerEastX, innerNorthZ, area.HalfDepth, 
                 availableXSpan, minRoomLength, doorWidth, false, area.WallHeight, material, obstacleLayer, rng);
 
-            // 4. Divide Corner Rooms and Connect to Racetrack
             BuildCornerRooms(root, area, innerWestX, innerEastX, innerSouthZ, innerNorthZ, 
                 area.WallHeight, material, obstacleLayer, doorWidth, rng);
 
-            // 5. Calculate Inner Racetrack Core Dimensions with Clearance
             float innerCorridorWidth = availableXSpan;
             float innerCorridorLength = innerNorthZ - innerSouthZ;
 
-            var p = ComputeRacetrackParameters(innerCorridorWidth, innerCorridorLength, area.Seed, MinCorridorClearance);
+            var p = ComputeRacetrackParameters(innerCorridorWidth, innerCorridorLength, rng, MinCorridorClearance);
 
             Vector3 centerBoxPos = new Vector3((innerWestX + innerEastX) * 0.5f, area.WallHeight * 0.5f, (innerSouthZ + innerNorthZ) * 0.5f);
             Vector3 centerBoxScale = new Vector3(p.Wc, area.WallHeight, p.Lc);
 
             CreateWall(root, "Racetrack_CenterCore", centerBoxPos, centerBoxScale, material, obstacleLayer);
         }
-        
-        /// <summary>
-        /// Calculates valid racetrack parameters for a floorplan of size width x length.
-        /// Enforces clearances such that 2*wf + wc < width and 2*wf + lc < length.
-        /// </summary>
-        public static RacetrackParams ComputeRacetrackParameters(float width, float length, int seed = 0, float minDistance = 2.2f)
-        {
-            var rng = new System.Random(seed == 0 ? UnityEngine.Random.Range(1, 100000) : seed);
 
+        public static RacetrackParams ComputeRacetrackParameters(float width, float length, System.Random rng, float minDistance = 2.2f)
+        {
             float maxWfLimit = Mathf.Min(width, length) * 0.5f;
             float maxWfForBox = Mathf.Min(width - minDistance, length - minDistance) * 0.5f;
             float maxWf = Mathf.Min(maxWfLimit, maxWfForBox) - 0.05f;
@@ -249,8 +247,6 @@ namespace Assets.Scripts.Editor
             float lc = Lerp(minLc, maxLc, (float)rng.NextDouble());
 
             return new RacetrackParams { Wf = wf, Wc = wc, Lc = lc };
-
-            static float Lerp(float a, float b, float t) => a + (b - a) * Mathf.Clamp01(t);
         }
 
         private static Vector3 BuildTerminalSubRooms(Transform root, string prefix, float minX, float maxX, float minZ, float maxZ, 
@@ -318,7 +314,7 @@ namespace Assets.Scripts.Editor
                 currentX = nextX;
             }
         }
-        
+
         private static void BuildCornerRooms(Transform root, LayoutArea area, float innerWestX, float innerEastX, 
             float innerSouthZ, float innerNorthZ, float wallHeight, Material material, int obstacleLayer, float doorWidth, System.Random rng)
         {
@@ -391,28 +387,6 @@ namespace Assets.Scripts.Editor
             return lengths;
         }
 
-        private static void CreateWallWithHorizontalDoor(Transform root, string name, float z, float xMin, float xMax,
-            float wallHeight, Material material, int layer, float doorCenterX, float doorWidth)
-        {
-            float doorHalf = doorWidth * 0.5f;
-            float doorMin = Mathf.Clamp(doorCenterX - doorHalf, xMin + 0.1f, xMax - 0.1f);
-            float doorMax = Mathf.Clamp(doorCenterX + doorHalf, xMin + 0.1f, xMax - 0.1f);
-
-            if (doorMin > xMin)
-            {
-                float leftLength = doorMin - xMin;
-                CreateWall(root, $"{name}_Left", new Vector3(xMin + leftLength * 0.5f, wallHeight * 0.5f, z),
-                    new Vector3(leftLength, wallHeight, WallThickness), material, layer);
-            }
-
-            if (doorMax < xMax)
-            {
-                float rightLength = xMax - doorMax;
-                CreateWall(root, $"{name}_Right", new Vector3(doorMax + rightLength * 0.5f, wallHeight * 0.5f, z),
-                    new Vector3(rightLength, wallHeight, WallThickness), material, layer);
-            }
-        }
-
         public struct KammParams
         {
             public float Lmag;
@@ -425,322 +399,306 @@ namespace Assets.Scripts.Editor
             public float Droom;
         }
         
-        private static KammParams ComputeKammParameters(LayoutArea area, KammAlignment requestedAlignment, int seed = 0)
-{
-    var rng = new System.Random(seed == 0 ? UnityEngine.Random.Range(1, 100000) : seed);
-
-    KammAlignment alignment = requestedAlignment;
-    if (alignment == KammAlignment.Random)
-    {
-        alignment = (KammAlignment)rng.Next(1, 4);
-    }
-
-    float margin = 2.0f;
-    float maxSpanX = area.Width - (margin * 2f);
-    float maxSpanZ = area.Depth - (margin * 2f);
-
-    float wMag = Mathf.Clamp((float)(4.0 + rng.NextDouble() * 4.0), 4.0f, 8.0f);
-    float wFinger = Mathf.Clamp((float)(2.5 + rng.NextDouble() * 1.5), 2.5f, 4.0f);
-    float dRoom = Mathf.Clamp((float)(6.0 + rng.NextDouble() * 2.0), 6.0f, 8.0f);
-
-    float fingerZFootprint = wFinger + (dRoom * 2f) + 1.0f;
-
-    float minRequiredLmag = (alignment == KammAlignment.BeidseitigVersetzt)
-        ? fingerZFootprint * 2.5f
-        : fingerZFootprint * 3.0f;
-
-    float lMag = Mathf.Clamp(maxSpanZ * 0.9f, minRequiredLmag, 250f);
-
-    int maxN = (alignment == KammAlignment.BeidseitigVersetzt)
-        ? Mathf.FloorToInt((lMag / fingerZFootprint) - 0.5f)
-        : Mathf.FloorToInt((lMag / fingerZFootprint) - 1.0f);
-
-    int nFinger = Mathf.Clamp(maxN, 2, 8);
-
-    float maxFingerLength = (alignment == KammAlignment.Einseitig)
-        ? maxSpanX - wMag
-        : (maxSpanX - wMag) * 0.5f;
-
-    float lFinger = Mathf.Clamp(maxFingerLength, 3.0f, 50.0f);
-
-    // Use user-defined angle if valid (75°-105°), otherwise generate randomly
-    float alphaDeg = (area.CombAngle >= 75f && area.CombAngle <= 105f) 
-        ? area.CombAngle 
-        : (float)(75.0 + rng.NextDouble() * 30.0);
-
-    return new KammParams
-    {
-        Lmag = lMag,
-        Wmag = wMag,
-        Nfinger = nFinger,
-        Lfinger = lFinger,
-        Wfinger = wFinger,
-        AlphaDeg = alphaDeg,
-        Alignment = alignment,
-        Droom = dRoom
-    };
-}
-
-private static void BuildCombTopology(
-    Transform root, 
-    LayoutArea area, 
-    KammParams p, 
-    Material material, 
-    int obstacleLayer, 
-    ref Vector3 spawnPosition, 
-    ref Vector3 goalPosition)
-{
-    var rng = new System.Random(area.Seed == 0 ? 1337 : area.Seed);
-    const float doorWidth = 1.4f;
-
-    float lMag = p.Lmag;
-    float wMag = p.Wmag;
-    int nFinger = p.Nfinger;
-    float lFinger = p.Lfinger;
-    float wFinger = p.Wfinger;
-    float dRoom = p.Droom;
-    float alphaDeg = p.AlphaDeg;
-    KammAlignment alignment = p.Alignment;
-
-    float magStartZ = -lMag * 0.5f;
-    float magEndZ = lMag * 0.5f;
-
-    float maxSpanX = area.Width - 4.0f;
-    float spineX = (alignment == KammAlignment.Einseitig) 
-        ? (maxSpanX * 0.5f) - (wMag * 0.5f) 
-        : 0f;
-
-    List<Vector3> roomCenters = new List<Vector3>();
-
-    CreateWall(root, "Mag_Cap_North", new Vector3(spineX, area.WallHeight * 0.5f, magEndZ), new Vector3(wMag, area.WallHeight, WallThickness), material, obstacleLayer);
-    CreateWall(root, "Mag_Cap_South", new Vector3(spineX, area.WallHeight * 0.5f, magStartZ), new Vector3(wMag, area.WallHeight, WallThickness), material, obstacleLayer);
-
-    List<float> leftBranchZs = new List<float>();
-    List<float> rightBranchZs = new List<float>();
-
-    if (alignment == KammAlignment.Einseitig)
-    {
-        float spacing = lMag / (nFinger + 1);
-        for (int i = 0; i < nFinger; i++)
+        private static KammParams ComputeKammParameters(LayoutArea area, KammAlignment requestedAlignment, System.Random rng)
         {
-            float bZ = magStartZ + spacing * (i + 1);
-            leftBranchZs.Add(bZ);
-            BuildFingerBranch(root, $"Finger_L_{i}", spineX - (wMag * 0.5f), bZ, -1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
-        }
-
-        CreateWall(root, "Mag_EastWall", new Vector3(spineX + (wMag * 0.5f), area.WallHeight * 0.5f, 0f), new Vector3(WallThickness, area.WallHeight, lMag), material, obstacleLayer);
-    }
-    else if (alignment == KammAlignment.BeidseitigParallel)
-    {
-        float spacing = lMag / (nFinger + 1);
-        for (int i = 0; i < nFinger; i++)
-        {
-            float bZ = magStartZ + spacing * (i + 1);
-            leftBranchZs.Add(bZ);
-            rightBranchZs.Add(bZ);
-
-            BuildFingerBranch(root, $"Finger_L_{i}", spineX - (wMag * 0.5f), bZ, -1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
-            BuildFingerBranch(root, $"Finger_R_{i}", spineX + (wMag * 0.5f), bZ, 1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
-        }
-    }
-    else
-    {
-        int totalBranches = nFinger * 2;
-        float spacing = lMag / (totalBranches + 1);
-
-        for (int i = 0; i < totalBranches; i++)
-        {
-            float bZ = magStartZ + spacing * (i + 1);
-            if (i % 2 == 0)
+            KammAlignment alignment = requestedAlignment;
+            if (alignment == KammAlignment.Random)
             {
-                leftBranchZs.Add(bZ);
-                BuildFingerBranch(root, $"Finger_L_{i/2}", spineX - (wMag * 0.5f), bZ, -1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
+                alignment = (KammAlignment)rng.Next(1, 4);
+            }
+
+            float margin = 2.0f;
+            float maxSpanX = area.Width - (margin * 2f);
+            float maxSpanZ = area.Depth - (margin * 2f);
+
+            float wMag = Mathf.Clamp((float)(4.0 + rng.NextDouble() * 4.0), 4.0f, 8.0f);
+            float wFinger = Mathf.Clamp((float)(2.5 + rng.NextDouble() * 1.5), 2.5f, 4.0f);
+            float dRoom = Mathf.Clamp((float)(6.0 + rng.NextDouble() * 2.0), 6.0f, 8.0f);
+
+            float fingerZFootprint = wFinger + (dRoom * 2f) + 1.0f;
+
+            float minRequiredLmag = (alignment == KammAlignment.BeidseitigVersetzt)
+                ? fingerZFootprint * 2.5f
+                : fingerZFootprint * 3.0f;
+
+            float lMag = Mathf.Clamp(maxSpanZ * 0.9f, minRequiredLmag, 250f);
+
+            int maxN = (alignment == KammAlignment.BeidseitigVersetzt)
+                ? Mathf.FloorToInt((lMag / fingerZFootprint) - 0.5f)
+                : Mathf.FloorToInt((lMag / fingerZFootprint) - 1.0f);
+
+            int nFinger = Mathf.Clamp(maxN, 2, 8);
+
+            float maxFingerLength = (alignment == KammAlignment.Einseitig)
+                ? maxSpanX - wMag
+                : (maxSpanX - wMag) * 0.5f;
+
+            float lFinger = Mathf.Clamp(maxFingerLength, 3.0f, 50.0f);
+
+            float alphaDeg = (area.CombAngle >= 75f && area.CombAngle <= 105f) 
+                ? area.CombAngle 
+                : (float)(75.0 + rng.NextDouble() * 30.0);
+
+            return new KammParams
+            {
+                Lmag = lMag,
+                Wmag = wMag,
+                Nfinger = nFinger,
+                Lfinger = lFinger,
+                Wfinger = wFinger,
+                AlphaDeg = alphaDeg,
+                Alignment = alignment,
+                Droom = dRoom
+            };
+        }
+
+        private static void BuildCombTopology(
+            Transform root, 
+            LayoutArea area, 
+            KammParams p, 
+            Material material, 
+            int obstacleLayer, 
+            ref Vector3 spawnPosition, 
+            ref Vector3 goalPosition,
+            System.Random rng)
+        {
+            const float doorWidth = 1.4f;
+
+            float lMag = p.Lmag;
+            float wMag = p.Wmag;
+            int nFinger = p.Nfinger;
+            float lFinger = p.Lfinger;
+            float wFinger = p.Wfinger;
+            float dRoom = p.Droom;
+            float alphaDeg = p.AlphaDeg;
+            KammAlignment alignment = p.Alignment;
+
+            float magStartZ = -lMag * 0.5f;
+            float magEndZ = lMag * 0.5f;
+
+            float maxSpanX = area.Width - 4.0f;
+            float spineX = (alignment == KammAlignment.Einseitig) 
+                ? (maxSpanX * 0.5f) - (wMag * 0.5f) 
+                : 0f;
+
+            List<Vector3> roomCenters = new List<Vector3>();
+
+            CreateWall(root, "Mag_Cap_North", new Vector3(spineX, area.WallHeight * 0.5f, magEndZ), new Vector3(wMag, area.WallHeight, WallThickness), material, obstacleLayer);
+            CreateWall(root, "Mag_Cap_South", new Vector3(spineX, area.WallHeight * 0.5f, magStartZ), new Vector3(wMag, area.WallHeight, WallThickness), material, obstacleLayer);
+
+            List<float> leftBranchZs = new List<float>();
+            List<float> rightBranchZs = new List<float>();
+
+            if (alignment == KammAlignment.Einseitig)
+            {
+                float spacing = lMag / (nFinger + 1);
+                for (int i = 0; i < nFinger; i++)
+                {
+                    float bZ = magStartZ + spacing * (i + 1);
+                    leftBranchZs.Add(bZ);
+                    BuildFingerBranch(root, $"Finger_L_{i}", spineX - (wMag * 0.5f), bZ, -1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
+                }
+
+                CreateWall(root, "Mag_EastWall", new Vector3(spineX + (wMag * 0.5f), area.WallHeight * 0.5f, 0f), new Vector3(WallThickness, area.WallHeight, lMag), material, obstacleLayer);
+            }
+            else if (alignment == KammAlignment.BeidseitigParallel)
+            {
+                float spacing = lMag / (nFinger + 1);
+                for (int i = 0; i < nFinger; i++)
+                {
+                    float bZ = magStartZ + spacing * (i + 1);
+                    leftBranchZs.Add(bZ);
+                    rightBranchZs.Add(bZ);
+
+                    BuildFingerBranch(root, $"Finger_L_{i}", spineX - (wMag * 0.5f), bZ, -1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
+                    BuildFingerBranch(root, $"Finger_R_{i}", spineX + (wMag * 0.5f), bZ, 1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
+                }
             }
             else
             {
-                rightBranchZs.Add(bZ);
-                BuildFingerBranch(root, $"Finger_R_{i/2}", spineX + (wMag * 0.5f), bZ, 1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
+                int totalBranches = nFinger * 2;
+                float spacing = lMag / (totalBranches + 1);
+
+                for (int i = 0; i < totalBranches; i++)
+                {
+                    float bZ = magStartZ + spacing * (i + 1);
+                    if (i % 2 == 0)
+                    {
+                        leftBranchZs.Add(bZ);
+                        BuildFingerBranch(root, $"Finger_L_{i/2}", spineX - (wMag * 0.5f), bZ, -1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
+                    }
+                    else
+                    {
+                        rightBranchZs.Add(bZ);
+                        BuildFingerBranch(root, $"Finger_R_{i/2}", spineX + (wMag * 0.5f), bZ, 1.0f, lFinger, wFinger, dRoom, alphaDeg, area.WallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
+                    }
+                }
+            }
+
+            float spineOpeningWidth = wFinger / Mathf.Sin(alphaDeg * Mathf.Deg2Rad);
+
+            BuildSpineSideWallWithOpenings(root, "Mag_WestWall", spineX - (wMag * 0.5f), magStartZ, magEndZ, leftBranchZs, spineOpeningWidth, area.WallHeight, material, obstacleLayer);
+
+            if (alignment != KammAlignment.Einseitig)
+            {
+                BuildSpineSideWallWithOpenings(root, "Mag_EastWall", spineX + (wMag * 0.5f), magStartZ, magEndZ, rightBranchZs, spineOpeningWidth, area.WallHeight, material, obstacleLayer);
+            }
+
+            if (roomCenters.Count >= 2)
+            {
+                int spawnIdx = rng.Next(0, roomCenters.Count);
+                int goalIdx = rng.Next(0, roomCenters.Count);
+
+                while (goalIdx == spawnIdx)
+                {
+                    goalIdx = rng.Next(0, roomCenters.Count);
+                }
+
+                spawnPosition = roomCenters[spawnIdx];
+                goalPosition = new Vector3(roomCenters[goalIdx].x, GoalY, roomCenters[goalIdx].z);
+            }
+            else
+            {
+                spawnPosition = new Vector3(spineX, AgentSpawnY, magStartZ + 1.0f);
+                goalPosition = new Vector3(spineX, GoalY, magEndZ - 1.0f);
             }
         }
-    }
 
-    // Adjust spine wall opening sizes according to entry angle trigonometric projection
-    float spineOpeningWidth = wFinger / Mathf.Sin(alphaDeg * Mathf.Deg2Rad);
-
-    BuildSpineSideWallWithOpenings(root, "Mag_WestWall", spineX - (wMag * 0.5f), magStartZ, magEndZ, leftBranchZs, spineOpeningWidth, area.WallHeight, material, obstacleLayer);
-
-    if (alignment != KammAlignment.Einseitig)
-    {
-        BuildSpineSideWallWithOpenings(root, "Mag_EastWall", spineX + (wMag * 0.5f), magStartZ, magEndZ, rightBranchZs, spineOpeningWidth, area.WallHeight, material, obstacleLayer);
-    }
-
-    if (roomCenters.Count >= 2)
-    {
-        int spawnIdx = rng.Next(0, roomCenters.Count);
-        int goalIdx = rng.Next(0, roomCenters.Count);
-
-        while (goalIdx == spawnIdx)
+        private static void BuildFingerBranch(
+            Transform root,
+            string prefix,
+            float startX,
+            float branchZ,
+            float dirX,
+            float lFinger,
+            float wFinger,
+            float dRoom,
+            float alphaDeg,
+            float wallHeight,
+            Material material,
+            int obstacleLayer,
+            float doorWidth,
+            System.Random rng,
+            List<Vector3> roomCenters)
         {
-            goalIdx = rng.Next(0, roomCenters.Count);
+            GameObject branchGo = new GameObject(prefix);
+            branchGo.transform.SetParent(root, false);
+            branchGo.transform.localPosition = new Vector3(startX, 0f, branchZ);
+
+            float rotationY = (dirX > 0f) ? alphaDeg : -alphaDeg;
+            branchGo.transform.localRotation = Quaternion.Euler(0f, rotationY, 0f);
+
+            Transform branchRoot = branchGo.transform;
+
+            float halfWFinger = wFinger * 0.5f;
+            float rightX = halfWFinger;
+            float leftX = -halfWFinger;
+
+            float maxLocalXRight = rightX + dRoom;
+            float maxLocalXLeft = leftX - dRoom;
+
+            float rad = rotationY * Mathf.Deg2Rad;
+            float cotRot = 1.0f / Mathf.Tan(rad);
+
+            float rightOuterZStart = -maxLocalXRight * cotRot;
+            float leftOuterZStart = -maxLocalXLeft * cotRot;
+
+            float rightCorridorZStart = -rightX * cotRot;
+            float leftCorridorZStart = -leftX * cotRot;
+
+            CreateWall(branchRoot, $"{prefix}_EndCap", new Vector3(0f, wallHeight * 0.5f, lFinger),
+                new Vector3(wFinger + (dRoom * 2f), wallHeight, WallThickness), material, obstacleLayer);
+
+            float rightLen = lFinger - rightOuterZStart;
+            if (rightLen > 0.1f)
+            {
+                CreateWall(branchRoot, $"{prefix}_Right_OuterWall",
+                    new Vector3(maxLocalXRight, wallHeight * 0.5f, (rightOuterZStart + lFinger) * 0.5f),
+                    new Vector3(WallThickness, wallHeight, rightLen), material, obstacleLayer);
+            }
+
+            float leftLen = lFinger - leftOuterZStart;
+            if (leftLen > 0.1f)
+            {
+                CreateWall(branchRoot, $"{prefix}_Left_OuterWall",
+                    new Vector3(maxLocalXLeft, wallHeight * 0.5f, (leftOuterZStart + lFinger) * 0.5f),
+                    new Vector3(WallThickness, wallHeight, leftLen), material, obstacleLayer);
+            }
+
+            BuildRoomRow(branchRoot, $"{prefix}_Right", rightX, 1.0f, dRoom, rightCorridorZStart, rightOuterZStart,
+                lFinger, wallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
+
+            BuildRoomRow(branchRoot, $"{prefix}_Left", leftX, -1.0f, dRoom, leftCorridorZStart, leftOuterZStart,
+                lFinger, wallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
         }
 
-        spawnPosition = roomCenters[spawnIdx];
-        goalPosition = new Vector3(roomCenters[goalIdx].x, GoalY, roomCenters[goalIdx].z);
-    }
-    else
-    {
-        spawnPosition = new Vector3(spineX, AgentSpawnY, magStartZ + 1.0f);
-        goalPosition = new Vector3(spineX, GoalY, magEndZ - 1.0f);
-    }
-}
-
-private static void BuildFingerBranch(
-    Transform root,
-    string prefix,
-    float startX,
-    float branchZ,
-    float dirX,
-    float lFinger,
-    float wFinger,
-    float dRoom,
-    float alphaDeg,
-    float wallHeight,
-    Material material,
-    int obstacleLayer,
-    float doorWidth,
-    System.Random rng,
-    List<Vector3> roomCenters)
-{
-    // Create a local root container for the finger branch[cite: 1]
-    GameObject branchGo = new GameObject(prefix);
-    branchGo.transform.SetParent(root, false);
-    branchGo.transform.localPosition = new Vector3(startX, 0f, branchZ);
-
-    // Calculate Y rotation based on direction (-1 for Left, +1 for Right) and finger angle[cite: 1]
-    float rotationY = (dirX > 0f) ? alphaDeg : -alphaDeg;
-    branchGo.transform.localRotation = Quaternion.Euler(0f, rotationY, 0f);
-
-    Transform branchRoot = branchGo.transform;
-
-    float halfWFinger = wFinger * 0.5f;
-    float rightX = halfWFinger;
-    float leftX = -halfWFinger;
-
-    float maxLocalXRight = rightX + dRoom;
-    float maxLocalXLeft = leftX - dRoom;
-
-    // Cotangent of local rotation angle to find exact Spine Wall intersection (Z = -X * cotRot)
-    float rad = rotationY * Mathf.Deg2Rad;
-    float cotRot = 1.0f / Mathf.Tan(rad);
-
-    // Exact Z-intersections with the Spine Wall plane
-    float rightOuterZStart = -maxLocalXRight * cotRot;
-    float leftOuterZStart = -maxLocalXLeft * cotRot;
-
-    float rightCorridorZStart = -rightX * cotRot;
-    float leftCorridorZStart = -leftX * cotRot;
-
-    // EndCap (at local Z = lFinger)[cite: 1]
-    CreateWall(branchRoot, $"{prefix}_EndCap", new Vector3(0f, wallHeight * 0.5f, lFinger),
-        new Vector3(wFinger + (dRoom * 2f), wallHeight, WallThickness), material, obstacleLayer);
-
-    // Outer Side Walls starting precisely at the Spine Wall intersection plane
-    float rightLen = lFinger - rightOuterZStart;
-    if (rightLen > 0.1f)
-    {
-        CreateWall(branchRoot, $"{prefix}_Right_OuterWall",
-            new Vector3(maxLocalXRight, wallHeight * 0.5f, (rightOuterZStart + lFinger) * 0.5f),
-            new Vector3(WallThickness, wallHeight, rightLen), material, obstacleLayer);
-    }
-
-    float leftLen = lFinger - leftOuterZStart;
-    if (leftLen > 0.1f)
-    {
-        CreateWall(branchRoot, $"{prefix}_Left_OuterWall",
-            new Vector3(maxLocalXLeft, wallHeight * 0.5f, (leftOuterZStart + lFinger) * 0.5f),
-            new Vector3(WallThickness, wallHeight, leftLen), material, obstacleLayer);
-    }
-
-    // Generate Left and Right room rows independently
-    BuildRoomRow(branchRoot, $"{prefix}_Right", rightX, 1.0f, dRoom, rightCorridorZStart, rightOuterZStart,
-        lFinger, wallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
-
-    BuildRoomRow(branchRoot, $"{prefix}_Left", leftX, -1.0f, dRoom, leftCorridorZStart, leftOuterZStart,
-        lFinger, wallHeight, material, obstacleLayer, doorWidth, rng, roomCenters);
-}
-
-private static void BuildRoomRow(
-    Transform branchRoot,
-    string prefix,
-    float corridorX,
-    float sideDir, // +1 for Right, -1 for Left
-    float dRoom,
-    float corridorZStart,
-    float outerZStart,
-    float lFinger,
-    float wallHeight,
-    Material material,
-    int obstacleLayer,
-    float doorWidth,
-    System.Random rng,
-    List<Vector3> roomCenters)
-{
-    // Seal off the triangular wedge on the obtuse side between corridor entrance and outer wall start
-    if (outerZStart > corridorZStart)
-    {
-        float wedgeWallLen = outerZStart - corridorZStart;
-        CreateWall(branchRoot, $"{prefix}_SpineTransitionWall",
-            new Vector3(corridorX, wallHeight * 0.5f, corridorZStart + (wedgeWallLen * 0.5f)),
-            new Vector3(WallThickness, wallHeight, wedgeWallLen), material, obstacleLayer);
-    }
-
-    // Start room layout where the full room footprint is valid
-    float currentDist = Mathf.Max(0.5f, corridorZStart, outerZStart);
-    int roomIdx = 0;
-
-    while (currentDist < lFinger - 1.2f)
-    {
-        float rWidth = (float)(2.5 + rng.NextDouble() * 1.5);
-        if (currentDist + rWidth > lFinger - 0.4f)
+        private static void BuildRoomRow(
+            Transform branchRoot,
+            string prefix,
+            float corridorX,
+            float sideDir,
+            float dRoom,
+            float corridorZStart,
+            float outerZStart,
+            float lFinger,
+            float wallHeight,
+            Material material,
+            int obstacleLayer,
+            float doorWidth,
+            System.Random rng,
+            List<Vector3> roomCenters)
         {
-            rWidth = (lFinger - 0.4f) - currentDist;
+            if (outerZStart > corridorZStart)
+            {
+                float wedgeWallLen = outerZStart - corridorZStart;
+                CreateWall(branchRoot, $"{prefix}_SpineTransitionWall",
+                    new Vector3(corridorX, wallHeight * 0.5f, corridorZStart + (wedgeWallLen * 0.5f)),
+                    new Vector3(WallThickness, wallHeight, wedgeWallLen), material, obstacleLayer);
+            }
+
+            float currentDist = Mathf.Max(0.5f, corridorZStart, outerZStart);
+            int roomIdx = 0;
+
+            while (currentDist < lFinger - 1.2f)
+            {
+                float rWidth = (float)(2.5 + rng.NextDouble() * 1.5);
+                if (currentDist + rWidth > lFinger - 0.4f)
+                {
+                    rWidth = (lFinger - 0.4f) - currentDist;
+                }
+
+                float midZ = currentDist + (rWidth * 0.5f);
+                float nextZ = currentDist + rWidth;
+
+                float roomCenterX = corridorX + (sideDir * dRoom * 0.5f);
+                roomCenters.Add(branchRoot.TransformPoint(new Vector3(roomCenterX, AgentSpawnY, midZ)));
+
+                if (currentDist + rWidth < lFinger - 0.4f)
+                {
+                    CreateWall(branchRoot, $"{prefix}_Part_{roomIdx}",
+                        new Vector3(roomCenterX, wallHeight * 0.5f, nextZ),
+                        new Vector3(dRoom, wallHeight, WallThickness), material, obstacleLayer);
+                }
+
+                float wallPartLen = (rWidth - doorWidth) * 0.5f;
+                if (wallPartLen > 0.05f)
+                {
+                    float zP1 = currentDist + (wallPartLen * 0.5f);
+                    float zP2 = currentDist + rWidth - (wallPartLen * 0.5f);
+
+                    CreateWall(branchRoot, $"{prefix}_Door_{roomIdx}_1", new Vector3(corridorX, wallHeight * 0.5f, zP1),
+                        new Vector3(WallThickness, wallHeight, wallPartLen), material, obstacleLayer);
+
+                    CreateWall(branchRoot, $"{prefix}_Door_{roomIdx}_2", new Vector3(corridorX, wallHeight * 0.5f, zP2),
+                        new Vector3(WallThickness, wallHeight, wallPartLen), material, obstacleLayer);
+                }
+
+                currentDist += rWidth;
+                roomIdx++;
+            }
         }
 
-        float midZ = currentDist + (rWidth * 0.5f);
-        float nextZ = currentDist + rWidth;
-
-        // Register room center point[cite: 1]
-        float roomCenterX = corridorX + (sideDir * dRoom * 0.5f);
-        roomCenters.Add(branchRoot.TransformPoint(new Vector3(roomCenterX, AgentSpawnY, midZ)));
-
-        // Transverse room partition wall
-        if (currentDist + rWidth < lFinger - 0.4f)
-        {
-            CreateWall(branchRoot, $"{prefix}_Part_{roomIdx}",
-                new Vector3(roomCenterX, wallHeight * 0.5f, nextZ),
-                new Vector3(dRoom, wallHeight, WallThickness), material, obstacleLayer);
-        }
-
-        // Corridor side wall with doorway
-        float wallPartLen = (rWidth - doorWidth) * 0.5f;
-        if (wallPartLen > 0.05f)
-        {
-            float zP1 = currentDist + (wallPartLen * 0.5f);
-            float zP2 = currentDist + rWidth - (wallPartLen * 0.5f);
-
-            CreateWall(branchRoot, $"{prefix}_Door_{roomIdx}_1", new Vector3(corridorX, wallHeight * 0.5f, zP1),
-                new Vector3(WallThickness, wallHeight, wallPartLen), material, obstacleLayer);
-
-            CreateWall(branchRoot, $"{prefix}_Door_{roomIdx}_2", new Vector3(corridorX, wallHeight * 0.5f, zP2),
-                new Vector3(WallThickness, wallHeight, wallPartLen), material, obstacleLayer);
-        }
-
-        currentDist += rWidth;
-        roomIdx++;
-    }
-}
-
-private static void BuildSpineSideWallWithOpenings(
+        private static void BuildSpineSideWallWithOpenings(
             Transform root, 
             string sidePrefix, 
             float wallX, 
@@ -787,10 +745,9 @@ private static void BuildSpineSideWallWithOpenings(
             Material material, 
             int obstacleLayer, 
             ref Vector3 spawnPosition, 
-            ref Vector3 goalPosition)
+            ref Vector3 goalPosition,
+            System.Random rng)
         {
-            var rng = new System.Random(area.Seed == 0 ? 1337 : area.Seed);
-
             float outerCorridorWidth = 2.0f;
             float ribCorridorWidth = 2.0f;
 
@@ -1152,10 +1109,8 @@ private static void BuildSpineSideWallWithOpenings(
             CreateWall(root, "DoorwayCenterIsland", new Vector3(0f, area.WallHeight * 0.5f, 0f), new Vector3(1.8f, area.WallHeight, 1.8f), material, obstacleLayer);
         }
 
-        private static void BuildRandomObstacleGrid(Transform root, LayoutArea area, Material material, int obstacleLayer)
+        private static void BuildRandomObstacleGrid(Transform root, LayoutArea area, Material material, int obstacleLayer, System.Random rng)
         {
-            var rng = new System.Random(area.Seed == 0 ? 1337 : area.Seed);
-            
             var gridCountX = 3;
             var gridCountZ = 3;
             var cellWidth = (area.CorridorRightX - area.CorridorLeftX) / gridCountX;
@@ -1280,12 +1235,26 @@ private static void BuildSpineSideWallWithOpenings(
             CreateWall(root, "BottomWall_Right", new Vector3(corridorSpan * 0.28f, area.WallHeight * 0.5f, bottomWallZ), new Vector3(sideWallLen, area.WallHeight, WallThickness), material, obstacleLayer);
         }
 
-        private static void CreateOctagonalCore(Transform root, string namePrefix, Vector3 center, float radius, float wallHeight, Material material, int layer)
+        private static void CreateWallWithHorizontalDoor(Transform root, string name, float z, float xMin, float xMax,
+            float wallHeight, Material material, int layer, float doorCenterX, float doorWidth)
         {
-            CreateWall(root, $"{namePrefix}_N", center + new Vector3(0f, wallHeight * 0.5f, radius), new Vector3(radius * 1.4f, wallHeight, WallThickness), material, layer);
-            CreateWall(root, $"{namePrefix}_S", center + new Vector3(0f, wallHeight * 0.5f, -radius), new Vector3(radius * 1.4f, wallHeight, WallThickness), material, layer);
-            CreateWall(root, $"{namePrefix}_E", center + new Vector3(radius, wallHeight * 0.5f, 0f), new Vector3(WallThickness, wallHeight, radius * 1.4f), material, layer);
-            CreateWall(root, $"{namePrefix}_W", center + new Vector3(-radius, wallHeight * 0.5f, 0f), new Vector3(WallThickness, wallHeight, radius * 1.4f), material, layer);
+            float doorHalf = doorWidth * 0.5f;
+            float doorMin = Mathf.Clamp(doorCenterX - doorHalf, xMin + 0.1f, xMax - 0.1f);
+            float doorMax = Mathf.Clamp(doorCenterX + doorHalf, xMin + 0.1f, xMax - 0.1f);
+
+            if (doorMin > xMin)
+            {
+                float leftLength = doorMin - xMin;
+                CreateWall(root, $"{name}_Left", new Vector3(xMin + leftLength * 0.5f, wallHeight * 0.5f, z),
+                    new Vector3(leftLength, wallHeight, WallThickness), material, layer);
+            }
+
+            if (doorMax < xMax)
+            {
+                float rightLength = xMax - doorMax;
+                CreateWall(root, $"{name}_Right", new Vector3(doorMax + rightLength * 0.5f, wallHeight * 0.5f, z),
+                    new Vector3(rightLength, wallHeight, WallThickness), material, layer);
+            }
         }
 
         private static void CreateWallWithDoor(Transform root, string name, float x, float zMin, float zMax, float wallHeight, Material material, int layer, float doorCenterZ, float doorWidth)
@@ -1344,7 +1313,7 @@ private static void BuildSpineSideWallWithOpenings(
             public float CorridorRightX { get; set; }
             public int Seed { get; set; }
             public KammAlignment CombAlignment { get; set; }
-            public float CombAngle { get; set; } // Added
+            public float CombAngle { get; set; }
         }
     }
 }

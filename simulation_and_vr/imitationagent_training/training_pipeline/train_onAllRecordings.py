@@ -90,14 +90,23 @@ class SingleEpisodeDataset(Dataset):
         sensory_inputs = np.concatenate([goal_vec, rgbd])
 
         # Target Motor Actions: Forward, Yaw, Pitch
-        forward = np.array(self.action_vel[idx + w - 1][0], dtype=np.float32)  # Z velocity
-        yaw = np.array(self.action_rot[idx + w - 1][1], dtype=np.float32)      # Y rotation
-        pitch = np.array(self.action_rot[idx + w - 1][0], dtype=np.float32)    # X rotation
+        forward = np.array(self.action_vel[idx + w - 1][2], dtype=np.float32)  # z = forward/back
+        yaw = np.array(self.action_rot[idx + w - 1][0], dtype=np.float32)      # index 0 = azimuth delta = yaw
+        yaw = (yaw + 180.0) % 360.0 - 180.0                                    # undo azimuth wraparound (e.g. 357.6 -> -2.4)
+        pitch = np.array(self.action_rot[idx + w - 1][1], dtype=np.float32)    # index 1 = elevation delta = pitch
         motor_actions = np.array([forward, yaw, pitch], dtype=np.float32)
 
         return torch.from_numpy(sensory_inputs), torch.from_numpy(motor_actions)
 
-# --- 3. ONNX Export Function ---
+# --- 3. Per-channel label scale (forward is m/s, yaw/pitch are degrees - very different natural scales) ---
+def compute_label_stats(dataset: Dataset) -> tuple[torch.Tensor, torch.Tensor]:
+    loader = DataLoader(dataset, batch_size=256, shuffle=False, num_workers=0)
+    all_actions = torch.cat([actions for _, actions in loader], dim=0)
+    mean = all_actions.mean(dim=0)
+    std = all_actions.std(dim=0).clamp_min(1e-6)
+    return mean, std
+
+# --- 4. ONNX Export Function ---
 def export_onnx(model: nn.Module, output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     model.eval()
@@ -119,7 +128,7 @@ def export_onnx(model: nn.Module, output_path: str):
     )
     print(f"\n[EXPORT SUCCESS] ONNX model exported to: {output_path}")
 
-# --- 4. Main Training Pipeline ---
+# --- 5. Main Training Pipeline ---
 def main():
     parser = argparse.ArgumentParser(description="Full Dataset Offline Training")
     parser.add_argument("--recordings_dir", type=str, default="./recordings", help="Directory containing all episode folders")
@@ -143,8 +152,20 @@ def main():
     dataloader = DataLoader(full_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
 
     # Initialize Model, Optimizer, Loss
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
     print(f"[HARDWARE] Training on device: {device}")
+
+    # forward (m/s) and yaw/pitch (degrees) live on very different natural scales; without
+    # normalizing them the shared trunk's loss is dominated by whichever channel has the
+    # largest variance (yaw), starving the others of gradient signal. Normalize only for the
+    # loss - the model itself keeps predicting real-world units, so nothing downstream changes.
+    label_mean, label_std = compute_label_stats(full_dataset)
+    label_mean, label_std = label_mean.to(device), label_std.to(device)
+    print(f"[LABEL STATS] mean(forward,yaw,pitch)={label_mean.tolist()} std={label_std.tolist()}")
 
     model = Imitation3DCNNModel().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -159,7 +180,7 @@ def main():
 
             optimizer.zero_grad()
             predictions = model(sensory)
-            loss = criterion(predictions, actions)
+            loss = criterion((predictions - label_mean) / label_std, (actions - label_mean) / label_std)
             loss.backward()
             optimizer.step()
 

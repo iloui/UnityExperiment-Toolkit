@@ -51,20 +51,16 @@ namespace Assets.Scripts.Editor
             surface.Bake();
         }
 
-        public static string SaveGeneratedScene(Scene scene, LayoutTopology topology)
+        public static string SaveGeneratedScene(Scene scene, string fileName)
         {
-            EnsureFolderExists();
-
-            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            var fileName = $"Layout_{topology}_{timestamp}.unity";
-            var fullPath = Path.Combine(SaveFolder, fileName).Replace('\\', '/');
-
-            if (!EditorSceneManager.SaveScene(scene, fullPath))
+            string directory = "Assets/Scenes/TestLayouts";
+            if (!System.IO.Directory.Exists(directory))
             {
-                throw new InvalidOperationException($"Failed to save generated scene at {fullPath}");
+                System.IO.Directory.CreateDirectory(directory);
             }
 
-            AssetDatabase.Refresh();
+            string fullPath = $"{directory}/{fileName}.unity";
+            UnityEditor.SceneManagement.EditorSceneManager.SaveScene(scene, fullPath);
             return fullPath;
         }
 

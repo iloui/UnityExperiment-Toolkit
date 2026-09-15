@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using Assets.Scripts.DataRecording;
 using UnityEditor;
 using UnityEngine;
@@ -9,76 +10,136 @@ namespace Assets.Scripts.Editor
     {
         private const string WindowTitle = "Generate Layout";
 
-        private LayoutTopology topology = LayoutTopology.CentralPillar;
+        private bool useSeedMode = false;
+        private string stringSeed = "";
+
+        private LayoutTopology topology = LayoutTopology.Comb;
         private KammAlignment combAlignment = KammAlignment.Random;
-        private float combAngle = 90f; // Default 90 degrees (Orthogonal)
+        private float combAngle = 90f;
         private Vector2 dimensions = new Vector2(30f, 30f);
         private float wallHeight = 3.5f;
         private GameObject fpsControllerPrefab;
-        private int randomSeed = 0;
 
         [MenuItem("Tools/Generate Layout")]
         public static void ShowWindow()
         {
-            GetWindow<LayoutGeneratorWindow>("Generate Layout");
+            GetWindow<LayoutGeneratorWindow>(WindowTitle);
         }
-        
+
         private void OnGUI()
         {
-            EditorGUILayout.LabelField("Layout Settings", EditorStyles.boldLabel);
-            topology = (LayoutTopology)EditorGUILayout.EnumPopup(
-                new GUIContent("Topology", "Select the topology to generate."), topology);
+            EditorGUILayout.LabelField("Layout durch Seed", EditorStyles.boldLabel);
+            
+            EditorGUI.BeginChangeCheck();
+            useSeedMode = EditorGUILayout.Toggle(new GUIContent("Seed-Modus aktivieren"), useSeedMode);
 
-            if (topology == LayoutTopology.Comb)
+            if (useSeedMode)
             {
-                combAlignment = (KammAlignment)EditorGUILayout.EnumPopup(
-                    new GUIContent("Comb Alignment", "Select single, double, or random alignment."),
-                    combAlignment
-                );
-
-                combAngle = EditorGUILayout.Slider(
-                    new GUIContent("Comb Angle (°)", "Anstellwinkel of fingers relative to magistrale (75° - 105°)."),
-                    combAngle, 75f, 105f
-                );
+                EditorGUI.indentLevel++;
+                stringSeed = EditorGUILayout.TextField(new GUIContent("Seed Code"), stringSeed);
+                EditorGUI.indentLevel--;
             }
 
-            dimensions =
-                EditorGUILayout.Vector2Field(
-                    new GUIContent("Dimensions (m)", "Width X depth of the generated floor plan."), dimensions);
-            wallHeight =
-                EditorGUILayout.FloatField(
-                    new GUIContent("Wall Height (m)", "Height of the generated walls and ceiling."), wallHeight);
+            if (EditorGUI.EndChangeCheck() && useSeedMode && !string.IsNullOrEmpty(stringSeed))
+            {
+                ParseSeedString(stringSeed);
+            }
+
+            EditorGUILayout.Space(10f);
+            EditorGUILayout.LabelField("Layout Settings", EditorStyles.boldLabel);
+
+            using (new EditorGUI.DisabledScope(useSeedMode))
+            {
+                topology = (LayoutTopology)EditorGUILayout.EnumPopup("Topology", topology);
+
+                if (topology == LayoutTopology.Comb)
+                {
+                    combAlignment = (KammAlignment)EditorGUILayout.EnumPopup("Comb Alignment", combAlignment);
+                    combAngle = EditorGUILayout.Slider("Comb Angle (°)", combAngle, 75f, 105f);
+                }
+
+                dimensions = EditorGUILayout.Vector2Field("Dimensions (m)", dimensions);
+                wallHeight = EditorGUILayout.FloatField("Wall Height (m)", wallHeight);
+            }
+
             fpsControllerPrefab = (GameObject)EditorGUILayout.ObjectField(
-                new GUIContent("FPSController Prefab", "Prefab to instantiate as the participant agent."),
-                fpsControllerPrefab, typeof(GameObject), false);
+                "FPSController Prefab", fpsControllerPrefab, typeof(GameObject), false);
 
             EditorGUILayout.Space(8f);
-            EditorGUILayout.HelpBox(
-                "Generates a fresh scene, bakes a NavMesh, wires ParticipantRecorder, and saves the result under Assets/Scenes/TestLayouts/.",
-                MessageType.Info);
 
-            using (new EditorGUI.DisabledScope(dimensions.x <= 0f || dimensions.y <= 0f || wallHeight <= 0f))
+            if (GUILayout.Button("Generate Layout"))
             {
-                if (GUILayout.Button("Generate Layout"))
+                GenerateLayout();
+            }
+        }
+
+        private string BuildSeedString(int internalRngSeed)
+        {
+            // Format: TOPOLOGY_WIDTHxDEPTH_ANGLE_ALIGNMENT_INTERNALSEED
+            return $"{topology}_{dimensions.x}x{dimensions.y}_{combAngle.ToString("F1", CultureInfo.InvariantCulture)}_{combAlignment}_{internalRngSeed}";
+        }
+
+        private void ParseSeedString(string seed)
+        {
+            try
+            {
+                string[] parts = seed.Split('_');
+                if (parts.Length >= 5)
                 {
-                    GenerateLayout();
+                    topology = (LayoutTopology)Enum.Parse(typeof(LayoutTopology), parts[0]);
+                    
+                    string[] dim = parts[1].Split('x');
+                    dimensions = new Vector2(float.Parse(dim[0], CultureInfo.InvariantCulture), float.Parse(dim[1], CultureInfo.InvariantCulture));
+                    
+                    combAngle = float.Parse(parts[2], CultureInfo.InvariantCulture);
+                    combAlignment = (KammAlignment)Enum.Parse(typeof(KammAlignment), parts[3]);
                 }
             }
+            catch
+            {
+                // Ungültiges Format beibehalten/ignorieren
+            }
+        }
+
+        private int ExtractInternalSeed(string seed)
+        {
+            string[] parts = seed.Split('_');
+            if (parts.Length >= 5 && int.TryParse(parts[4], out int result))
+            {
+                return result;
+            }
+            return UnityEngine.Random.Range(1, 1000000);
         }
 
         private void GenerateLayout()
         {
             try
             {
+                int internalSeed;
+                string finalSeedCode;
+
+                if (useSeedMode && !string.IsNullOrEmpty(stringSeed))
+                {
+                    ParseSeedString(stringSeed);
+                    internalSeed = ExtractInternalSeed(stringSeed);
+                    finalSeedCode = stringSeed;
+                }
+                else
+                {
+                    internalSeed = UnityEngine.Random.Range(1, 1000000);
+                    finalSeedCode = BuildSeedString(internalSeed);
+                    stringSeed = finalSeedCode;
+                }
+
                 var settings = new LayoutGenerationSettings
                 {
                     Topology = topology,
                     CombAlignment = combAlignment,
-                    CombAngle = combAngle, // Pass specified angle
+                    CombAngle = combAngle,
                     Dimensions = dimensions,
                     WallHeight = wallHeight,
                     FpsControllerPrefab = fpsControllerPrefab,
-                    RandomSeed = randomSeed
+                    RandomSeed = internalSeed
                 };
 
                 var scene = SceneExporter.CreateFreshScene();
@@ -89,9 +150,11 @@ namespace Assets.Scripts.Editor
                 AgentLinker.SpawnAndWireParticipants(root.transform, settings, layoutData);
                 SceneExporter.ConfigureAndBakeNavMesh(root);
 
-                var savedPath = SceneExporter.SaveGeneratedScene(scene, topology);
+                string sceneFileName = $"{topology}_Code_{internalSeed}";
+                var savedPath = SceneExporter.SaveGeneratedScene(scene, sceneFileName);
+
                 Selection.activeGameObject = root;
-                EditorUtility.DisplayDialog(WindowTitle, $"Layout generated and saved to:\n{savedPath}", "OK");
+                EditorUtility.DisplayDialog(WindowTitle, $"Layout generated!\n\nSeed Code zum Wiederholen:\n{finalSeedCode}", "OK");
             }
             catch (Exception ex)
             {
@@ -100,5 +163,4 @@ namespace Assets.Scripts.Editor
             }
         }
     }
-
 }
