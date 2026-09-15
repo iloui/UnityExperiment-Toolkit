@@ -655,54 +655,38 @@ namespace Agent_Based_Modelling
     public class ImitationAgent : MonoBehaviour
     {
         [Header("Linked Framework Components")]
-        public TaskScript task; 
+        [Tooltip("Defines this scene's start/POI(s)/end locations and selection rules. The same " +
+                 "TaskScript ParticipantRecorder uses for this scene, so both pipelines walk the " +
+                 "identical POI progression via PoiProgressTracker.")]
+        public TaskScript task;
+        [Tooltip("Must equal exactly LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName) - " +
+                 "the agent refuses to start otherwise, since any broader/narrower mask silently corrupts " +
+                 "every depth value fed to the model.")]
         public LayerMask ArchitectureLayerMask;
 
         // Task-locations & attributes
-        private GameObject[] start;
-        private GameObject[] end;
-        private GameObject[] POIs;
-        private float poiTime;
-        private bool revisit;
-        private bool cnd;
-        private int numberOfNeeds;
         private float agentSize;
         private float agentRadius;
         private float agentSpeed;
 
-        // State Sequencer
-        private bool choosingPOI = false;
-        private bool findingPOI = false;
-        private bool fulfillingNeed = false;
-        private bool taskCompleted = false;
+        // Shared start -> POI(s) -> end progression, identical to ParticipantRecorder's.
+        private PoiProgressTracker poiTracker;
         public bool destroyRequest = false;
-        private bool[] poiMask;
-        private int currPOI;
-        private int needsFulfilled;
-        private float arrivalTime;
-        private Transform currentActiveTargetTransform;
 
         [HideInInspector]
         public int startIndex;
 
-        // All fields below are initialized from ZarrDataContract (the same contract
-        // ParticipantRecorder writes its training-data manifest against) rather than
-        // separately-hardcoded literals, so live inference cannot silently drift out of
+        // All hardware/sampling constants below are read directly from ZarrDataContract - the
+        // same contract ParticipantRecorder's manifest is written against - rather than being
+        // separately-tunable Inspector fields, so live inference cannot silently drift out of
         // sync with the format the model was trained on (e.g. the depth channel used to
         // normalize by a 2000f MaxRayDistance here vs. the recorder's/training data's 50f,
         // a ~40x scale mismatch on every depth value fed to the network).
         [Header("Hardware Simulation (64x64 Complete Eyes)")]
         public Transform AgentHeadAnchor;
-        [Tooltip("Camera whose exposure/HDR/FOV/post-processing settings the hidden capture camera should " +
-                 "copy - must be the same camera ParticipantRecorder used as MainVRCamera during data " +
-                 "collection (the 'FirstPersonCharacter' camera under FPSController.prefab, FOV 60 with the " +
-                 "Post-Processing Stack v2 layer attached), NOT the scene's Camera.main (e.g. a simulation " +
-                 "overview/spectator camera), or live RGB frames will not match the distribution the model " +
-                 "was trained on.")]
-        public Camera ReferenceCameraSettings;
-        public float HorizonalFovOverride = ZarrDataContract.HorizontalFovDegrees;
-        public float VerticalFovOverride = ZarrDataContract.VerticalFovDegrees;
-        public float MaxRayDistance = ZarrDataContract.MaxRayDistance;
+        private const float HorizonalFovOverride = ZarrDataContract.HorizontalFovDegrees;
+        private const float VerticalFovOverride = ZarrDataContract.VerticalFovDegrees;
+        private const float MaxRayDistance = ZarrDataContract.MaxRayDistance;
 
         private const int ImageWidth = ZarrDataContract.ImageWidth;
         private const int ImageHeight = ZarrDataContract.ImageHeight;
@@ -715,8 +699,14 @@ namespace Agent_Based_Modelling
         private NativeArray<RaycastHit> rayResults;
 
         [Header("Temporal Windowing (Memory Buffer)")]
-        public int TemporalWindowSize = ZarrDataContract.TemporalWindowSize;
+        private const int TemporalWindowSize = ZarrDataContract.TemporalWindowSize;
         private Queue<SerializableFrameData> stateHistoryQueue = new Queue<SerializableFrameData>();
+
+        // Decouples observation capture from Update()'s framerate-dependent cadence, so the
+        // temporal window spans the same fixed real-world duration (SamplingIntervalSeconds
+        // per frame) that the recorded training data's window does, instead of however many
+        // frames the engine happens to render.
+        private float captureAccumulator = 0f;
 
         public struct SerializableFrameData
         {
@@ -727,8 +717,10 @@ namespace Agent_Based_Modelling
         [Header("Neural Network Runtime (Unity Sentis)")]
         [Tooltip("Drag your baseline or trained .onnx file here.")]
         public ModelAsset BaselineModelAsset;
-        [Tooltip("Must match ParticipantRecorder.SamplingInterval: action_rot labels are a delta angle accumulated over one recording sample, not a rate.")]
-        public float RecordingSamplingInterval = ZarrDataContract.SamplingIntervalSeconds;
+        // action_rot labels are a delta angle accumulated over one recording sample, not a
+        // rate - RecordingSamplingInterval must match ParticipantRecorder's sampling interval,
+        // so both are locked to the same ZarrDataContract constant.
+        private const float RecordingSamplingInterval = ZarrDataContract.SamplingIntervalSeconds;
         private const float HeuristicMaxTurnRateDegPerSec = 120.0f;
 
         // Sanity bounds on the raw model output, taken from the actual recorded training data
@@ -852,44 +844,42 @@ namespace Agent_Based_Modelling
                 return;
             }
 
-            start = task.start;
-            end = task.end;
-            POIs = task.pointsOfInterest;
-            poiTime = task.poiTime;
-            revisit = task.revisit;
-            cnd = task.chooseNonDeterministically;
-            numberOfNeeds = task.numberOfNeeds;
             agentSize = task.agentSize;
             agentRadius = task.agentRadius;
             agentSpeed = task.agentSpeed;
 
-            Debug.Log($"[ImitationAgent Start] Agent Initialized. Setup: POIs={POIs.Length}, NeedsRequired={numberOfNeeds}, Speed={agentSpeed}");
+            // Dummy-proof precondition: refuse to run rather than silently feed the model
+            // depth values raycast against the wrong set of colliders. Mirrors
+            // ParticipantRecorder's identical hard-fail check.
+            LayerMask requiredMask = LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName);
+            if (ArchitectureLayerMask.value != requiredMask.value)
+            {
+                Debug.LogError($"[ImitationAgent Debug] CRITICAL: ArchitectureLayerMask must equal exactly the " +
+                    $"'{ZarrDataContract.ArchitectureObstacleLayerName}' layer (mask value {requiredMask.value}), " +
+                    $"but is currently set to mask value {ArchitectureLayerMask.value}. Refusing to start - a wrong " +
+                    $"mask (including 'Everything') silently corrupts every depth value fed to the model.");
+                throw new InvalidOperationException(
+                    $"[ImitationAgent] ArchitectureLayerMask ({ArchitectureLayerMask.value}) does not exactly match " +
+                    $"required layer '{ZarrDataContract.ArchitectureObstacleLayerName}' ({requiredMask.value}).");
+            }
+
+            poiTracker = new PoiProgressTracker(task);
+
+            Debug.Log($"[ImitationAgent Start] Agent Initialized. Setup: POIs={task.pointsOfInterest.Length}, NeedsRequired={task.numberOfNeeds}, Speed={agentSpeed}");
 
             lastDisplacementTime = Time.realtimeSinceStartup;
             trajectory = new List<Vector3>();
-            poiMask = new bool[POIs.Length];
-            for (int i = 0; i < poiMask.Length; i++) poiMask[i] = true;
 
-            currPOI = 0;
-            needsFulfilled = 0;
-            choosingPOI = true;
-
-            if (ArchitectureLayerMask.value == 0)
-            {
-                ArchitectureLayerMask = LayerMask.GetMask("Architecture_Obstacle"); 
-                Debug.LogWarning("[ImitationAgent Debug] ArchitectureLayerMask unassigned. Defaulted to 'Architecture_Obstacle'.");
-            }
-
-            GameObject chosenStart = start[UnityEngine.Random.Range(0, start.Length)];
+            Vector3 chosenStart = poiTracker.ChooseSpawnPosition();
             NavMeshHit hit;
-            if (NavMesh.SamplePosition(chosenStart.transform.position, out hit, 100.0f, NavMesh.AllAreas))
+            if (NavMesh.SamplePosition(chosenStart, out hit, 100.0f, NavMesh.AllAreas))
             {
                 transform.position = hit.position;
                 Debug.Log($"[ImitationAgent Start] Spawned on NavMesh at {transform.position}");
             }
             else
             {
-                transform.position = chosenStart.transform.position;
+                transform.position = chosenStart;
                 Debug.LogWarning($"[ImitationAgent Start] Could not find NavMesh near start position! Teleported to {transform.position}");
             }
 
@@ -899,13 +889,9 @@ namespace Agent_Based_Modelling
             // the rest), so the trained model's turning response is far weaker than what a human
             // shows during that phase. Spawning already facing the goal avoids needing that
             // under-trained large-turn behavior at all.
-            if (needsFulfilled < numberOfNeeds && POIs.Length > 0)
+            if (poiTracker.CurrentTarget != null)
             {
-                currPOI = ChoosePOI();
-                currentActiveTargetTransform = POIs[currPOI].transform;
-                choosingPOI = false;
-                findingPOI = true;
-                Vector3 towardGoal = currentActiveTargetTransform.position - transform.position;
+                Vector3 towardGoal = poiTracker.CurrentTarget.position - transform.position;
                 towardGoal.y = 0f;
                 if (towardGoal.sqrMagnitude > 0.0001f)
                 {
@@ -945,44 +931,35 @@ namespace Agent_Based_Modelling
 
         private void InitializeHardwareReplication()
         {
+            // Throws if the scene doesn't have exactly one CanonicalRecordingCamera - no
+            // fallback to Camera.main or any other guess is allowed. The same resolution call
+            // ParticipantRecorder uses, so both pipelines are guaranteed to copy optical
+            // settings from the identical camera.
+            Camera canonicalCamera = CanonicalRecordingCamera.ResolveInScene();
+
             GameObject camGO = new GameObject("Hidden_Imitation_CaptureCamera");
             camGO.transform.SetParent(AgentHeadAnchor, false);
             hiddenCaptureCamera = camGO.AddComponent<Camera>();
 
-            // Mirror ParticipantRecorder.InitializeHardwareReplication: copy from the SAME camera
-            // configuration used to record the training data (FOV, clip planes, HDR, culling mask,
-            // post-processing), then only override clear flags/background exactly as the recorder
-            // does. Camera.main is NOT a substitute for this - in a simulation scene it is typically
-            // an overview/spectator camera with its own exposure and post-processing, and copying
-            // from it silently shifts every RGB pixel fed to the model out of the training
-            // distribution (see the [RGB DEBUG] mean-brightness diagnostic below).
-            Camera referenceCamera = ReferenceCameraSettings;
-            if (referenceCamera == null)
-            {
-                referenceCamera = Camera.main;
-                Debug.LogWarning("[Sensory Hardware] ReferenceCameraSettings not assigned! Falling back to " +
-                    "Camera.main, which will NOT match the MainVRCamera used during recording and will " +
-                    "produce out-of-distribution RGB input for the model. Assign the recording camera's " +
-                    "settings explicitly.");
-            }
-            if (referenceCamera != null)
-            {
-                hiddenCaptureCamera.CopyFrom(referenceCamera);
-                // CopyFrom also copies the source camera's transform. ParticipantRecorder gets away
-                // with this because it copies from its own direct parent (a no-op offset-wise); here
-                // the reference camera is a different object entirely, so pin this camera back to the
-                // agent's head instead of wherever the reference camera happens to be.
-                camGO.transform.localPosition = Vector3.zero;
-                camGO.transform.localRotation = Quaternion.identity;
-            }
+            // Mirror ParticipantRecorder.InitializeHardwareReplication: copy from the SAME
+            // CanonicalRecordingCamera (FOV, clip planes, HDR, culling mask, post-processing),
+            // then only override clear flags/background exactly as the recorder does.
+            hiddenCaptureCamera.CopyFrom(canonicalCamera);
+            // CopyFrom also copies the source camera's transform. ParticipantRecorder gets away
+            // with this because it copies from its own direct parent (a no-op offset-wise); here
+            // the canonical camera is a different object entirely, so pin this camera back to the
+            // agent's head instead of wherever the canonical camera happens to be.
+            camGO.transform.localPosition = Vector3.zero;
+            camGO.transform.localRotation = Quaternion.identity;
+
             hiddenCaptureCamera.clearFlags = CameraClearFlags.SolidColor;
             hiddenCaptureCamera.backgroundColor = Color.black;
             // Deliberately do NOT reset fieldOfView here. The RGB camera's FOV is whatever
-            // CopyFrom pulled from the reference camera (e.g. FirstPersonCharacter's 60 deg in
+            // CopyFrom pulled from the canonical camera (e.g. FirstPersonCharacter's 60 deg in
             // FPSController.prefab) - that is what actually produced the training images.
             // HorizonalFovOverride/VerticalFovOverride (90 deg) only shape the separate depth
-            // raycast fan below; the two are intentionally different and both must match what
-            // ParticipantRecorder used, not each other.
+            // raycast fan below; the two are intentionally different, and both now come from
+            // ZarrDataContract on both sides instead of two independently-tunable fields.
 
             colorRenderTexture = new RenderTexture(ImageWidth, ImageHeight, 24, RenderTextureFormat.ARGB32);
             colorRenderTexture.Create();
@@ -1026,90 +1003,51 @@ namespace Agent_Based_Modelling
             trajectory.Add(transform.position);
             if (trajectory.Count > 1) DisplaceDeadlocks();
 
-            EvaluateStateSequencer();
-            CaptureCurrentObservations();
-
-            if (stateHistoryQueue.Count == TemporalWindowSize)
+            poiTracker.Tick(transform.position);
+            if (poiTracker.IsFinished)
             {
-                ExecuteNeuralNetworkInference();
+                destroyRequest = true;
             }
-            else
+
+            // Decoupled from Update()'s framerate: observations are only captured once every
+            // ZarrDataContract.SamplingIntervalSeconds, so the 3-frame temporal window spans
+            // the same fixed ~0.3s of real time the recorded training data's window does,
+            // instead of however many frames the engine happens to render in that time.
+            // MoveAgentLocomotion below still runs every Update(), applying the most recently
+            // computed action between capture ticks.
+            captureAccumulator += Time.deltaTime;
+            if (captureAccumulator >= ZarrDataContract.SamplingIntervalSeconds)
             {
-                if (Time.frameCount % DiagnosticLogInterval == 0)
+                captureAccumulator -= ZarrDataContract.SamplingIntervalSeconds;
+                CaptureCurrentObservations();
+
+                if (stateHistoryQueue.Count == TemporalWindowSize)
                 {
-                    Debug.Log($"[Temporal Buffer] Filling observation window: {stateHistoryQueue.Count}/{TemporalWindowSize} frames ready.");
+                    ExecuteNeuralNetworkInference();
                 }
+            }
+
+            if (stateHistoryQueue.Count < TemporalWindowSize && Time.frameCount % DiagnosticLogInterval == 0)
+            {
+                Debug.Log($"[Temporal Buffer] Filling observation window: {stateHistoryQueue.Count}/{TemporalWindowSize} frames ready.");
             }
 
             MoveAgentLocomotion(networkForwardAction, networkYawAction, networkPitchAction);
         }
 
-        private void EvaluateStateSequencer()
-        {
-            if (choosingPOI)
-            {
-                if (needsFulfilled < numberOfNeeds)
-                {
-                    currPOI = ChoosePOI();
-                    choosingPOI = false;
-                    findingPOI = true;
-                    currentActiveTargetTransform = POIs[currPOI].transform;
-                    Debug.Log($"[State Sequencer] POI Selected: Index={currPOI} ({POIs[currPOI].name}). Progress: {needsFulfilled}/{numberOfNeeds} needs.");
-                }
-                else
-                {
-                    choosingPOI = false;
-                    taskCompleted = true;
-                    int chosenEndIdx = UnityEngine.Random.Range(0, end.Length);
-                    currentActiveTargetTransform = end[chosenEndIdx].transform;
-                    Debug.Log($"[State Sequencer] All needs fulfilled ({needsFulfilled}/{numberOfNeeds}). Heading to Exit Target: Index={chosenEndIdx} ({end[chosenEndIdx].name}).");
-                }
-            }
-            else if (findingPOI)
-            {
-                if (HasArrivedAtTarget())
-                {
-                    arrivalTime = Time.realtimeSinceStartup;
-                    findingPOI = false;
-                    fulfillingNeed = true;
-                    Debug.Log($"[State Sequencer] Target reached: {currentActiveTargetTransform.name}. Fulfilling need for {poiTime}s...");
-                }
-            }
-            else if (fulfillingNeed)
-            {
-                if (Time.realtimeSinceStartup - arrivalTime >= poiTime)
-                {
-                    needsFulfilled++;
-                    if (!revisit) poiMask[currPOI] = false;
-                    
-                    fulfillingNeed = false;
-                    choosingPOI = true;
-                    Debug.Log($"[State Sequencer] Need fulfilled. Total needs satisfied: {needsFulfilled}/{numberOfNeeds}. Masking status for POI {currPOI}: Available={poiMask[currPOI]}");
-                }
-            }
-            else if (taskCompleted)
-            {
-                if (HasArrivedAtTarget())
-                {
-                    destroyRequest = true;
-                    Debug.Log("[State Sequencer] Agent reached end location! Task sequence completed. Requesting destruction.");
-                }
-            }
-        }
-
         private void CaptureCurrentObservations()
         {
-            if (currentActiveTargetTransform == null)
+            if (poiTracker.CurrentTarget == null)
             {
                 localGoalVector3D = Vector3.zero;
                 if (Time.frameCount % DiagnosticLogInterval == 0)
                 {
-                    Debug.LogWarning("[Observation Pipeline] currentActiveTargetTransform is NULL! localGoalVector3D set to Vector3.zero.");
+                    Debug.LogWarning("[Observation Pipeline] poiTracker.CurrentTarget is NULL! localGoalVector3D set to Vector3.zero.");
                 }
                 return;
             }
 
-            Vector3 worldGoalDir = (currentActiveTargetTransform.position - AgentHeadAnchor.position).normalized;
+            Vector3 worldGoalDir = (poiTracker.CurrentTarget.position - AgentHeadAnchor.position).normalized;
             localGoalVector3D = AgentHeadAnchor.InverseTransformDirection(worldGoalDir);
 
             hiddenCaptureCamera.Render();
@@ -1155,6 +1093,41 @@ namespace Agent_Based_Modelling
             if (stateHistoryQueue.Count > TemporalWindowSize) stateHistoryQueue.Dequeue();
         }
 
+        /// <summary>
+        /// Flattens a goal vector + temporal window of RGBD frames into the exact
+        /// "sensory_inputs" layout the ONNX model was trained on: [goal.x, goal.y, goal.z,
+        /// then per frame (oldest to newest) per pixel (row-major) R/255, G/255, B/255, depth].
+        /// This must byte-for-byte match SingleEpisodeDataset.__getitem__ in
+        /// train_onAllRecordings_2DCNNModel.py - extracted as its own static, side-effect-free
+        /// method (rather than being inlined in ExecuteNeuralNetworkInference) specifically so
+        /// SensoryTensorParityTest can call it directly with synthetic frame data and compare
+        /// it against the Python training pipeline's output on the same input, without needing
+        /// a live camera/raycast/Sentis engine.
+        /// </summary>
+        public static float[] BuildSensoryTensor(Vector3 goal, IEnumerable<SerializableFrameData> frameHistory)
+        {
+            int totalSensoryInputs = (TemporalWindowSize * TotalPixels * 4) + 3;
+            float[] flattenedFeatureArray = new float[totalSensoryInputs];
+            int ptr = 0;
+
+            flattenedFeatureArray[ptr++] = goal.x;
+            flattenedFeatureArray[ptr++] = goal.y;
+            flattenedFeatureArray[ptr++] = goal.z;
+
+            foreach (var frame in frameHistory)
+            {
+                for (int i = 0; i < TotalPixels; i++)
+                {
+                    flattenedFeatureArray[ptr++] = frame.colorMatrix[i].r / 255f;
+                    flattenedFeatureArray[ptr++] = frame.colorMatrix[i].g / 255f;
+                    flattenedFeatureArray[ptr++] = frame.colorMatrix[i].b / 255f;
+                    flattenedFeatureArray[ptr++] = frame.depthMatrix[i];
+                }
+            }
+
+            return flattenedFeatureArray;
+        }
+
         private void ExecuteNeuralNetworkInference()
         {
             lock (modelLock)
@@ -1167,7 +1140,7 @@ namespace Agent_Based_Modelling
                         hasLoggedModelFallbackWarning = true;
                     }
 
-                    if (findingPOI || taskCompleted)
+                    if (poiTracker.CurrentTarget != null && !poiTracker.IsFinished)
                     {
                         // forward/yaw/pitch are rates (m/s, deg/s, deg/s) - see MoveAgentLocomotion
                         networkForwardAction = agentSpeed;
@@ -1182,24 +1155,7 @@ namespace Agent_Based_Modelling
                     return;
                 }
 
-                int totalSensoryInputs = (TemporalWindowSize * TotalPixels * 4) + 3;
-                float[] flattenedFeatureArray = new float[totalSensoryInputs];
-                int ptr = 0;
-
-                flattenedFeatureArray[ptr++] = localGoalVector3D.x;
-                flattenedFeatureArray[ptr++] = localGoalVector3D.y;
-                flattenedFeatureArray[ptr++] = localGoalVector3D.z;
-
-                foreach (var frame in stateHistoryQueue)
-                {
-                    for (int i = 0; i < TotalPixels; i++)
-                    {
-                        flattenedFeatureArray[ptr++] = frame.colorMatrix[i].r / 255f;
-                        flattenedFeatureArray[ptr++] = frame.colorMatrix[i].g / 255f;
-                        flattenedFeatureArray[ptr++] = frame.colorMatrix[i].b / 255f;
-                        flattenedFeatureArray[ptr++] = frame.depthMatrix[i];
-                    }
-                }
+                float[] flattenedFeatureArray = BuildSensoryTensor(localGoalVector3D, stateHistoryQueue);
 
                 // TEMPORARY DIAGNOSTIC: compare against training data's R-channel mean (~0.15) to
                 // check for a live-vs-recorded brightness/exposure mismatch. Safe to remove once resolved.
@@ -1218,7 +1174,7 @@ namespace Agent_Based_Modelling
                     Debug.Log($"[RGB DEBUG] mean={rSum / rCount:F4} min={rMin:F4} max={rMax:F4}");
                 }
 
-                TensorShape tensorShape = new TensorShape(1, totalSensoryInputs);
+                TensorShape tensorShape = new TensorShape(1, flattenedFeatureArray.Length);
                 using (Tensor<float> sensoryTensor = new Tensor<float>(tensorShape, flattenedFeatureArray))
                 {
                     inferenceEngine.SetInput("sensory_inputs", sensoryTensor);
@@ -1347,43 +1303,12 @@ namespace Agent_Based_Modelling
             }
         }
 
-        private int ChoosePOI()
-        {
-            if (cnd)
-            {
-                List<int> validPOIs = new List<int>();
-                for (int i = 0; i < POIs.Length; i++) if (poiMask[i]) validPOIs.Add(i);
-
-                if (validPOIs.Count == 0)
-                {
-                    Debug.LogError("[State Sequencer] Non-deterministic POI choice failed! No remaining valid POIs available in poiMask.");
-                    return 0;
-                }
-
-                return validPOIs[UnityEngine.Random.Range(0, validPOIs.Count)];
-            }
-            else
-            {
-                for (int i = 0; i < POIs.Length; i++) if (poiMask[i]) return i;
-            }
-
-            Debug.LogWarning("[State Sequencer] ChoosePOI fallback to 0. All POIs may have been marked false.");
-            return 0;
-        }
-
-        private bool HasArrivedAtTarget()
-        {
-            if (currentActiveTargetTransform == null) return false;
-            float dist = Vector3.Distance(transform.position, currentActiveTargetTransform.position);
-            return dist <= 1.5f;
-        }
-
         private void DisplaceDeadlocks()
         {
             if (Time.realtimeSinceStartup >= lastDisplacementTime + displacementInterval)
             {
                 float deltaMoved = Vector3.Distance(trajectory[trajectory.Count - 2], trajectory[trajectory.Count - 1]);
-                if (deltaMoved < displacementDelta && !fulfillingNeed)
+                if (deltaMoved < displacementDelta && !poiTracker.IsFinished)
                 {
                     lastDisplacementTime = Time.realtimeSinceStartup;
                     Vector3 targetPos = transform.position + new Vector3(UnityEngine.Random.value * displacement, 0f, UnityEngine.Random.value * displacement);

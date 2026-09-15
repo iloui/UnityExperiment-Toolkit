@@ -25,6 +25,7 @@ using UnityEngine.EventSystems;
 using System.IO;
 using System;
 using System.Globalization;
+using Assets.Scripts.DataRecording;
 using System.Linq;
 #if UNITY_EDITOR
 using UnityEditor;
@@ -412,12 +413,10 @@ public class EngineScript : MonoBehaviour
         // 3. Check completion state
         if (!anyAgentsLeft && allTasksCompleted) {
             Debug.Log("# No Agents Left!");
-            
-            if (saveHeatMap) {
-                string pngPath = path.Substring(0, path.LastIndexOf('.')) + ".png";
-                AnalyticsManager.ExportHeatMap(agentToPos, POIs, pngPath);
-            }
 
+            // Heatmap export itself now happens in ExportRunData() (see HandlePlayModeStateChanged /
+            // OnDestroy() below), so it also runs on a manual Stop - not just when every agent
+            // actually reaches its goal. Nothing else to do here before exiting Play mode.
             #if UNITY_EDITOR
             EditorApplication.ExitPlaymode();
             #else
@@ -470,7 +469,14 @@ public class EngineScript : MonoBehaviour
         {
             Agent_Based_Modelling.ImitationAgent scriptInstance = agent.AddComponent<Agent_Based_Modelling.ImitationAgent>();
             scriptInstance.task = task;
-            scriptInstance.TemporalWindowSize = 3;
+            // ImitationAgent is created here via AddComponent at runtime, not dragged in from a
+            // pre-configured prefab, so its ArchitectureLayerMask field would otherwise default
+            // to 0 ("Nothing") - which now hard-fails Start() (see ImitationAgent.cs) instead of
+            // the old soft auto-default fallback. Set it explicitly to the required layer so
+            // spawned agents don't immediately refuse to start.
+            scriptInstance.ArchitectureLayerMask = LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName);
+            // TemporalWindowSize is now a fixed ZarrDataContract constant (3) on ImitationAgent
+            // itself rather than a settable field - nothing to assign here anymore.
             if (defaultBaselineModel != null)
             {
                 scriptInstance.BaselineModelAsset = defaultBaselineModel;
@@ -514,7 +520,62 @@ public class EngineScript : MonoBehaviour
         return path;
     }
 
+#if UNITY_EDITOR
+    private void OnEnable()
+    {
+        EditorApplication.playModeStateChanged += HandlePlayModeStateChanged;
+    }
+
+    private void OnDisable()
+    {
+        EditorApplication.playModeStateChanged -= HandlePlayModeStateChanged;
+    }
+
+    // ExportRunData() (in particular AnalyticsManager.ExportHeatMap, which renders the scene's
+    // own geometry to derive the floorplan outline) needs the Play-mode scene to still be fully
+    // loaded. OnDestroy() alone is too late for that in the Editor: clicking Stop tears down
+    // scene objects (including Floor/wall Renderers) before every object's OnDestroy() runs, in
+    // an order Unity doesn't guarantee - so by the time this component's OnDestroy() executes,
+    // FindObjectsOfType<Renderer>() can already come back empty, leaving the heatmap's bounding
+    // box anchored only to agent trajectories (which is why it was zooming out to fit wherever
+    // an undertrained agent wandered, instead of showing the room). ExitingPlayMode fires before
+    // any of that teardown begins, while the scene is still intact.
+    private void HandlePlayModeStateChanged(PlayModeStateChange state)
+    {
+        if (state == PlayModeStateChange.ExitingPlayMode)
+        {
+            ExportRunData();
+        }
+    }
+#endif
+
     void OnDestroy() {
+        // Fallback for builds (no Editor play-mode-state event exists there) and as a safety net
+        // in case the Editor event above didn't fire for some reason. Guarded against double
+        // export by ExportRunData() itself.
+        ExportRunData();
+    }
+
+    private bool hasExportedRunData = false;
+
+    private void ExportRunData() {
+        if (hasExportedRunData) return;
+
+        try
+        {
+            ExportRunDataInternal();
+            // Only latch the guard once everything actually completed - an exception above
+            // leaves this false, so the OnDestroy() fallback still gets a chance to retry
+            // instead of permanently losing the run's data.
+            hasExportedRunData = true;
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[EngineScript] ExportRunData failed: {ex}");
+        }
+    }
+
+    private void ExportRunDataInternal() {
         int maxLen = 0;
         for (int i = 0; i < agentToPos.Length; i++) {
             for (int j = 0; j < agentToPos[i].Count; j++) {
@@ -570,6 +631,16 @@ public class EngineScript : MonoBehaviour
         if (!string.IsNullOrEmpty(path))
         {
             File.WriteAllLines(path, lines);
+
+            // Runs here (unconditionally on teardown) rather than only after every agent
+            // reaches its goal in Update(), so a manual Stop - e.g. because one or more agents
+            // got stuck and never finished - still produces a heatmap of whatever trajectories
+            // were recorded, instead of silently never exporting anything.
+            if (saveHeatMap)
+            {
+                string pngPath = path.Substring(0, path.LastIndexOf('.')) + ".png";
+                AnalyticsManager.ExportHeatMap(agentToPos, POIs, pngPath);
+            }
         }
         Debug.Log("# DONE!");
     }

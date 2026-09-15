@@ -70,7 +70,12 @@ class SingleEpisodeDataset(Dataset):
         self.action_rot = zarr_root['action_rot']
 
         self.window_size = window_size
-        self.num_frames = self.rgb.shape[0] - window_size + 1
+        # action_vel[i]/action_rot[i] (see ParticipantRecorder.LockedSamplingLoop) is the motion
+        # that occurred BETWEEN sample i-1 and sample i - i.e. the action that produced
+        # observation i, not the action to take from it. The label for the window ending at
+        # idx+w-1 is therefore the action recorded one sample later, at idx+w, which requires
+        # one fewer window than before (idx+w must stay in bounds).
+        self.num_frames = self.rgb.shape[0] - window_size
 
     def __len__(self):
         return max(0, self.num_frames)
@@ -88,11 +93,12 @@ class SingleEpisodeDataset(Dataset):
         rgbd = np.concatenate([rgb_win, depth_win], axis=-1).flatten()
         sensory_inputs = np.concatenate([goal_vec, rgbd])
 
-        # Target Motor Actions
-        forward = np.array(self.action_vel[idx + w - 1][2], dtype=np.float32)   # z = forward/back
-        yaw = np.array(self.action_rot[idx + w - 1][0], dtype=np.float32)       # index 0 = azimuth delta = yaw
-        yaw = (yaw + 180.0) % 360.0 - 180.0                                     # undo azimuth wraparound (e.g. 357.6 -> -2.4)
-        pitch = np.array(self.action_rot[idx + w - 1][1], dtype=np.float32)     # index 1 = elevation delta = pitch
+        # Target Motor Actions: the action to take FROM this observation, i.e. the one recorded
+        # one sample after the window (see num_frames comment above).
+        forward = np.array(self.action_vel[idx + w][2], dtype=np.float32)   # z = forward/back
+        yaw = np.array(self.action_rot[idx + w][0], dtype=np.float32)       # index 0 = azimuth delta = yaw
+        yaw = (yaw + 180.0) % 360.0 - 180.0                                 # undo azimuth wraparound (e.g. 357.6 -> -2.4)
+        pitch = np.array(self.action_rot[idx + w][1], dtype=np.float32)     # index 1 = elevation delta = pitch
         motor_actions = np.array([forward, yaw, pitch], dtype=np.float32)
 
         return torch.from_numpy(sensory_inputs), torch.from_numpy(motor_actions)
@@ -145,8 +151,8 @@ def main():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=5e-4)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--grad_clip_norm", type=float, default=1.0)
+    parser.add_argument("--weight_decay", type=float, default=1e-5)
+    parser.add_argument("--grad_clip_norm", type=float, default=5.0)
     parser.add_argument("--val_ratio", type=float, default=0.2, help="Validation ratio (episode level)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -191,9 +197,17 @@ def main():
     print(f"[LABEL STATS] mean(forward,yaw,pitch)={label_mean.tolist()} std={label_std.tolist()}")
 
     model = SimpleImitation2DCNNModel().to(device)
-    # Small weight decay curbs the erratic, out-of-training-range extrapolation the model was
-    # showing on yaw/pitch in live Unity testing (the shared trunk overfitting to the small
-    # 20-episode dataset rather than learning a robust mapping).
+    # weight_decay=1e-4 and grad_clip_norm=1.0 were previously tuned to curb erratic yaw/pitch
+    # extrapolation in live Unity testing, but open-loop (teacher-forcing) evaluation against
+    # the model's own training episodes showed that clipping the *global* gradient norm to 1.0
+    # across all ~287k shared-trunk parameters throttles every update so hard that the easy
+    # channel (forward) still converges in 20 epochs while yaw/pitch - which need a harder,
+    # noisier mapping learned from the shared trunk - never get there: predicted yaw/pitch
+    # variance collapsed to ~20-30% of the recorded variance (near mean prediction) even on
+    # data the model was trained on. That's underfitting, not the runaway extrapolation this
+    # was guarding against - min_best_epoch below already rules out shipping an early unstable
+    # checkpoint, so the clip/decay no longer need to carry that job alone. Loosened to let the
+    # harder channels actually fit; still non-zero as a safety net against a single bad batch.
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     criterion = nn.MSELoss()
 

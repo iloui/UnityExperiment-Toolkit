@@ -18,33 +18,30 @@ namespace Assets.Scripts.DataRecording
     public class ParticipantRecorder : MonoBehaviour
     {
         [Header("Linked Framework Components")]
-        public Camera MainVRCamera;
+        [Tooltip("Defines this scene's start/POI(s)/end locations and selection rules. The same " +
+                 "TaskScript that ImitationAgent uses for this scene, so both pipelines walk the " +
+                 "identical POI progression via PoiProgressTracker.")]
+        public TaskScript task;
+        [Tooltip("Must equal exactly LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName) - " +
+                 "recording refuses to start otherwise, since any broader/narrower mask silently corrupts " +
+                 "every recorded depth value.")]
         public LayerMask ArchitectureLayerMask;
 
         [Header("Storage Format")]
         public RecordingOutputFormat OutputFormat = RecordingOutputFormat.Binary;
 
-        [Header("Target Tracking (POIs)")]
-        public Transform CurrentPOITarget;
-
         [Header("Sampling & Storage Settings")]
         public string SaveDirectoryName = "VR_Recordings";
-        public float SamplingInterval = 0.1f; // 10Hz
-        public float MaxRayDistance = 50f;
         public bool EnableDebugRays = true; // Enabled by default for edge testing
         public bool AutoStartForTesting = false;
 
-        [Header("Custom FOV Controls (Fixes Matrix Collapse)")]
-        [Tooltip("The manual horizontal FOV cone angle for the ray beam.")]
-        public float HorizonalFovOverride = 90f;
-        [Tooltip("The manual vertical FOV cone angle for the ray beam.")]
-        public float VerticalFovOverride = 90f;
-
-        [Header("Temporal Windowing")]
-        public int TemporalWindowSize = 3;
-
-        private const int ImageWidth = 64;
-        private const int ImageHeight = 64;
+        // All hardware/sampling constants below are read directly from ZarrDataContract - the
+        // same contract ParticipantRecorder's manifest is written against and ImitationAgent
+        // reads its live-inference constants from - rather than being separately-tunable
+        // Inspector fields, so recording can never silently drift out of sync with the format
+        // the model is trained on (see ImitationAgent.cs for the matching inference-side fix).
+        private const int ImageWidth = ZarrDataContract.ImageWidth;
+        private const int ImageHeight = ZarrDataContract.ImageHeight;
         private const int TotalPixels = ImageWidth * ImageHeight;
 
         private bool isRecording;
@@ -64,6 +61,7 @@ namespace Assets.Scripts.DataRecording
         private BinaryWriter actionRotWriter;
         private BinaryWriter timestampWriter;
 
+        private Camera recordingCamera;
         private Camera hiddenCaptureCamera;
         private RenderTexture colorRenderTexture;
         private Texture2D colorReadbackTex;
@@ -72,7 +70,7 @@ namespace Assets.Scripts.DataRecording
         private NativeArray<RaycastHit> rayResults;
         private float[] currentRayBuffer;
 
-        private Queue<string> stateHistoryQueue = new Queue<string>();
+        private PoiProgressTracker poiTracker;
         private float Azimuth;
         private float Elevation;
 
@@ -88,10 +86,35 @@ namespace Assets.Scripts.DataRecording
         {
             if (isRecording) return;
 
+            // --- Dummy-proof preconditions: refuse to record rather than silently produce
+            // --- garbage training data. ---
+            if (task == null)
+            {
+                Debug.LogError("[ParticipantRecorder] CRITICAL: 'TaskScript task' is not assigned! Recording refused.");
+                throw new System.InvalidOperationException("[ParticipantRecorder] Cannot start recording: 'task' (TaskScript) is not assigned.");
+            }
+
+            LayerMask requiredMask = LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName);
+            if (ArchitectureLayerMask.value != requiredMask.value)
+            {
+                Debug.LogError($"[ParticipantRecorder] CRITICAL: ArchitectureLayerMask must equal exactly the " +
+                    $"'{ZarrDataContract.ArchitectureObstacleLayerName}' layer (mask value {requiredMask.value}), " +
+                    $"but is currently set to mask value {ArchitectureLayerMask.value}. Recording refused - a wrong " +
+                    $"mask (including 'Everything') silently corrupts every recorded depth value.");
+                throw new System.InvalidOperationException(
+                    $"[ParticipantRecorder] Cannot start recording: ArchitectureLayerMask ({ArchitectureLayerMask.value}) " +
+                    $"does not exactly match required layer '{ZarrDataContract.ArchitectureObstacleLayerName}' ({requiredMask.value}).");
+            }
+
+            // Throws if the scene doesn't have exactly one CanonicalRecordingCamera - no
+            // fallback to any other camera is allowed.
+            recordingCamera = CanonicalRecordingCamera.ResolveInScene();
+
             startTime = Time.time;
-            lastPosition = MainVRCamera.transform.position;
-            stateHistoryQueue.Clear();
+            lastPosition = recordingCamera.transform.position;
             episodeFrameCount = 0;
+
+            poiTracker = new PoiProgressTracker(task);
 
             InitializeHardwareReplication();
             InitializeJobBuffers();
@@ -154,10 +177,10 @@ namespace Assets.Scripts.DataRecording
             // Traverses up from 'unity-files/Assets/' to 'simulation_and_vr/'
             string rootDir = Path.GetFullPath(Path.Combine(Application.dataPath, "../../"));
             string trainingDir = Path.Combine(rootDir, "imitationagent_training");
-             
+
             string pipelineDir = Path.Combine(trainingDir, "training_pipeline");
             string localEnvPackages = Path.Combine(trainingDir, "python_embedded");
-             
+
             string bootstrapScript = Path.Combine(pipelineDir, "bootstrap_env.py");
             string pythonScript = Path.Combine(pipelineDir, "incremental_train.py");
             string targetOnnxOutput = Path.Combine(rootDir, "unity_files", "Assets", "ImitationModel", "ImitationAgentModel.onnx");
@@ -183,7 +206,7 @@ namespace Assets.Scripts.DataRecording
                     bootstrapInfo.Arguments = $"\"{bootstrapScript}\"";
                     bootstrapInfo.UseShellExecute = false;
                     bootstrapInfo.CreateNoWindow = true;
-                    
+
                     using (System.Diagnostics.Process bootstrapProcess = System.Diagnostics.Process.Start(bootstrapInfo))
                     {
                         bootstrapProcess.WaitForExit();
@@ -202,7 +225,7 @@ namespace Assets.Scripts.DataRecording
                     startInfo.RedirectStandardOutput = true;
                     startInfo.RedirectStandardError = true;
                     startInfo.CreateNoWindow = true;
-                    
+
                     // Injecting python_embedded directory directly into the Python import path environment variable
                     startInfo.EnvironmentVariables["PYTHONPATH"] = localEnvPackages;
 
@@ -233,10 +256,10 @@ namespace Assets.Scripts.DataRecording
         private void InitializeHardwareReplication()
         {
             GameObject camGO = new GameObject("Hidden_BC_CaptureCamera");
-            camGO.transform.SetParent(MainVRCamera.transform, false);
+            camGO.transform.SetParent(recordingCamera.transform, false);
             hiddenCaptureCamera = camGO.AddComponent<Camera>();
-            
-            hiddenCaptureCamera.CopyFrom(MainVRCamera);
+
+            hiddenCaptureCamera.CopyFrom(recordingCamera);
             hiddenCaptureCamera.clearFlags = CameraClearFlags.SolidColor;
             hiddenCaptureCamera.backgroundColor = Color.black;
 
@@ -273,7 +296,7 @@ namespace Assets.Scripts.DataRecording
                 StringBuilder headerBuilder = new StringBuilder();
                 headerBuilder.Append("Timestamp,Pos_X,Pos_Y,Pos_Z,Goal_Dir_X,Goal_Dir_Y,Goal_Dir_Z,Action_Vel_X,Action_Vel_Y,Action_Vel_Z,Action_Rot_X,Action_Rot_Y,Action_Rot_Z,");
 
-                for (int t = 0; t < TemporalWindowSize; t++)
+                for (int t = 0; t < ZarrDataContract.TemporalWindowSize; t++)
                 {
                     for (int i = 0; i < TotalPixels; i++)
                     {
@@ -410,20 +433,20 @@ namespace Assets.Scripts.DataRecording
         {
             while (isRecording)
             {
-                yield return new WaitForSeconds(SamplingInterval);
+                yield return new WaitForSeconds(ZarrDataContract.SamplingIntervalSeconds);
 
-                if (MainVRCamera == null) continue;
+                if (recordingCamera == null) continue;
 
-                Transform hTransform = MainVRCamera.transform;
+                Transform hTransform = recordingCamera.transform;
                 Vector3 currentPosition = hTransform.position;
                 float timeStamp = Time.time - startTime;
 
                 // --- GOAL SECTOR ---
                 Vector3 localGoalVector = Vector3.zero;
-                if (CurrentPOITarget != null)
+                if (poiTracker.CurrentTarget != null)
                 {
-                    Vector3 worldGoalDir = (CurrentPOITarget.position - currentPosition).normalized;
-                    localGoalVector = hTransform.InverseTransformDirection(worldGoalDir); 
+                    Vector3 worldGoalDir = (poiTracker.CurrentTarget.position - currentPosition).normalized;
+                    localGoalVector = hTransform.InverseTransformDirection(worldGoalDir);
                 }
 
                 // --- IMAGE CAPTURE ---
@@ -438,8 +461,8 @@ namespace Assets.Scripts.DataRecording
                 int index = 0;
 
                 // Convert overridden parameters directly to radians safely
-                float fovRadH = HorizonalFovOverride * Mathf.Deg2Rad;
-                float fovRadV = VerticalFovOverride * Mathf.Deg2Rad;
+                float fovRadH = ZarrDataContract.HorizontalFovDegrees * Mathf.Deg2Rad;
+                float fovRadV = ZarrDataContract.VerticalFovDegrees * Mathf.Deg2Rad;
 
                 // Track extreme index coordinates for custom boundary debugging outputs
                 int indexTopLeft = 0;
@@ -462,10 +485,10 @@ namespace Assets.Scripts.DataRecording
                         Vector3 worldDir = hTransform.TransformDirection(localDir);
 
                         rayCommands[index] = new RaycastCommand(
-                            origin, 
-                            worldDir, 
-                            new QueryParameters(ArchitectureLayerMask, true, QueryTriggerInteraction.Collide, false), 
-                            MaxRayDistance
+                            origin,
+                            worldDir,
+                            new QueryParameters(ArchitectureLayerMask, true, QueryTriggerInteraction.Collide, false),
+                            ZarrDataContract.MaxRayDistance
                         );
                         index++;
                     }
@@ -478,24 +501,24 @@ namespace Assets.Scripts.DataRecording
                 {
                     float dist = rayResults[i].distance;
                     bool hasHit = dist > 0;
-                    currentRayBuffer[i] = hasHit ? dist / MaxRayDistance : 1.0f;
+                    currentRayBuffer[i] = hasHit ? dist / ZarrDataContract.MaxRayDistance : 1.0f;
 
                     // --- ISOLATED OUTSIDE BOUNDARY FRUSTUM DEBUGGER ---
                     if (EnableDebugRays)
                     {
                         if (i == indexTopLeft || i == indexTopRight || i == indexBottomLeft || i == indexBottomRight || i == indexCenter)
                         {
-                            float drawDist = hasHit ? dist : MaxRayDistance;
+                            float drawDist = hasHit ? dist : ZarrDataContract.MaxRayDistance;
                             Color debugColor = (i == indexCenter) ? Color.blue : (hasHit ? Color.green : Color.red);
-                            
+
                             // Draws a thick, persistent visual pointer along the frame border bounds
-                            Debug.DrawRay(origin, rayCommands[i].direction * drawDist, debugColor, SamplingInterval);
+                            Debug.DrawRay(origin, rayCommands[i].direction * drawDist, debugColor, ZarrDataContract.SamplingIntervalSeconds);
                         }
                     }
                 }
 
                 // --- ACTION GENERATION ---
-                Vector3 worldVelocity = (currentPosition - lastPosition) / SamplingInterval;
+                Vector3 worldVelocity = (currentPosition - lastPosition) / ZarrDataContract.SamplingIntervalSeconds;
                 Vector3 localVelocityAction = hTransform.InverseTransformDirection(worldVelocity);
                 lastPosition = currentPosition;
 
@@ -520,6 +543,22 @@ namespace Assets.Scripts.DataRecording
                         deltaRotationAction,
                         timeStamp
                     );
+                }
+
+                // --- POI PROGRESSION (shared with ImitationAgent via PoiProgressTracker) ---
+                // Deliberately NOT currentPosition (the camera/head position, ~1.7-2m above the
+                // floor-level POI markers) - that made the vertical gap alone exceed
+                // ArrivalRadiusMeters, so arrival could never trigger even standing right on top
+                // of a marker. Use this component's own transform instead: ParticipantRecorder
+                // sits on the FPSController body (near ground level), exactly mirroring
+                // ImitationAgent.Update() ticking with its own body transform.position rather
+                // than its head anchor.
+                poiTracker.Tick(transform.position);
+                if (poiTracker.IsFinished)
+                {
+                    Debug.Log("[ParticipantRecorder] PoiProgressTracker reports all POIs fulfilled and end reached. Stopping recording automatically.");
+                    StopRecording();
+                    yield break;
                 }
             }
         }

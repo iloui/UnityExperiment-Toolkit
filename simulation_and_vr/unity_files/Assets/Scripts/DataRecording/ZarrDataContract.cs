@@ -22,6 +22,22 @@ namespace Assets.Scripts.DataRecording
         public const float HorizontalFovDegrees = 90f;
         public const float VerticalFovDegrees = 90f;
 
+        /// <summary>
+        /// The single Unity layer name depth raycasts must be restricted to. Both
+        /// ParticipantRecorder and ImitationAgent hard-fail at startup unless their
+        /// ArchitectureLayerMask equals exactly LayerMask.GetMask(ArchitectureObstacleLayerName) -
+        /// no other mask (including "Everything") is accepted, since a too-broad mask silently
+        /// corrupts every recorded/inferred depth value.
+        /// </summary>
+        public const string ArchitectureObstacleLayerName = "Architecture_Obstacle";
+
+        /// <summary>
+        /// Distance (meters) within which a mover is considered to have arrived at its
+        /// current POI/end target. Shared by PoiProgressTracker so recording and inference
+        /// use identical arrival semantics.
+        /// </summary>
+        public const float ArrivalRadiusMeters = 1.5f;
+
         public static readonly string[] ArrayNames = new[]
         {
             "rgb",

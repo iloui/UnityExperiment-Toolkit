@@ -68,7 +68,12 @@ class SingleEpisodeDataset(Dataset):
         self.action_rot = zarr.open(str(ep_path / "action_rot.zarr"), mode='r')
 
         self.window_size = window_size
-        self.num_frames = len(self.rgb) - window_size + 1
+        # action_vel[i]/action_rot[i] (see ParticipantRecorder.LockedSamplingLoop) is the motion
+        # that occurred BETWEEN sample i-1 and sample i - i.e. the action that produced
+        # observation i, not the action to take from it. The label for the window ending at
+        # idx+w-1 is therefore the action recorded one sample later, at idx+w, which requires
+        # one fewer window than before (idx+w must stay in bounds).
+        self.num_frames = len(self.rgb) - window_size
 
     def __len__(self):
         return max(0, self.num_frames)
@@ -89,11 +94,12 @@ class SingleEpisodeDataset(Dataset):
         # Pack full 49,155 array
         sensory_inputs = np.concatenate([goal_vec, rgbd])
 
-        # Target Motor Actions: Forward, Yaw, Pitch
-        forward = np.array(self.action_vel[idx + w - 1][2], dtype=np.float32)  # z = forward/back
-        yaw = np.array(self.action_rot[idx + w - 1][0], dtype=np.float32)      # index 0 = azimuth delta = yaw
-        yaw = (yaw + 180.0) % 360.0 - 180.0                                    # undo azimuth wraparound (e.g. 357.6 -> -2.4)
-        pitch = np.array(self.action_rot[idx + w - 1][1], dtype=np.float32)    # index 1 = elevation delta = pitch
+        # Target Motor Actions: the action to take FROM this observation, i.e. the one recorded
+        # one sample after the window (see num_frames comment above).
+        forward = np.array(self.action_vel[idx + w][2], dtype=np.float32)  # z = forward/back
+        yaw = np.array(self.action_rot[idx + w][0], dtype=np.float32)      # index 0 = azimuth delta = yaw
+        yaw = (yaw + 180.0) % 360.0 - 180.0                                # undo azimuth wraparound (e.g. 357.6 -> -2.4)
+        pitch = np.array(self.action_rot[idx + w][1], dtype=np.float32)    # index 1 = elevation delta = pitch
         motor_actions = np.array([forward, yaw, pitch], dtype=np.float32)
 
         return torch.from_numpy(sensory_inputs), torch.from_numpy(motor_actions)

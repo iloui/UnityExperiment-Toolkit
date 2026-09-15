@@ -78,15 +78,47 @@ namespace Assets.Scripts.Editor
                 throw new InvalidOperationException("The FirstPersonCharacter child does not contain a Camera component.");
             }
 
-            recorder.MainVRCamera = camera;
-            recorder.CurrentPOITarget = goal.transform;
+            // Both ParticipantRecorder and ImitationAgent now resolve their optical settings from
+            // a single marked camera in the scene (CanonicalRecordingCamera.ResolveInScene()),
+            // rather than a manually-assigned reference, so recording and inference can never be
+            // pointed at two different cameras by accident.
+            if (camera.GetComponent<CanonicalRecordingCamera>() == null)
+            {
+                camera.gameObject.AddComponent<CanonicalRecordingCamera>();
+            }
 
-            var obstacleLayer = SceneExporter.EnsureLayer("Architecture_Obstacle");
-            var mask = recorder.ArchitectureLayerMask.value;
-            mask |= 1 << obstacleLayer;
-            recorder.ArchitectureLayerMask = mask;
+            // PoiProgressTracker (shared by ParticipantRecorder and ImitationAgent) reads its
+            // start/POI(s)/end configuration from a TaskScript rather than a directly-assigned
+            // target Transform. This generator only ever produces a single goal marker, so that
+            // maps onto a zero-POI task (numberOfNeeds = 0) whose sole "end" is that goal -
+            // PoiProgressTracker treats that as the current target from the very first tick,
+            // exactly matching the previous direct CurrentPOITarget = goal.transform behaviour.
+            var taskScript = controller.GetComponent<TaskScript>();
+            if (taskScript == null)
+            {
+                taskScript = controller.AddComponent<TaskScript>();
+            }
+            taskScript.taskName = "Generated_" + controller.scene.name;
+            taskScript.agentType = "ImitationAgent";
+            taskScript.start = new[] { controller };
+            taskScript.pointsOfInterest = Array.Empty<GameObject>();
+            taskScript.end = new[] { goal };
+            taskScript.numberOfNeeds = 0;
+            taskScript.revisit = false;
+            taskScript.chooseNonDeterministically = false;
+
+            recorder.task = taskScript;
+
+            // Set (not OR) the mask to exactly the obstacle layer - both ParticipantRecorder and
+            // ImitationAgent now hard-fail unless ArchitectureLayerMask equals exactly
+            // LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName), so merging it into
+            // whatever mask happened to be serialized already (the previous `|=` behaviour) could
+            // still leave a too-broad mask that fails that check.
+            var obstacleLayer = SceneExporter.EnsureLayer(ZarrDataContract.ArchitectureObstacleLayerName);
+            recorder.ArchitectureLayerMask = 1 << obstacleLayer;
 
             UnityEditor.EditorUtility.SetDirty(recorder);
+            UnityEditor.EditorUtility.SetDirty(taskScript);
         }
     }
 }
