@@ -733,6 +733,10 @@ namespace Agent_Based_Modelling
         private const float MaxModelForwardMetersPerSec = 2.0f;
         private const float MaxModelRawYawDegPerSample = 45.0f;
         private const float MaxModelRawPitchDegPerSample = 35.0f;
+
+        // Below this forward SPEED (m/s, not per-frame distance) the agent is considered
+        // standing still. Framerate-independent, unlike the old per-frame moveAmount check.
+        private const float MinForwardSpeedMetersPerSec = 0.01f;
         
         private Model runtimeModel;
         private Worker inferenceEngine;
@@ -757,6 +761,7 @@ namespace Agent_Based_Modelling
 
         // Inference Inputs/Outputs
         public Vector3 localGoalVector3D;
+        private float localGoalDistanceMeters = 0f;
         private float networkForwardAction = 0f;
         private float networkYawAction = 0f;
         private float networkPitchAction = 0f;
@@ -1040,6 +1045,7 @@ namespace Agent_Based_Modelling
             if (poiTracker.CurrentTarget == null)
             {
                 localGoalVector3D = Vector3.zero;
+                localGoalDistanceMeters = 0f;
                 if (Time.frameCount % DiagnosticLogInterval == 0)
                 {
                     Debug.LogWarning("[Observation Pipeline] poiTracker.CurrentTarget is NULL! localGoalVector3D set to Vector3.zero.");
@@ -1047,8 +1053,9 @@ namespace Agent_Based_Modelling
                 return;
             }
 
-            Vector3 worldGoalDir = (poiTracker.CurrentTarget.position - AgentHeadAnchor.position).normalized;
-            localGoalVector3D = AgentHeadAnchor.InverseTransformDirection(worldGoalDir);
+            Vector3 worldGoalOffset = poiTracker.CurrentTarget.position - AgentHeadAnchor.position;
+            localGoalVector3D = AgentHeadAnchor.InverseTransformDirection(worldGoalOffset.normalized);
+            localGoalDistanceMeters = worldGoalOffset.magnitude;
 
             hiddenCaptureCamera.Render();
             RenderTexture.active = colorRenderTexture;
@@ -1094,25 +1101,37 @@ namespace Agent_Based_Modelling
         }
 
         /// <summary>
-        /// Flattens a goal vector + temporal window of RGBD frames into the exact
-        /// "sensory_inputs" layout the ONNX model was trained on: [goal.x, goal.y, goal.z,
-        /// then per frame (oldest to newest) per pixel (row-major) R/255, G/255, B/255, depth].
-        /// This must byte-for-byte match SingleEpisodeDataset.__getitem__ in
-        /// train_onAllRecordings_2DCNNModel.py - extracted as its own static, side-effect-free
-        /// method (rather than being inlined in ExecuteNeuralNetworkInference) specifically so
-        /// SensoryTensorParityTest can call it directly with synthetic frame data and compare
-        /// it against the Python training pipeline's output on the same input, without needing
-        /// a live camera/raycast/Sentis engine.
+        /// Converts a raw goal distance (meters) into the same bounded, resolution-favoring-close-range
+        /// proximity signal fed to the network on both sides - see SingleEpisodeDataset.__getitem__'s
+        /// identical transform in train_onAllRecordings_2DCNNModel.py. Raw distance is recorded/passed
+        /// around unconverted so this transform can change later without re-recording.
         /// </summary>
-        public static float[] BuildSensoryTensor(Vector3 goal, IEnumerable<SerializableFrameData> frameHistory)
+        public static float GoalDistanceToProximity(float goalDistanceMeters)
         {
-            int totalSensoryInputs = (TemporalWindowSize * TotalPixels * 4) + 3;
+            return 1f / (1f + Mathf.Max(0f, goalDistanceMeters));
+        }
+
+        /// <summary>
+        /// Flattens a goal vector + distance + temporal window of RGBD frames into the exact
+        /// "sensory_inputs" layout the ONNX model was trained on: [goal.x, goal.y, goal.z,
+        /// proximity(goal_distance), then per frame (oldest to newest) per pixel (row-major)
+        /// R/255, G/255, B/255, depth]. This must byte-for-byte match
+        /// SingleEpisodeDataset.__getitem__ in train_onAllRecordings_2DCNNModel.py - extracted as
+        /// its own static, side-effect-free method (rather than being inlined in
+        /// ExecuteNeuralNetworkInference) specifically so SensoryTensorParityTest can call it
+        /// directly with synthetic frame data and compare it against the Python training
+        /// pipeline's output on the same input, without needing a live camera/raycast/Sentis engine.
+        /// </summary>
+        public static float[] BuildSensoryTensor(Vector3 goal, float goalDistanceMeters, IEnumerable<SerializableFrameData> frameHistory)
+        {
+            int totalSensoryInputs = (TemporalWindowSize * TotalPixels * 4) + 4;
             float[] flattenedFeatureArray = new float[totalSensoryInputs];
             int ptr = 0;
 
             flattenedFeatureArray[ptr++] = goal.x;
             flattenedFeatureArray[ptr++] = goal.y;
             flattenedFeatureArray[ptr++] = goal.z;
+            flattenedFeatureArray[ptr++] = GoalDistanceToProximity(goalDistanceMeters);
 
             foreach (var frame in frameHistory)
             {
@@ -1155,7 +1174,7 @@ namespace Agent_Based_Modelling
                     return;
                 }
 
-                float[] flattenedFeatureArray = BuildSensoryTensor(localGoalVector3D, stateHistoryQueue);
+                float[] flattenedFeatureArray = BuildSensoryTensor(localGoalVector3D, localGoalDistanceMeters, stateHistoryQueue);
 
                 // TEMPORARY DIAGNOSTIC: compare against training data's R-channel mean (~0.15) to
                 // check for a live-vs-recorded brightness/exposure mismatch. Safe to remove once resolved.
@@ -1163,7 +1182,7 @@ namespace Agent_Based_Modelling
                 {
                     float rSum = 0f, rMin = 1f, rMax = 0f;
                     int rCount = 0;
-                    for (int k = 3; k < flattenedFeatureArray.Length; k += 4)
+                    for (int k = 4; k < flattenedFeatureArray.Length; k += 4)
                     {
                         float v = flattenedFeatureArray[k];
                         rSum += v;
@@ -1228,17 +1247,20 @@ namespace Agent_Based_Modelling
             AgentHeadAnchor.localEulerAngles = new Vector3(targetPitch, 0f, 0f);
 
             // 2. Forward Movement Calculation
-            float moveAmount = forward * Time.deltaTime;
-
-            if (Mathf.Abs(moveAmount) < 0.001f)
+            // Checked against the forward SPEED (m/s) itself, not the per-frame displacement -
+            // comparing moveAmount (which shrinks as framerate rises) against a fixed distance
+            // threshold used to false-positive at high/uncapped framerates even for a normal
+            // walking-speed forward action.
+            if (Mathf.Abs(forward) < MinForwardSpeedMetersPerSec)
             {
                 if (Time.frameCount % DiagnosticLogInterval == 0)
                 {
-                    Debug.LogWarning($"[Locomotion Warning] Move amount near zero ({moveAmount:F4}). Agent is standing still. Forward action was: {forward:F3}");
+                    Debug.LogWarning($"[Locomotion Warning] Forward speed near zero ({forward:F4} m/s). Agent is standing still.");
                 }
                 return;
             }
 
+            float moveAmount = forward * Time.deltaTime;
             Vector3 targetDisplacement = transform.forward * moveAmount;
             Vector3 proposedPosition = transform.position + targetDisplacement;
 

@@ -475,7 +475,7 @@ public class EngineScript : MonoBehaviour
             // the old soft auto-default fallback. Set it explicitly to the required layer so
             // spawned agents don't immediately refuse to start.
             scriptInstance.ArchitectureLayerMask = LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName);
-            // TemporalWindowSize is now a fixed ZarrDataContract constant (3) on ImitationAgent
+            // TemporalWindowSize is now a fixed ZarrDataContract constant on ImitationAgent
             // itself rather than a settable field - nothing to assign here anymore.
             if (defaultBaselineModel != null)
             {

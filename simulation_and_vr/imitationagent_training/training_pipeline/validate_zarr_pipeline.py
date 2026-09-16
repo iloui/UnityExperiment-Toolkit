@@ -12,6 +12,7 @@ try:
 except ImportError:  # pragma: no cover - dependency may be absent in a minimal validation environment
     torch = None
 
+from data_contract import TEMPORAL_WINDOW_SIZE
 
 IMAGE_WIDTH = 64
 IMAGE_HEIGHT = 64
@@ -49,7 +50,7 @@ def synthesize_episode(episode_dir: str):
         "image_width": IMAGE_WIDTH,
         "image_height": IMAGE_HEIGHT,
         "total_pixels": TOTAL_PIXELS,
-        "temporal_window_size": 3,
+        "temporal_window_size": TEMPORAL_WINDOW_SIZE,
         "sampling_interval_s": 0.1,
         "max_ray_distance": 50.0,
         "horizontal_fov_deg": 90.0,
@@ -153,7 +154,7 @@ def validate_onnx_export(zarr_path: str, output_path: str):
     depth = root["depth"]
     goal = root["goal"]
 
-    temporal_window = min(3, rgb.shape[0])
+    temporal_window = min(TEMPORAL_WINDOW_SIZE, rgb.shape[0])
     candidate_dim = (temporal_window * (4 * rgb.shape[1] * rgb.shape[2])) + goal.shape[1]
 
     class DummyModel(torch.nn.Module):

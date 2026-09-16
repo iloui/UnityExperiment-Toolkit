@@ -85,6 +85,7 @@ namespace Assets.Scripts.Editor
             // --- 1. Generate deterministic synthetic episode data --------------------------------
             var random = new System.Random(Seed);
             Vector3 goal = new Vector3(0.31f, -0.12f, 0.94f);
+            const float goalDistanceMeters = 4.2f;
 
             var frames = new List<ImitationAgent.SerializableFrameData>();
             var rawColor = new Color32[frameCount][];
@@ -110,12 +111,12 @@ namespace Assets.Scripts.Editor
             }
 
             // --- 2. Build the C# (inference-side) tensor via the exact production method ---------
-            float[] csharpTensor = ImitationAgent.BuildSensoryTensor(goal, frames);
+            float[] csharpTensor = ImitationAgent.BuildSensoryTensor(goal, goalDistanceMeters, frames);
 
             // --- 3. Write the same data through the recording pipeline's binary format -----------
             string episodeDir = Path.Combine(tempDir, "episode_parity_test");
             Directory.CreateDirectory(episodeDir);
-            WriteEpisodeBinaries(episodeDir, rawColor, rawDepth, goal, frameCount, totalPixels);
+            WriteEpisodeBinaries(episodeDir, rawColor, rawDepth, goal, goalDistanceMeters, frameCount, totalPixels);
             WriteManifest(episodeDir, frameCount);
 
             // --- 4. Run the real ingest_to_zarr.py + SingleEpisodeDataset code path --------------
@@ -185,11 +186,12 @@ namespace Assets.Scripts.Editor
             return true;
         }
 
-        private static void WriteEpisodeBinaries(string episodeDir, Color32[][] rawColor, float[][] rawDepth, Vector3 goal, int frameCount, int totalPixels)
+        private static void WriteEpisodeBinaries(string episodeDir, Color32[][] rawColor, float[][] rawDepth, Vector3 goal, float goalDistanceMeters, int frameCount, int totalPixels)
         {
             using (var rgbWriter = new BinaryWriter(new FileStream(Path.Combine(episodeDir, "rgb.bin"), FileMode.Create, FileAccess.Write)))
             using (var depthWriter = new BinaryWriter(new FileStream(Path.Combine(episodeDir, "depth.bin"), FileMode.Create, FileAccess.Write)))
             using (var goalWriter = new BinaryWriter(new FileStream(Path.Combine(episodeDir, "goal.bin"), FileMode.Create, FileAccess.Write)))
+            using (var goalDistanceWriter = new BinaryWriter(new FileStream(Path.Combine(episodeDir, "goal_distance.bin"), FileMode.Create, FileAccess.Write)))
             using (var poseWriter = new BinaryWriter(new FileStream(Path.Combine(episodeDir, "pose.bin"), FileMode.Create, FileAccess.Write)))
             using (var actionVelWriter = new BinaryWriter(new FileStream(Path.Combine(episodeDir, "action_vel.bin"), FileMode.Create, FileAccess.Write)))
             using (var actionRotWriter = new BinaryWriter(new FileStream(Path.Combine(episodeDir, "action_rot.bin"), FileMode.Create, FileAccess.Write)))
@@ -215,6 +217,8 @@ namespace Assets.Scripts.Editor
                     goalWriter.Write(goal.x);
                     goalWriter.Write(goal.y);
                     goalWriter.Write(goal.z);
+
+                    goalDistanceWriter.Write(goalDistanceMeters);
 
                     poseWriter.Write(0f);
                     poseWriter.Write(0f);
@@ -248,6 +252,7 @@ namespace Assets.Scripts.Editor
                     new ZarrDataContract.ArrayEntry { name = "rgb", shape = new int[] { 0, ZarrDataContract.ImageHeight, ZarrDataContract.ImageWidth, 3 }, dtype = ZarrDataContract.ArrayDtypes.Rgb },
                     new ZarrDataContract.ArrayEntry { name = "depth", shape = new int[] { 0, ZarrDataContract.ImageHeight, ZarrDataContract.ImageWidth }, dtype = ZarrDataContract.ArrayDtypes.Depth },
                     new ZarrDataContract.ArrayEntry { name = "goal", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
+                    new ZarrDataContract.ArrayEntry { name = "goal_distance", shape = new int[] { 0 }, dtype = ZarrDataContract.ArrayDtypes.Scalar },
                     new ZarrDataContract.ArrayEntry { name = "pose", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "action_vel", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "action_rot", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },

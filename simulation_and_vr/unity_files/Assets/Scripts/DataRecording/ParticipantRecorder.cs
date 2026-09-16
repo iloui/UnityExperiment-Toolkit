@@ -56,6 +56,7 @@ namespace Assets.Scripts.DataRecording
         private BinaryWriter rgbWriter;
         private BinaryWriter depthWriter;
         private BinaryWriter goalWriter;
+        private BinaryWriter goalDistanceWriter;
         private BinaryWriter poseWriter;
         private BinaryWriter actionVelWriter;
         private BinaryWriter actionRotWriter;
@@ -294,7 +295,7 @@ namespace Assets.Scripts.DataRecording
                 csvWriter = new StreamWriter(currentCsvPath, false, Encoding.UTF8);
 
                 StringBuilder headerBuilder = new StringBuilder();
-                headerBuilder.Append("Timestamp,Pos_X,Pos_Y,Pos_Z,Goal_Dir_X,Goal_Dir_Y,Goal_Dir_Z,Action_Vel_X,Action_Vel_Y,Action_Vel_Z,Action_Rot_X,Action_Rot_Y,Action_Rot_Z,");
+                headerBuilder.Append("Timestamp,Pos_X,Pos_Y,Pos_Z,Goal_Dir_X,Goal_Dir_Y,Goal_Dir_Z,Goal_Dist,Action_Vel_X,Action_Vel_Y,Action_Vel_Z,Action_Rot_X,Action_Rot_Y,Action_Rot_Z,");
 
                 for (int t = 0; t < ZarrDataContract.TemporalWindowSize; t++)
                 {
@@ -336,6 +337,7 @@ namespace Assets.Scripts.DataRecording
                 rgbWriter = new BinaryWriter(new FileStream(Path.Combine(currentEpisodeDir, "rgb.bin"), FileMode.Create, FileAccess.Write, FileShare.Read));
                 depthWriter = new BinaryWriter(new FileStream(Path.Combine(currentEpisodeDir, "depth.bin"), FileMode.Create, FileAccess.Write, FileShare.Read));
                 goalWriter = new BinaryWriter(new FileStream(Path.Combine(currentEpisodeDir, "goal.bin"), FileMode.Create, FileAccess.Write, FileShare.Read));
+                goalDistanceWriter = new BinaryWriter(new FileStream(Path.Combine(currentEpisodeDir, "goal_distance.bin"), FileMode.Create, FileAccess.Write, FileShare.Read));
                 poseWriter = new BinaryWriter(new FileStream(Path.Combine(currentEpisodeDir, "pose.bin"), FileMode.Create, FileAccess.Write, FileShare.Read));
                 actionVelWriter = new BinaryWriter(new FileStream(Path.Combine(currentEpisodeDir, "action_vel.bin"), FileMode.Create, FileAccess.Write, FileShare.Read));
                 actionRotWriter = new BinaryWriter(new FileStream(Path.Combine(currentEpisodeDir, "action_rot.bin"), FileMode.Create, FileAccess.Write, FileShare.Read));
@@ -370,6 +372,13 @@ namespace Assets.Scripts.DataRecording
                 goalWriter.Flush();
                 goalWriter.Close();
                 goalWriter = null;
+            }
+
+            if (goalDistanceWriter != null)
+            {
+                goalDistanceWriter.Flush();
+                goalDistanceWriter.Close();
+                goalDistanceWriter = null;
             }
 
             if (poseWriter != null)
@@ -418,6 +427,7 @@ namespace Assets.Scripts.DataRecording
                     new ZarrDataContract.ArrayEntry { name = "rgb", shape = new int[] { 0, ZarrDataContract.ImageHeight, ZarrDataContract.ImageWidth, 3 }, dtype = ZarrDataContract.ArrayDtypes.Rgb },
                     new ZarrDataContract.ArrayEntry { name = "depth", shape = new int[] { 0, ZarrDataContract.ImageHeight, ZarrDataContract.ImageWidth }, dtype = ZarrDataContract.ArrayDtypes.Depth },
                     new ZarrDataContract.ArrayEntry { name = "goal", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
+                    new ZarrDataContract.ArrayEntry { name = "goal_distance", shape = new int[] { 0 }, dtype = ZarrDataContract.ArrayDtypes.Scalar },
                     new ZarrDataContract.ArrayEntry { name = "pose", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "action_vel", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "action_rot", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
@@ -443,10 +453,12 @@ namespace Assets.Scripts.DataRecording
 
                 // --- GOAL SECTOR ---
                 Vector3 localGoalVector = Vector3.zero;
+                float goalDistanceMeters = 0f;
                 if (poiTracker.CurrentTarget != null)
                 {
-                    Vector3 worldGoalDir = (poiTracker.CurrentTarget.position - currentPosition).normalized;
-                    localGoalVector = hTransform.InverseTransformDirection(worldGoalDir);
+                    Vector3 worldGoalOffset = poiTracker.CurrentTarget.position - currentPosition;
+                    localGoalVector = hTransform.InverseTransformDirection(worldGoalOffset.normalized);
+                    goalDistanceMeters = worldGoalOffset.magnitude;
                 }
 
                 // --- IMAGE CAPTURE ---
@@ -530,7 +542,7 @@ namespace Assets.Scripts.DataRecording
 
                 if (OutputFormat == RecordingOutputFormat.Csv)
                 {
-                    WriteLegacyCsvRow(currentPosition, localGoalVector, localVelocityAction, deltaRotationAction, timeStamp, colorPixels, currentRayBuffer);
+                    WriteLegacyCsvRow(currentPosition, localGoalVector, goalDistanceMeters, localVelocityAction, deltaRotationAction, timeStamp, colorPixels, currentRayBuffer);
                 }
                 else
                 {
@@ -539,6 +551,7 @@ namespace Assets.Scripts.DataRecording
                         currentRayBuffer,
                         currentPosition,
                         localGoalVector,
+                        goalDistanceMeters,
                         localVelocityAction,
                         deltaRotationAction,
                         timeStamp
@@ -563,7 +576,7 @@ namespace Assets.Scripts.DataRecording
             }
         }
 
-        private void WriteLegacyCsvRow(Vector3 pose, Vector3 goal, Vector3 actionVel, Vector3 actionRot, float timeStamp, Color32[] colorPixels, float[] depthBuffer)
+        private void WriteLegacyCsvRow(Vector3 pose, Vector3 goal, float goalDistance, Vector3 actionVel, Vector3 actionRot, float timeStamp, Color32[] colorPixels, float[] depthBuffer)
         {
             if (csvWriter == null)
             {
@@ -572,7 +585,7 @@ namespace Assets.Scripts.DataRecording
 
             StringBuilder rowBuilder = new StringBuilder();
             rowBuilder.Append($"{timeStamp:F3},{pose.x:F3},{pose.y:F3},{pose.z:F3},");
-            rowBuilder.Append($"{goal.x:F4},{goal.y:F4},{goal.z:F4},");
+            rowBuilder.Append($"{goal.x:F4},{goal.y:F4},{goal.z:F4},{goalDistance:F4},");
             rowBuilder.Append($"{actionVel.x:F4},{actionVel.y:F4},{actionVel.z:F4},");
             rowBuilder.Append($"{actionRot.x:F4},{actionRot.y:F4},{actionRot.z:F4},");
 
@@ -585,9 +598,9 @@ namespace Assets.Scripts.DataRecording
             csvWriter.WriteLine(rowBuilder.ToString());
         }
 
-        private void WriteFrameBinary(Color32[] colorPixels, float[] depthBuffer, Vector3 pose, Vector3 goal, Vector3 actionVel, Vector3 actionRot, double timeStamp)
+        private void WriteFrameBinary(Color32[] colorPixels, float[] depthBuffer, Vector3 pose, Vector3 goal, float goalDistance, Vector3 actionVel, Vector3 actionRot, double timeStamp)
         {
-            if (rgbWriter == null || depthWriter == null || goalWriter == null || poseWriter == null || actionVelWriter == null || actionRotWriter == null || timestampWriter == null)
+            if (rgbWriter == null || depthWriter == null || goalWriter == null || goalDistanceWriter == null || poseWriter == null || actionVelWriter == null || actionRotWriter == null || timestampWriter == null)
             {
                 return;
             }
@@ -608,6 +621,8 @@ namespace Assets.Scripts.DataRecording
             goalWriter.Write(goal.x);
             goalWriter.Write(goal.y);
             goalWriter.Write(goal.z);
+
+            goalDistanceWriter.Write(goalDistance);
 
             poseWriter.Write(pose.x);
             poseWriter.Write(pose.y);

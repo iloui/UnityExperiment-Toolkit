@@ -72,6 +72,15 @@ def load_vector_file(path: str, frame_count: int, vector_dim: int):
     return data.reshape(frame_count, vector_dim).astype(np.float32)
 
 
+def load_scalar_file(path: str, frame_count: int):
+    _ensure_file(path)
+    data = np.fromfile(path, dtype=np.float32)
+    expected = frame_count
+    if data.size != expected:
+        raise ValueError(f"Unexpected data size for {path}: expected {expected}, got {data.size}")
+    return data.astype(np.float32)
+
+
 def load_timestamp(episode_dir: str, frame_count: int):
     path = _binary_file_path(episode_dir, "timestamp.bin")
     _ensure_file(path)
@@ -126,6 +135,17 @@ def main():
     write_array(group, "rgb", rgb)
     write_array(group, "depth", depth)
     write_array(group, "goal", goal)
+
+    # Optional: absent on episodes recorded before goal_distance.bin existed. Loaders downstream
+    # (SingleEpisodeDataset) must tolerate its absence rather than assume every episode has it.
+    goal_distance_path = _binary_file_path(episode_dir, "goal_distance.bin")
+    if os.path.exists(goal_distance_path):
+        goal_distance = load_scalar_file(goal_distance_path, frame_count)
+        write_array(group, "goal_distance", goal_distance)
+    else:
+        print(f"[Zarr Ingest] WARNING: {goal_distance_path} not found - episode has no goal_distance "
+              f"signal, model will fall back to an 'unknown distance' sentinel for it.")
+
     write_array(group, "pose", pose)
     write_array(group, "action_vel", action_vel)
     write_array(group, "action_rot", action_rot)

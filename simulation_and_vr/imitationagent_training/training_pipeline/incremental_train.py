@@ -17,6 +17,10 @@ import torch
 import torch.nn as nn
 import zarr
 
+from data_contract import TEMPORAL_WINDOW_SIZE, IMAGE_WIDTH, IMAGE_HEIGHT
+
+DEFAULT_SENSORY_INPUT_DIM = TEMPORAL_WINDOW_SIZE * IMAGE_WIDTH * IMAGE_HEIGHT * 4 + 4
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="DesignMind2 Lifecycle Engine - Dummy ML Pipeline")
@@ -58,9 +62,11 @@ def read_zarr_dataset(dataset_path: str):
 
 
 def compute_input_dim_from_zarr(rgb, depth, goal):
-    temporal_window = min(3, rgb.shape[0])
+    temporal_window = min(TEMPORAL_WINDOW_SIZE, rgb.shape[0])
     rgb_depth_channels = 4 * rgb.shape[1] * rgb.shape[2]
-    return (temporal_window * rgb_depth_channels) + goal.shape[1]
+    # +1 for the goal_distance proximity scalar alongside the goal direction vector - see
+    # train_onAllRecordings_2DCNNModel.SingleEpisodeDataset.
+    return (temporal_window * rgb_depth_channels) + goal.shape[1] + 1
 
 
 def load_legacy_csv(csv_input):
@@ -98,7 +104,7 @@ def main():
             print(f"[Python AI Core] Computed runtime network input dimension: {input_dim}")
         except Exception as exc:
             print(f"[Python AI Core] Failed parsing Zarr dataset: {exc}")
-            input_dim = 49155
+            input_dim = DEFAULT_SENSORY_INPUT_DIM
     else:
         try:
             input_dim = load_legacy_csv(dataset_path)
@@ -106,7 +112,7 @@ def main():
         except Exception as exc:
             print(f"[Python AI Core] Failed parsing tabular framework headers: {exc}")
             print("[Python AI Core] Falling back to default static tensor shapes for standard testing...")
-            input_dim = 49155
+            input_dim = DEFAULT_SENSORY_INPUT_DIM
 
     output_dim = 3
     model = DummyImitationModel(input_dim=input_dim, output_dim=output_dim)

@@ -18,13 +18,21 @@ IMAGE_WIDTH = 64
 IMAGE_HEIGHT = 64
 TOTAL_PIXELS = IMAGE_WIDTH * IMAGE_HEIGHT
 
-# The current imitation pipeline always reuses a temporal window of 3 frames.
-TEMPORAL_WINDOW_SIZE = 3
+# The current imitation pipeline reacts to a single most-recent frame - no temporal stacking.
+TEMPORAL_WINDOW_SIZE = 1
 
 # Unity captures RGB at 64x64x3 and depth as a single normalized scalar per pixel.
 RGB_SHAPE = ("time", IMAGE_HEIGHT, IMAGE_WIDTH, 3)
 DEPTH_SHAPE = ("time", IMAGE_HEIGHT, IMAGE_WIDTH)
 GOAL_SHAPE = ("time", 3)
+# Euclidean distance (meters) from the agent's head to its current POI/end target - the goal
+# array above is a NORMALIZED direction only, so without this the network has no way to tell
+# "goal 50m away" from "goal 0.5m away" except through pixels. Recorded raw (not pre-normalized,
+# unlike depth) so the proximity transform applied at consumption time (see
+# SingleEpisodeDataset/ImitationAgent.BuildSensoryTensor) can be changed later without
+# re-recording. Optional on old episodes recorded before this field existed - loaders must
+# handle its absence rather than assume every episode has it.
+GOAL_DISTANCE_SHAPE = ("time",)
 POSE_SHAPE = ("time", 3)
 ACTION_VEL_SHAPE = ("time", 3)
 ACTION_ROT_SHAPE = ("time", 3)
@@ -34,12 +42,14 @@ TIMESTAMP_SHAPE = ("time",)
 RGB_DTYPE = "uint8"
 DEPTH_DTYPE = "float32"
 VECTOR_DTYPE = "float32"
+GOAL_DISTANCE_DTYPE = "float32"
 TIMESTAMP_DTYPE = "float64"
 
 ARRAY_NAMES = {
     "rgb": "rgb",
     "depth": "depth",
     "goal": "goal",
+    "goal_distance": "goal_distance",
     "pose": "pose",
     "action_vel": "action_vel",
     "action_rot": "action_rot",
@@ -88,6 +98,7 @@ def make_episode_manifest(
             "rgb": {"shape": list(RGB_SHAPE), "dtype": RGB_DTYPE},
             "depth": {"shape": list(DEPTH_SHAPE), "dtype": DEPTH_DTYPE},
             "goal": {"shape": list(GOAL_SHAPE), "dtype": VECTOR_DTYPE},
+            "goal_distance": {"shape": list(GOAL_DISTANCE_SHAPE), "dtype": GOAL_DISTANCE_DTYPE},
             "pose": {"shape": list(POSE_SHAPE), "dtype": VECTOR_DTYPE},
             "action_vel": {"shape": list(ACTION_VEL_SHAPE), "dtype": VECTOR_DTYPE},
             "action_rot": {"shape": list(ACTION_ROT_SHAPE), "dtype": VECTOR_DTYPE},

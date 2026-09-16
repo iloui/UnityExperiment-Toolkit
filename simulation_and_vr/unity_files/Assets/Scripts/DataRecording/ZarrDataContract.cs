@@ -15,7 +15,7 @@ namespace Assets.Scripts.DataRecording
         public const int ImageWidth = 64;
         public const int ImageHeight = 64;
         public const int TotalPixels = ImageWidth * ImageHeight;
-        public const int TemporalWindowSize = 3;
+        public const int TemporalWindowSize = 1;
 
         public const float SamplingIntervalSeconds = 0.1f;
         public const float MaxRayDistance = 50f;
@@ -43,6 +43,7 @@ namespace Assets.Scripts.DataRecording
             "rgb",
             "depth",
             "goal",
+            "goal_distance",
             "pose",
             "action_vel",
             "action_rot",
@@ -59,6 +60,7 @@ namespace Assets.Scripts.DataRecording
             public const string Rgb = "uint8";
             public const string Depth = "float32";
             public const string Vector = "float32";
+            public const string Scalar = "float32";
             public const string Timestamp = "float64";
         }
 
