@@ -673,6 +673,24 @@ namespace Agent_Based_Modelling
         private PoiProgressTracker poiTracker;
         public bool destroyRequest = false;
 
+        // Eval-harness instrumentation: read-only counters exposing the two existing failure
+        // signals (SphereCast wall-block in MoveAgentLocomotion, DisplaceDeadlocks stuck-nudge)
+        // as data instead of just log lines, without changing either's actual behavior.
+        // CollisionCount only increments on the rising edge (not-blocked -> blocked), so resting
+        // against a wall for many frames counts as one collision event, not hundreds.
+        [HideInInspector] public int CollisionCount = 0;
+        [HideInInspector] public int StuckCount = 0;
+        [HideInInspector] public bool HasCollided = false;
+        [HideInInspector] public float FirstCollisionRealtime = 0f;
+        private bool wasCollidingLastFrame = false;
+        /// <summary>Optional per-inference-tick diagnostic sink (one CSV row per model call: raw and applied outputs, pose, goal). Set by EvalHarness; null = no logging.</summary>
+        [HideInInspector] public System.Action<string> TickLogSink;
+
+        /// <summary>Position of the current POI/end target, for eval-harness path-efficiency logging.</summary>
+        public Vector3 CurrentGoalPosition => (poiTracker != null && poiTracker.CurrentTarget != null) ? poiTracker.CurrentTarget.position : transform.position;
+        /// <summary>How many POIs have been fulfilled so far, for eval-harness partial-credit logging.</summary>
+        public int NeedsFulfilledCount => poiTracker != null ? poiTracker.NeedsFulfilled : 0;
+
         [HideInInspector]
         public int startIndex;
 
@@ -758,6 +776,9 @@ namespace Agent_Based_Modelling
         private float displacement = 0.1f;
         public float lastDisplacementTime;
         private float displacementDelta = 0.1f;
+        // The deadlock nudge teleports the agent to the nearest NavMesh point with no wall check, so it can
+        // hop across thin walls. EvalHarness turns it off so a stuck agent times out instead of teleporting.
+        [HideInInspector] public bool enableDeadlockNudge = true;
 
         // Inference Inputs/Outputs
         public Vector3 localGoalVector3D;
@@ -1216,6 +1237,21 @@ namespace Agent_Based_Modelling
                         networkYawAction     = rawYaw / RecordingSamplingInterval;
                         networkPitchAction   = rawPitch / RecordingSamplingInterval;
 
+                        if (TickLogSink != null)
+                        {
+                            var ci = System.Globalization.CultureInfo.InvariantCulture;
+                            TickLogSink(string.Join(";",
+                                Time.time.ToString("F2", ci),
+                                transform.position.x.ToString("F3", ci), transform.position.z.ToString("F3", ci),
+                                transform.eulerAngles.y.ToString("F1", ci),
+                                localGoalVector3D.x.ToString("F3", ci), localGoalVector3D.y.ToString("F3", ci), localGoalVector3D.z.ToString("F3", ci),
+                                localGoalDistanceMeters.ToString("F2", ci),
+                                outputData[0].ToString("F3", ci), outputData[1].ToString("F2", ci), outputData[2].ToString("F2", ci),
+                                networkForwardAction.ToString("F3", ci), networkYawAction.ToString("F1", ci),
+                                wasCollidingLastFrame ? "1" : "0",
+                                NeedsFulfilledCount.ToString(ci)));
+                        }
+
                         // Diagnostic check for Model anomalies (NaN, Inf, or Constant Zeroes)
                         if (float.IsNaN(networkForwardAction) || float.IsNaN(networkYawAction) || float.IsNaN(networkPitchAction))
                         {
@@ -1270,6 +1306,8 @@ namespace Agent_Based_Modelling
 
             if (!hitWall)
             {
+                wasCollidingLastFrame = false;
+
                 NavMeshHit navHit;
                 if (NavMesh.SamplePosition(proposedPosition, out navHit, agentRadius * 2.0f, NavMesh.AllAreas))
                 {
@@ -1285,6 +1323,17 @@ namespace Agent_Based_Modelling
             }
             else
             {
+                if (!wasCollidingLastFrame)
+                {
+                    CollisionCount++;
+                    if (!HasCollided)
+                    {
+                        HasCollided = true;
+                        FirstCollisionRealtime = Time.realtimeSinceStartup;
+                    }
+                }
+                wasCollidingLastFrame = true;
+
                 if (Time.frameCount % DiagnosticLogInterval == 0)
                 {
                     Debug.LogWarning($"[Locomotion Collision] SphereCast blocked forward movement into '{wallHit.collider.gameObject.name}' at distance {wallHit.distance:F2}m.");
@@ -1327,6 +1376,7 @@ namespace Agent_Based_Modelling
 
         private void DisplaceDeadlocks()
         {
+            if (!enableDeadlockNudge) return;
             if (Time.realtimeSinceStartup >= lastDisplacementTime + displacementInterval)
             {
                 float deltaMoved = Vector3.Distance(trajectory[trajectory.Count - 2], trajectory[trajectory.Count - 1]);
@@ -1334,7 +1384,8 @@ namespace Agent_Based_Modelling
                 {
                     lastDisplacementTime = Time.realtimeSinceStartup;
                     Vector3 targetPos = transform.position + new Vector3(UnityEngine.Random.value * displacement, 0f, UnityEngine.Random.value * displacement);
-                    
+                    StuckCount++;
+
                     Debug.LogWarning($"[Deadlock Triggered] Agent moved only {deltaMoved:F4}m in target direction over {displacementInterval}s. Applying deadlock nudge towards {targetPos}.");
 
                     NavMeshHit hit;

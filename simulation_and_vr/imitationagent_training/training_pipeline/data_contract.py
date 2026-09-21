@@ -21,6 +21,15 @@ TOTAL_PIXELS = IMAGE_WIDTH * IMAGE_HEIGHT
 # The current imitation pipeline reacts to a single most-recent frame - no temporal stacking.
 TEMPORAL_WINDOW_SIZE = 1
 
+# Yaw/pitch training targets are the MEAN per-sample rotation over this many consecutive samples
+# starting at the sample after the observation (0.5 s at the 0.1 s sampling interval), not the
+# single next sample. Recorded human yaw is bursty (61% of samples ~0 deg, rare 10-40 deg snaps),
+# so a one-sample MSE target regresses to ~0 and the policy never turns toward an off-axis goal.
+# Averaging keeps the units (deg per sample), so ImitationAgent's raw/RecordingSamplingInterval
+# conversion and the ONNX output contract are unchanged. Training-side only: nothing is stored
+# in the recordings, so existing episodes stay valid. 1 restores the old single-sample target.
+ACTION_HORIZON_SAMPLES = 5
+
 # Unity captures RGB at 64x64x3 and depth as a single normalized scalar per pixel.
 RGB_SHAPE = ("time", IMAGE_HEIGHT, IMAGE_WIDTH, 3)
 DEPTH_SHAPE = ("time", IMAGE_HEIGHT, IMAGE_WIDTH)
