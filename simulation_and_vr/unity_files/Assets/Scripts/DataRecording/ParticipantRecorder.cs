@@ -34,6 +34,10 @@ namespace Assets.Scripts.DataRecording
         public string SaveDirectoryName = "VR_Recordings";
         public bool EnableDebugRays = true; // Enabled by default for edge testing
         public bool AutoStartForTesting = false;
+        [Tooltip("If true, StopRecording() never launches the Python bootstrap/training pipeline. Used by " +
+                 "RecordRandomWalksHarness, which records many synthetic episodes back-to-back and must not " +
+                 "trigger a training run per episode. Default false = unchanged behaviour for human recording.")]
+        public bool suppressPythonPipeline = false;
 
         // All hardware/sampling constants below are read directly from ZarrDataContract - the
         // same contract ParticipantRecorder's manifest is written against and ImitationAgent
@@ -75,6 +79,12 @@ namespace Assets.Scripts.DataRecording
         private float Azimuth;
         private float Elevation;
 
+        /// <summary>True between StartRecording() and StopRecording() (including the automatic stop on reaching the end target).</summary>
+        public bool IsRecording => isRecording;
+
+        /// <summary>Directory of the current/last binary episode (empty until a binary episode has been started).</summary>
+        public string CurrentEpisodeDirectory => currentEpisodeDir;
+
         private void Start()
         {
             if (AutoStartForTesting)
@@ -114,6 +124,11 @@ namespace Assets.Scripts.DataRecording
             startTime = Time.time;
             lastPosition = recordingCamera.transform.position;
             episodeFrameCount = 0;
+            currentEpisodeDir = null;
+            // Fresh episode = fresh rotation baseline, so the first action_rot delta is identical to a
+            // freshly-added recorder's regardless of how many episodes this component recorded before.
+            Azimuth = 0f;
+            Elevation = 0f;
 
             poiTracker = new PoiProgressTracker(task);
 
@@ -147,7 +162,7 @@ namespace Assets.Scripts.DataRecording
                     csvWriter.Flush();
                     csvWriter.Close();
                     csvWriter = null;
-                    TriggerPythonPipeline(currentCsvPath);
+                    if (!suppressPythonPipeline) TriggerPythonPipeline(currentCsvPath);
                 }
             }
             else
@@ -157,7 +172,7 @@ namespace Assets.Scripts.DataRecording
                 if (!string.IsNullOrEmpty(currentEpisodeDir))
                 {
                     WriteEpisodeManifest();
-                    TriggerPythonPipeline(currentEpisodeDir);
+                    if (!suppressPythonPipeline) TriggerPythonPipeline(currentEpisodeDir);
                 }
             }
 

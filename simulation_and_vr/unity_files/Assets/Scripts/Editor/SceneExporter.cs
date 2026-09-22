@@ -44,8 +44,14 @@ namespace Assets.Scripts.Editor
             }
 
             var walkableLayer = EnsureLayer("Walkable_Floor");
+            // Architecture_Obstacle (walls/pillars/doorway partitions) must also be included, not just the floor -
+            // the bake needs their geometry to actually carve their footprint out of the walkable surface.
+            // Walkable_Floor-only was the original (buggy) setting: it produced a NavMesh that ignored walls
+            // entirely and let agents path straight through them, since the floor mesh pieces on their own don't
+            // reliably match the current wall layout.
+            var obstacleLayer = EnsureLayer("Architecture_Obstacle");
             surface.collectObjects = CollectObjects.Children;
-            surface.layerMask = 1 << walkableLayer;
+            surface.layerMask = (1 << walkableLayer) | (1 << obstacleLayer);
             surface.overrideTileSize = false;
             surface.overrideVoxelSize = false;
             surface.Bake();
