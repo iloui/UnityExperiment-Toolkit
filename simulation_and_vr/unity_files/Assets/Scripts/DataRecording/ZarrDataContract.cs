@@ -38,6 +38,17 @@ namespace Assets.Scripts.DataRecording
         /// </summary>
         public const float ArrivalRadiusMeters = 1.5f;
 
+        /// <summary>
+        /// Recording/inference eye height: the camera sits this far above the NavMesh surface under the mover.
+        /// ImitationAgent stands on the NavMesh, so this is its head height; the FPSController (human and synthetic
+        /// recordings) stands on the floor collider, so its FirstPersonCharacter offset is set to hit the same world
+        /// height (see RecordingRig.ApplyContractCameraHeight). The 2026-09 human episodes were recorded at ~1.70 m
+        /// above the NavMesh (1.78 m above the floor) and do not match this.
+        /// </summary>
+        public const float CameraHeightAboveNavMeshMeters = 1.5f;
+        /// <summary>ParticipantRecorder warns when the recording camera is further than this from CameraHeightAboveNavMeshMeters.</summary>
+        public const float CameraHeightToleranceMeters = 0.03f;
+
         public static readonly string[] ArrayNames = new[]
         {
             "rgb",

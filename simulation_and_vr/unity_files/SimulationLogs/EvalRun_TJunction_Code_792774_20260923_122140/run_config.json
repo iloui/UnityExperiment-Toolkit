@@ -1,0 +1,42 @@
+{
+    "harness_version": "3",
+    "scene": "TJunction_Code_792774",
+    "started_at": "2026-09-23T12:21:40.4089570+02:00",
+    "unity_version": "2022.3.62f3",
+    "model_asset": "ImitationLearningAgent_3synthetic1human_II",
+    "model_sha256": "50bb45cebc82",
+    "model_disk_mtime_utc": "2026-09-16T14:25:10.1262808Z",
+    "configuration_count": 20,
+    "agents_per_configuration": 1,
+    "randomize_markers": false,
+    "enforce_canonical_task": false,
+    "canonical_start": {
+        "x": -11.25,
+        "y": 0.0833333432674408,
+        "z": 0.0
+    },
+    "canonical_end": {
+        "x": 11.25,
+        "y": 1.0,
+        "z": 0.0
+    },
+    "simulation_speed": 3.0,
+    "episode_timeout_sim_s": 90.0,
+    "nudge_enabled": false,
+    "human_reference_s": 45.0,
+    "start_jitter_position_m": 0.5,
+    "start_jitter_heading_deg": 15.0,
+    "stall_event_min_s": 2.0,
+    "collision_debounce_s": 1.0,
+    "max_plausible_speed_mps": 2.5,
+    "metric_window_s": 1.0,
+    "stall_displacement_m": 0.10000000149011612,
+    "task_number_of_needs": 0,
+    "task_start_markers": 1,
+    "task_poi_markers": 0,
+    "task_end_markers": 1,
+    "agent_speed": 1.2999999523162842,
+    "agent_size": 1.0,
+    "agent_radius": 0.5,
+    "arrival_radius_m": 1.5
+}

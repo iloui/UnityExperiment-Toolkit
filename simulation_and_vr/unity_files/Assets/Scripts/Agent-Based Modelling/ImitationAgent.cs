@@ -685,6 +685,12 @@ namespace Agent_Based_Modelling
         private bool wasCollidingLastFrame = false;
         /// <summary>Optional per-inference-tick diagnostic sink (one CSV row per model call: raw and applied outputs, pose, goal). Set by EvalHarness; null = no logging.</summary>
         [HideInInspector] public System.Action<string> TickLogSink;
+        /// <summary>
+        /// Optional hook set by DaggerHarness: receives the policy's (forward m/s, yaw deg/s, pitch deg/s) and returns
+        /// the rates actually executed this frame (e.g. the NavMesh expert's while it is rescuing the agent).
+        /// null = the policy's output is executed unchanged.
+        /// </summary>
+        [HideInInspector] public System.Func<Vector3, Vector3> ExecutedActionOverride;
 
         /// <summary>Position of the current POI/end target, for eval-harness path-efficiency logging.</summary>
         public Vector3 CurrentGoalPosition => (poiTracker != null && poiTracker.CurrentTarget != null) ? poiTracker.CurrentTarget.position : transform.position;
@@ -741,13 +747,17 @@ namespace Agent_Based_Modelling
         private const float RecordingSamplingInterval = ZarrDataContract.SamplingIntervalSeconds;
         private const float HeuristicMaxTurnRateDegPerSec = 120.0f;
 
-        // Sanity bounds on the raw model output, taken from the actual recorded training data
-        // (20 episodes: forward 0.0-1.56 m/s, yaw/pitch deltas within +-37.1/+-28.2 deg per
-        // RecordingSamplingInterval), with a little headroom. Without this an undercalibrated
-        // model can output forward speeds many times faster than any recorded human walking
-        // speed, which is what was causing the agent to charge straight into walls instead of
-        // slowing/turning through openings, and occasionally tunnel through thin walls in a
-        // single frame.
+        // Sanity bounds on the raw model output. Originally taken from the human-only recorded
+        // training data (20 episodes: forward 0.0-1.56 m/s, yaw/pitch deltas within
+        // +-37.1/+-28.2 deg per RecordingSamplingInterval), with a little headroom. Without this
+        // an undercalibrated model can output forward speeds many times faster than any recorded
+        // human walking speed, which is what was causing the agent to charge straight into walls
+        // instead of slowing/turning through openings, and occasionally tunnel through thin
+        // walls in a single frame.
+        // Forward is clamped symmetrically (+-MaxModelForwardMetersPerSec), not floored at 0:
+        // later training data (synthetic NavMeshAgent + expanded recordings) is not restricted
+        // to walking-forward-only, so a negative prediction is a legitimate "back away" action,
+        // not noise to be discarded.
         private const float MaxModelForwardMetersPerSec = 2.0f;
         private const float MaxModelRawYawDegPerSample = 45.0f;
         private const float MaxModelRawPitchDegPerSample = 35.0f;
@@ -931,7 +941,9 @@ namespace Agent_Based_Modelling
             {
                 GameObject headGO = new GameObject("ImitationHeadAnchor");
                 headGO.transform.SetParent(transform, false);
-                headGO.transform.localPosition = new Vector3(0f, agentSize * 1.5f, 0f);
+                // World eye height = ZarrDataContract.CameraHeightAboveNavMeshMeters regardless of agentSize (this
+                // transform is scaled by agentSize); the recordings use the same contract height.
+                headGO.transform.localPosition = new Vector3(0f, ZarrDataContract.CameraHeightAboveNavMeshMeters / Mathf.Max(0.01f, agentSize), 0f);
                 AgentHeadAnchor = headGO.transform;
                 Debug.Log($"[ImitationAgent Start] Created default AgentHeadAnchor at local position {AgentHeadAnchor.localPosition}");
             }
@@ -1058,7 +1070,9 @@ namespace Agent_Based_Modelling
                 Debug.Log($"[Temporal Buffer] Filling observation window: {stateHistoryQueue.Count}/{TemporalWindowSize} frames ready.");
             }
 
-            MoveAgentLocomotion(networkForwardAction, networkYawAction, networkPitchAction);
+            Vector3 executed = new Vector3(networkForwardAction, networkYawAction, networkPitchAction);
+            if (ExecutedActionOverride != null) executed = ExecutedActionOverride(executed);
+            MoveAgentLocomotion(executed.x, executed.y, executed.z);
         }
 
         private void CaptureCurrentObservations()
@@ -1229,7 +1243,12 @@ namespace Agent_Based_Modelling
                         // Clamp to the range the model was actually trained on before doing anything else
                         // with it - an out-of-range raw prediction is what let the agent dash into (and
                         // occasionally tunnel through) walls instead of walking/turning at a human pace.
-                        float rawForward = Mathf.Clamp(outputData[0], 0f, MaxModelForwardMetersPerSec);
+                        // Symmetric like yaw/pitch below, NOT floored at 0f: flooring negative predictions
+                        // to exactly 0 (instead of letting the agent back away) was what turned a model
+                        // that wanted to reverse away from a wall/corner into a permanently frozen agent -
+                        // see the CentralPillar_Code_134868 eval run where raw_fwd sat at -0.57 for the
+                        // entire episode and MoveAgentLocomotion's "standing still" check fired every tick.
+                        float rawForward = Mathf.Clamp(outputData[0], -MaxModelForwardMetersPerSec, MaxModelForwardMetersPerSec);
                         float rawYaw = Mathf.Clamp(outputData[1], -MaxModelRawYawDegPerSample, MaxModelRawYawDegPerSample);
                         float rawPitch = Mathf.Clamp(outputData[2], -MaxModelRawPitchDegPerSample, MaxModelRawPitchDegPerSample);
 

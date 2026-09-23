@@ -15,6 +15,18 @@ namespace Assets.Scripts.DataRecording
         Csv
     }
 
+    /// <summary>
+    /// Supplies the action label for the observation just captured, instead of deriving it from the
+    /// camera's own motion. Used by DaggerHarness: the trained policy drives, and the NavMesh expert
+    /// says what it should have done from each visited state.
+    /// </summary>
+    public interface IActionLabelSource
+    {
+        /// <param name="actionVel">Local (camera-frame) velocity label, m/s - z = forward, same as action_vel.</param>
+        /// <param name="actionRot">(yaw, pitch, 0) delta in degrees per sampling interval, same as action_rot.</param>
+        void GetActionLabel(out Vector3 actionVel, out Vector3 actionRot);
+    }
+
     public class ParticipantRecorder : MonoBehaviour
     {
         [Header("Linked Framework Components")]
@@ -38,6 +50,25 @@ namespace Assets.Scripts.DataRecording
                  "RecordRandomWalksHarness, which records many synthetic episodes back-to-back and must not " +
                  "trigger a training run per episode. Default false = unchanged behaviour for human recording.")]
         public bool suppressPythonPipeline = false;
+
+        [Header("Episode Metadata")]
+        [Tooltip("Written to manifest.json. Leave 'unknown' for human recordings; the synthetic harnesses set " +
+                 "'synthetic_rrw' / 'synthetic_dagger' so training can tell the data sources apart.")]
+        public string participantId = "unknown";
+        [Tooltip("Written to manifest.json. The synthetic harnesses set the layout scene name here.")]
+        public string sessionId = "unknown";
+
+        /// <summary>Record from this camera instead of the scene's CanonicalRecordingCamera (DaggerHarness: the policy agent's head). null = unchanged behaviour.</summary>
+        [HideInInspector] public Camera recordingCameraOverride;
+
+        /// <summary>
+        /// If set, action_vel/action_rot are taken from this source instead of the camera's motion. The label
+        /// queried at sample i is written at sample i+1, which is exactly where the training loader looks for
+        /// the action taken FROM observation i (see SingleEpisodeDataset: label = action at idx + window).
+        /// </summary>
+        [HideInInspector] public IActionLabelSource actionLabelSource;
+        private Vector3 pendingLabelVel;
+        private Vector3 pendingLabelRot;
 
         // All hardware/sampling constants below are read directly from ZarrDataContract - the
         // same contract ParticipantRecorder's manifest is written against and ImitationAgent
@@ -85,6 +116,12 @@ namespace Assets.Scripts.DataRecording
         /// <summary>Directory of the current/last binary episode (empty until a binary episode has been started).</summary>
         public string CurrentEpisodeDirectory => currentEpisodeDir;
 
+        /// <summary>POIs fulfilled so far by this recorder's own tracker (the one that drives the recorded goal vector).</summary>
+        public int NeedsFulfilled => poiTracker != null ? poiTracker.NeedsFulfilled : 0;
+
+        /// <summary>Target the recorded goal vector currently points at (null when not recording).</summary>
+        public Transform CurrentTarget => poiTracker != null ? poiTracker.CurrentTarget : null;
+
         private void Start()
         {
             if (AutoStartForTesting)
@@ -118,13 +155,15 @@ namespace Assets.Scripts.DataRecording
             }
 
             // Throws if the scene doesn't have exactly one CanonicalRecordingCamera - no
-            // fallback to any other camera is allowed.
-            recordingCamera = CanonicalRecordingCamera.ResolveInScene();
+            // fallback to any other camera is allowed (unless a harness explicitly overrides it).
+            recordingCamera = recordingCameraOverride != null ? recordingCameraOverride : CanonicalRecordingCamera.ResolveInScene();
 
             startTime = Time.time;
             lastPosition = recordingCamera.transform.position;
             episodeFrameCount = 0;
             currentEpisodeDir = null;
+            pendingLabelVel = Vector3.zero;
+            pendingLabelRot = Vector3.zero;
             // Fresh episode = fresh rotation baseline, so the first action_rot delta is identical to a
             // freshly-added recorder's regardless of how many episodes this component recorded before.
             Azimuth = 0f;
@@ -432,8 +471,8 @@ namespace Assets.Scripts.DataRecording
             var manifest = new ZarrDataContract.EpisodeManifest
             {
                 episode_id = Path.GetFileName(currentEpisodeDir),
-                participant_id = "unknown",
-                session_id = "unknown",
+                participant_id = participantId,
+                session_id = sessionId,
                 frame_count = episodeFrameCount,
                 start_time = startTime,
                 end_time = Time.time,
@@ -555,12 +594,20 @@ namespace Assets.Scripts.DataRecording
                 Azimuth = azimuth;
                 Elevation = elevation;
 
+                if (actionLabelSource != null)
+                {
+                    localVelocityAction = pendingLabelVel;
+                    deltaRotationAction = pendingLabelRot;
+                    actionLabelSource.GetActionLabel(out pendingLabelVel, out pendingLabelRot);
+                }
+
                 if (OutputFormat == RecordingOutputFormat.Csv)
                 {
                     WriteLegacyCsvRow(currentPosition, localGoalVector, goalDistanceMeters, localVelocityAction, deltaRotationAction, timeStamp, colorPixels, currentRayBuffer);
                 }
                 else
                 {
+                    if (episodeFrameCount == CameraHeightCheckFrame) CheckCameraHeight(currentPosition);
                     WriteFrameBinary(
                         colorPixels,
                         currentRayBuffer,
@@ -588,6 +635,21 @@ namespace Assets.Scripts.DataRecording
                     StopRecording();
                     yield break;
                 }
+            }
+        }
+
+        // ~1 s in, so a rig that spawns in the air (the FPSController starts at y=1.05 and falls) has landed.
+        private const int CameraHeightCheckFrame = 10;
+
+        private void CheckCameraHeight(Vector3 cameraPosition)
+        {
+            if (!RecordingRig.TryNavMeshHeight(cameraPosition, out float navMeshY)) return;
+            float height = cameraPosition.y - navMeshY;
+            if (Mathf.Abs(height - ZarrDataContract.CameraHeightAboveNavMeshMeters) > ZarrDataContract.CameraHeightToleranceMeters)
+            {
+                Debug.LogWarning($"[ParticipantRecorder] Recording camera is {height:F2} m above the NavMesh, but the contract (and ImitationAgent) " +
+                    $"uses {ZarrDataContract.CameraHeightAboveNavMeshMeters:F2} m - this episode will not match the other recordings. " +
+                    "Fix the FPSController with Tools > Recording > Apply Contract Camera Height.");
             }
         }
 

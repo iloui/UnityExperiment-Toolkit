@@ -136,6 +136,9 @@ namespace Assets.Scripts.DataRecording
         [Header("Visualization")]
         [Tooltip("Color applied to every spawned agent's capsule.")]
         public Color agentColor = new Color(1f, 0.549f, 0f); // orange
+        [Tooltip("Recolor the task markers with the colors below. Off by default: the markers are part of what the policy sees, " +
+                 "and in every recording (human and synthetic) they keep the scene's own look (white default material).")]
+        public bool colorizeTaskMarkers = false;
         [Tooltip("Color applied to the start marker(s), if they have a Renderer to recolor.")]
         public Color startMarkerColor = Color.green;
         [Tooltip("Color applied to the POI marker(s), if they have a Renderer to recolor.")]
@@ -220,6 +223,13 @@ namespace Assets.Scripts.DataRecording
         }
         private readonly List<ActiveEpisode> activeEpisodes = new List<ActiveEpisode>();
 
+        void Awake()
+        {
+            // A layout scene's human FPSController has AutoStartForTesting on - without this it would record (and
+            // train on) a motionless episode during every eval run.
+            RecordingRig.DisableSceneRecorders("EvalHarness");
+        }
+
         void Start()
         {
             if (task == null)
@@ -265,7 +275,7 @@ namespace Assets.Scripts.DataRecording
             Time.maximumDeltaTime = ZarrDataContract.SamplingIntervalSeconds;
             Time.timeScale = simulationSpeed;
 
-            ColorizeTaskMarkers();
+            if (colorizeTaskMarkers) ColorizeTaskMarkers();
             SetupRunFolder();
             WriteRunConfig();
             AdvanceToNextConfiguration();
@@ -622,7 +632,12 @@ namespace Assets.Scripts.DataRecording
             if (capCollider != null) Destroy(capCollider);
 
             MeshRenderer agentRenderer = agentGO.GetComponent<MeshRenderer>();
-            if (agentRenderer != null) agentRenderer.material = CreateColorMaterial(agentColor);
+            if (agentRenderer != null)
+            {
+                agentRenderer.material = CreateColorMaterial(agentColor);
+                // The human rig has no body; a shadow on the floor would be in the policy's RGB but never in the training data.
+                agentRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            }
 
             ImitationAgent agent = agentGO.AddComponent<ImitationAgent>();
             agent.task = task;

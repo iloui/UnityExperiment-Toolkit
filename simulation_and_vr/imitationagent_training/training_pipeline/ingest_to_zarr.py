@@ -109,50 +109,68 @@ def write_array(group, name: str, data: np.ndarray):
     chunks = tuple(max(1, min(DEFAULT_CHUNK_SIZE, s)) for s in data.shape)
     if data.ndim == 1:
         chunks = (max(1, min(DEFAULT_CHUNK_SIZE, data.shape[0])),)
-    ds = group.create_dataset(name, data=data, chunks=chunks, overwrite=True)
+    ds = group.create_array(name, data=data, chunks=chunks, overwrite=True)
     return ds
+
+
+def convert_episode(episode_dir: str, output_zarr: str = None) -> int:
+    """Convert a single episode directory's binary files + manifest.json into a dataset.zarr.
+    Returns the number of frames ingested. Shared by the CLI entry point below and by callers
+    (e.g. the training pipeline) that want to ingest an episode in-process.
+
+    All-or-nothing: if anything fails partway through, the partially written output_zarr is
+    removed rather than left on disk, since callers (ensure_all_episodes_ingested) treat
+    output_zarr's mere existence as "already ingested" and would otherwise silently skip a
+    broken, half-written dataset on every later run."""
+    episode_dir = os.path.abspath(episode_dir)
+    if output_zarr is None:
+        output_zarr = os.path.join(os.path.dirname(episode_dir), "dataset.zarr")
+
+    try:
+        manifest = read_manifest(episode_dir)
+        frame_count = _frame_count_from_manifest(manifest)
+
+        rgb = load_rgb(episode_dir, frame_count)
+        depth = load_depth(episode_dir, frame_count)
+        goal = load_vector_file(_binary_file_path(episode_dir, "goal.bin"), frame_count, 3)
+        pose = load_vector_file(_binary_file_path(episode_dir, "pose.bin"), frame_count, 3)
+        action_vel = load_vector_file(_binary_file_path(episode_dir, "action_vel.bin"), frame_count, 3)
+        action_rot = load_vector_file(_binary_file_path(episode_dir, "action_rot.bin"), frame_count, 3)
+        timestamp = load_timestamp(episode_dir, frame_count)
+
+        group = create_dataset(output_zarr, manifest)
+        write_array(group, "rgb", rgb)
+        write_array(group, "depth", depth)
+        write_array(group, "goal", goal)
+
+        # Optional: absent on episodes recorded before goal_distance.bin existed. Loaders
+        # downstream (SingleEpisodeDataset) must tolerate its absence rather than assume every
+        # episode has it.
+        goal_distance_path = _binary_file_path(episode_dir, "goal_distance.bin")
+        if os.path.exists(goal_distance_path):
+            goal_distance = load_scalar_file(goal_distance_path, frame_count)
+            write_array(group, "goal_distance", goal_distance)
+        else:
+            print(f"[Zarr Ingest] WARNING: {goal_distance_path} not found - episode has no goal_distance "
+                  f"signal, model will fall back to an 'unknown distance' sentinel for it.")
+
+        write_array(group, "pose", pose)
+        write_array(group, "action_vel", action_vel)
+        write_array(group, "action_rot", action_rot)
+        write_array(group, "timestamp", timestamp)
+    except Exception:
+        if os.path.exists(output_zarr):
+            shutil.rmtree(output_zarr)
+        raise
+
+    print(f"[Zarr Ingest] Saved converted dataset to: {output_zarr}")
+    print(f"[Zarr Ingest] Frames ingested: {frame_count}")
+    return frame_count
 
 
 def main():
     args = parse_args()
-    episode_dir = os.path.abspath(args.episode_dir)
-    output_zarr = args.output_zarr
-    if output_zarr is None:
-        output_zarr = os.path.join(os.path.dirname(episode_dir), "dataset.zarr")
-
-    manifest = read_manifest(episode_dir)
-    frame_count = _frame_count_from_manifest(manifest)
-
-    rgb = load_rgb(episode_dir, frame_count)
-    depth = load_depth(episode_dir, frame_count)
-    goal = load_vector_file(_binary_file_path(episode_dir, "goal.bin"), frame_count, 3)
-    pose = load_vector_file(_binary_file_path(episode_dir, "pose.bin"), frame_count, 3)
-    action_vel = load_vector_file(_binary_file_path(episode_dir, "action_vel.bin"), frame_count, 3)
-    action_rot = load_vector_file(_binary_file_path(episode_dir, "action_rot.bin"), frame_count, 3)
-    timestamp = load_timestamp(episode_dir, frame_count)
-
-    group = create_dataset(output_zarr, manifest)
-    write_array(group, "rgb", rgb)
-    write_array(group, "depth", depth)
-    write_array(group, "goal", goal)
-
-    # Optional: absent on episodes recorded before goal_distance.bin existed. Loaders downstream
-    # (SingleEpisodeDataset) must tolerate its absence rather than assume every episode has it.
-    goal_distance_path = _binary_file_path(episode_dir, "goal_distance.bin")
-    if os.path.exists(goal_distance_path):
-        goal_distance = load_scalar_file(goal_distance_path, frame_count)
-        write_array(group, "goal_distance", goal_distance)
-    else:
-        print(f"[Zarr Ingest] WARNING: {goal_distance_path} not found - episode has no goal_distance "
-              f"signal, model will fall back to an 'unknown distance' sentinel for it.")
-
-    write_array(group, "pose", pose)
-    write_array(group, "action_vel", action_vel)
-    write_array(group, "action_rot", action_rot)
-    write_array(group, "timestamp", timestamp)
-
-    print(f"[Zarr Ingest] Saved converted dataset to: {output_zarr}")
-    print(f"[Zarr Ingest] Frames ingested: {frame_count}")
+    convert_episode(args.episode_dir, args.output_zarr)
 
 
 if __name__ == "__main__":

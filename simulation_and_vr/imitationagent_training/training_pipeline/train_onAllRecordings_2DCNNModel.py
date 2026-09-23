@@ -12,6 +12,7 @@ from torch.utils.data import Dataset, ConcatDataset, DataLoader
 
 from data_contract import TEMPORAL_WINDOW_SIZE, ACTION_HORIZON_SAMPLES, IMAGE_WIDTH, IMAGE_HEIGHT
 from goal_reconstruction import reconstruct_goal_distance, DEFAULT_POI_XZ, DEFAULT_END_XZ
+import ingest_to_zarr
 
 # Horizontal field of view of the two sensors, needed to turn a simulated view rotation (degrees)
 # into a column shift. The RGB camera is copied from FirstPersonCharacter (60 deg vertical FOV, 64x64
@@ -325,6 +326,27 @@ def export_onnx(model: nn.Module, output_path: str):
 
     print(f"\n[EXPORT SUCCESS] ONNX model exported to: {output_path}")
 
+# --- 5b. Auto-ingest raw recordings into Zarr before training sees them ---
+def ensure_all_episodes_ingested(recordings_dir: Path) -> None:
+    """Scan recordings_dir for raw episode folders (manifest.json present) that haven't been
+    converted to dataset.zarr yet, and convert them in place. Runs every time before training so
+    freshly recorded episodes (e.g. new synthetic batches) are picked up automatically instead of
+    silently being skipped by the episode discovery below."""
+    if not recordings_dir.is_dir():
+        return
+    raw_episode_dirs = sorted(
+        p for p in recordings_dir.iterdir()
+        if p.is_dir() and (p / "manifest.json").exists() and not (p / "dataset.zarr").exists()
+    )
+    if not raw_episode_dirs:
+        print("[INGEST] All episodes already converted to dataset.zarr - nothing to do.")
+        return
+    print(f"[INGEST] {len(raw_episode_dirs)} episode(s) missing dataset.zarr - converting now...")
+    for ep in raw_episode_dirs:
+        print(f"[INGEST] Converting {ep.name}...")
+        ingest_to_zarr.convert_episode(str(ep), str(ep / "dataset.zarr"))
+    print(f"[INGEST] Done - converted {len(raw_episode_dirs)} episode(s).")
+
 # --- 6. Training Loop ---
 def main():
     parser = argparse.ArgumentParser(description="Simplified 2D Behavior Cloning Pipeline")
@@ -365,6 +387,7 @@ def main():
     torch.manual_seed(args.seed)
 
     recordings_path = Path(args.recordings_dir)
+    ensure_all_episodes_ingested(recordings_path)
     episodes = [p for p in recordings_path.iterdir() if p.is_dir() and (p / "dataset.zarr").exists()]
     
     if not episodes:

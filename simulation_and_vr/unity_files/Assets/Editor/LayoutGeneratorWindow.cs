@@ -149,6 +149,8 @@ namespace Assets.Scripts.Editor
                 var layoutData = LayoutBuilder.Build(root, settings, layoutMaterial);
                 AgentLinker.SpawnAndWireParticipants(root.transform, settings, layoutData);
                 SceneExporter.ConfigureAndBakeNavMesh(root);
+                // Needs the baked NavMesh: puts the FPSController camera at the contract eye height (ImitationAgent's).
+                RecordingRigTools.ApplyInScene(scene);
 
                 string sceneFileName = $"{topology}_Code_{internalSeed}";
                 var savedPath = SceneExporter.SaveGeneratedScene(scene, sceneFileName);
