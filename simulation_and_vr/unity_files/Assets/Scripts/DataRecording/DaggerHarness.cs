@@ -18,7 +18,7 @@ namespace Assets.Scripts.DataRecording
     /// is set on a runtime TaskScript, an ImitationAgent running `modelAsset` is spawned at the start with a random
     /// heading, and a ParticipantRecorder on the agent records from the agent's own head (same camera height/optics
     /// the policy sees at run time) into imitationagent_training/zarr_recordings, with participant_id "synthetic_dagger"
-    /// and session_id = scene name. Observations are the policy's; action labels come from this harness (it is the
+    /// and session_id = "dagger_" + run start time. Observations are the policy's; action labels come from this harness (it is the
     /// recorder's IActionLabelSource):
     ///   yaw     = heading error to a look-ahead point on the NavMesh path to the recorder's current target, x gain, rate-limited
     ///   forward = walking speed, reduced to 0 for large heading errors or when the agent's own wall check would block it
@@ -131,6 +131,7 @@ namespace Assets.Scripts.DataRecording
         private int episodesRecorded;
         private int episodesReachedGoal;
         private int episodesDiscarded;
+        private string runSessionId;
         private int rescues;
         private float policyExecutedSeconds;
         private float expertExecutedSeconds;
@@ -392,8 +393,11 @@ namespace Assets.Scripts.DataRecording
             currentRecorder.suppressPythonPipeline = true;
             currentRecorder.recordingCameraOverride = view;
             currentRecorder.actionLabelSource = this;
+            currentRecorder.source = ZarrDataContract.EpisodeSources.Synthetic;
             currentRecorder.participantId = "synthetic_dagger";
-            currentRecorder.sessionId = SceneManager.GetActiveScene().name;
+            if (string.IsNullOrEmpty(runSessionId)) runSessionId = $"dagger_{DateTime.Now:yyyyMMdd_HHmmss}";
+            currentRecorder.sessionId = runSessionId; // one session per harness run
+            currentRecorder.repetitionIndex = episodesRecorded;
             return agentGO;
         }
 

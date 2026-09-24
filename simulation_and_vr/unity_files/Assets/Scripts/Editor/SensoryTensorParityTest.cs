@@ -44,12 +44,12 @@ namespace Assets.Scripts.Editor
 
             try
             {
-                bool passed = RunInternal(tempDir, out string failureReason);
+                bool passed = RunCameraAlignment(out string failureReason) && RunInternal(tempDir, out failureReason);
 
                 if (passed)
                 {
-                    Debug.Log("[SensoryTensorParityTest] PASS: recording pipeline and inference pipeline " +
-                        "produced an identical sensory_inputs tensor from the same synthetic input.");
+                    Debug.Log("[SensoryTensorParityTest] PASS: depth rays are pixel-aligned with the RGB frame, and the " +
+                        "recording pipeline and inference pipeline produced an identical sensory_inputs tensor from the same synthetic input.");
                     ExitIfBatchMode(0);
                 }
                 else
@@ -74,6 +74,121 @@ namespace Assets.Scripts.Editor
             if (Application.isBatchMode)
             {
                 EditorApplication.Exit(code);
+            }
+        }
+
+        /// <summary>
+        /// Renders a white box in the upper-right of an otherwise black view through a ContractCamera-configured 64x64
+        /// camera, casts the ContractCamera depth rays from the same camera, and requires "ray hit the box" and "RGB pixel
+        /// is white" to agree pixel by pixel. The box is off-centre in both axes, so a flipped row order or a FOV that
+        /// differs between the two channels fails. Also checks the camera FOV and the depth value of the centre pixel.
+        /// </summary>
+        private static bool RunCameraAlignment(out string failureReason)
+        {
+            const int W = ZarrDataContract.ImageWidth;
+            const int H = ZarrDataContract.ImageHeight;
+            int layer = LayerMask.NameToLayer(ZarrDataContract.ArchitectureObstacleLayerName);
+            if (layer < 0)
+            {
+                failureReason = $"Layer '{ZarrDataContract.ArchitectureObstacleLayerName}' does not exist.";
+                return false;
+            }
+
+            // Far away from anything in the open scene; culling mask and ray mask see only the test layer.
+            Vector3 eye = new Vector3(0f, 10000f, 0f);
+            var camGO = new GameObject("ParityTest_CaptureCamera");
+            var box = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            var rt = new RenderTexture(W, H, 24, RenderTextureFormat.ARGB32);
+            var readback = new Texture2D(W, H, TextureFormat.RGB24, false);
+            var material = new Material(Shader.Find("Unlit/Color")) { color = Color.white };
+            var commands = new Unity.Collections.NativeArray<RaycastCommand>(W * H, Unity.Collections.Allocator.TempJob);
+            var results = new Unity.Collections.NativeArray<RaycastHit>(W * H, Unity.Collections.Allocator.TempJob);
+            RenderTexture previousActive = RenderTexture.active;
+            try
+            {
+                camGO.hideFlags = HideFlags.HideAndDontSave; // don't dirty or leak into the open scene
+                box.hideFlags = HideFlags.HideAndDontSave;
+                camGO.transform.SetPositionAndRotation(eye, Quaternion.identity);
+                Camera cam = camGO.AddComponent<Camera>();
+                cam.enabled = false;
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = Color.black;
+                cam.cullingMask = 1 << layer;
+                cam.nearClipPlane = 0.1f;
+                cam.farClipPlane = 1000f;
+                rt.Create();
+                cam.targetTexture = rt;
+                ContractCamera.Configure(cam);
+
+                // Front face (z = 3.75) spans x, y in [-0.13, 3.0]: the whole upper-right quadrant of the view plus the
+                // centre pixel, none of the other quadrants. Its left/bottom edges fall ~0.4 px from a pixel centre, so
+                // rasterisation and raycasts cannot legitimately disagree there.
+                box.layer = layer;
+                box.transform.position = eye + new Vector3(1.435f, 1.435f, 4f);
+                box.transform.localScale = new Vector3(3.13f, 3.13f, 0.5f);
+                box.GetComponent<Renderer>().sharedMaterial = material;
+                Physics.SyncTransforms();
+
+                if (Mathf.Abs(cam.fieldOfView - ZarrDataContract.CameraFovDegrees) > 1e-3f || Mathf.Abs(cam.aspect - 1f) > 1e-5f)
+                {
+                    failureReason = $"Capture camera has fieldOfView {cam.fieldOfView} / aspect {cam.aspect}, expected {ZarrDataContract.CameraFovDegrees} / 1.";
+                    return false;
+                }
+
+                cam.Render();
+                RenderTexture.active = rt;
+                readback.ReadPixels(new Rect(0, 0, W, H), 0, 0);
+                readback.Apply();
+                Color32[] rgb = readback.GetPixels32();
+
+                ContractCamera.FillDepthRays(cam, commands, 1 << layer);
+                RaycastCommand.ScheduleBatch(commands, results, 16).Complete();
+
+                int both = 0, mismatches = 0, rgbHits = 0;
+                for (int i = 0; i < W * H; i++)
+                {
+                    bool rgbHit = rgb[i].r > 127;
+                    bool rayHit = results[i].distance > 0f;
+                    if (rgbHit) rgbHits++;
+                    if (rgbHit && rayHit) both++;
+                    if (rgbHit != rayHit) mismatches++;
+                }
+                if (rgbHits < 900 || mismatches > 0)
+                {
+                    failureReason = $"RGB and depth are not pixel-aligned: {rgbHits} box pixels in RGB, {both} also hit by the depth ray, " +
+                        $"{mismatches} disagreeing pixels (row 0 must be the bottom row in both).";
+                    return false;
+                }
+                int topRight = (H - 1) * W + (W - 1), bottomLeft = 0;
+                if (rgb[topRight].r <= 127 || rgb[bottomLeft].r > 127)
+                {
+                    failureReason = "RGB readback row order is not bottom-up (box expected in the top-right corner only).";
+                    return false;
+                }
+
+                // Centre pixel (32, 32): its ray is ~0.5 deg off the optical axis and meets the front face at 3.75 / cos(angle).
+                int centre = (H / 2) * W + (W / 2);
+                float expected = 3.75f / Vector3.Dot(commands[centre].direction.normalized, Vector3.forward);
+                if (Mathf.Abs(results[centre].distance - expected) > 1e-3f)
+                {
+                    failureReason = $"Centre depth ray hit at {results[centre].distance} m, expected {expected} m along the ray from the camera.";
+                    return false;
+                }
+
+                failureReason = null;
+                return true;
+            }
+            finally
+            {
+                RenderTexture.active = previousActive;
+                commands.Dispose();
+                results.Dispose();
+                UnityEngine.Object.DestroyImmediate(camGO);
+                UnityEngine.Object.DestroyImmediate(box);
+                UnityEngine.Object.DestroyImmediate(readback);
+                UnityEngine.Object.DestroyImmediate(material);
+                rt.Release();
+                UnityEngine.Object.DestroyImmediate(rt);
             }
         }
 
@@ -242,8 +357,15 @@ namespace Assets.Scripts.Editor
             var manifest = new ZarrDataContract.EpisodeManifest
             {
                 episode_id = "episode_parity_test",
+                scene_name = "parity_test",
+                layout_typology = "parity_test",
+                layout_seed = 0,
+                source = ZarrDataContract.EpisodeSources.Synthetic,
                 participant_id = "parity_test",
                 session_id = "parity_test",
+                repetition_index = 0,
+                task = new ZarrDataContract.TaskPositions { start = Vector3.zero, pois = new Vector3[0], end = Vector3.forward },
+                camera_height_m = ZarrDataContract.CameraHeightAboveNavMeshMeters,
                 frame_count = frameCount,
                 start_time = 0f,
                 end_time = frameCount * ZarrDataContract.SamplingIntervalSeconds,

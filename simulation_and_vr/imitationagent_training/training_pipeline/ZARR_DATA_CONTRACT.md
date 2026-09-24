@@ -1,86 +1,134 @@
-# Zarr data contract for the Unity imitation pipeline
+# Episode data contract (`zarr-v2`)
 
-This document fixes the target file schema before the Unity recorder is refactored away from CSV. The goal is to separate modalities cleanly and keep Python ingestion compatible with a chunked binary dataset format.
+The synthetic bot, human participants and the ImitationAgent all share one recording format. It is defined twice, and the two copies must match:
 
-## 1. Target dataset layout
+- Unity: `unity_files/Assets/Scripts/DataRecording/ZarrDataContract.cs` (written by `ParticipantRecorder`)
+- Python: `training_pipeline/data_contract.py` (checked by `check_manifest`, read by ingestion and training)
 
-Each recorded run produces one episode directory:
+Each episode is self-describing. Python never has to open the Unity scene to find out which layout, participant or task an episode belongs to. Nothing is kept for backward compatibility: an episode that does not match this document is refused, not patched.
+
+## 1. On-disk layout
+
+`ParticipantRecorder` writes one folder per episode into `imitationagent_training/zarr_recordings/`:
 
 ```text
-<dataset_root>/
-  episode_<timestamp>/
-    manifest.json
-    rgb.zarr/
-    depth.zarr/
-    goal.zarr/
-    pose.zarr/
-    action_vel.zarr/
-    action_rot.zarr/
-    timestamp.zarr/
+zarr_recordings/
+  episode_<yyyyMMdd_HHmmss_fff>/
+    manifest.json         episode metadata (section 3)
+    rgb.bin               raw little-endian arrays, one record per sample (section 2)
+    depth.bin
+    goal.bin
+    goal_distance.bin
+    pose.bin
+    action_vel.bin
+    action_rot.bin
+    timestamp.bin
+    dataset.zarr/         added by ingest_to_zarr.py: one Zarr group with the same eight arrays,
+                          and the manifest copied into the group attribute "manifest" (JSON string)
 ```
 
-The canonical episode structure is deliberately not a single flat CSV file. Each array is stored separately so training can load only the required modality and avoid converting everything into strings.
+`train_*` scripts call `ensure_all_episodes_ingested`, which converts every folder that has no `dataset.zarr` yet. `load_episodes` then checks every manifest. If any episode fails a check, training stops and lists the failing episodes.
 
-## 2. Canonical array schema
+## 2. Arrays
 
-- `rgb`: `uint8`, shape `(time, 64, 64, 3)`
-- `depth`: `float32`, shape `(time, 64, 64)`
-- `goal`: `float32`, shape `(time, 3)`
-- `pose`: `float32`, shape `(time, 3)`
-- `action_vel`: `float32`, shape `(time, 3)`
-- `action_rot`: `float32`, shape `(time, 3)`
-- `timestamp`: `float64`, shape `(time,)`
+Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every array has exactly `frame_count` rows, and row *i* of every array belongs to sample *i*.
 
-The current pipeline uses a fixed temporal window of 3 frames, therefore all modality arrays are appended in time order and are expected to be aligned by the same frame index.
+| name | dtype | shape | meaning |
+|---|---|---|---|
+| `rgb` | uint8 | (T, 64, 64, 3) | colour image from the capture camera |
+| `depth` | float32 | (T, 64, 64) | distance along each pixel's ray to the `Architecture_Obstacle` layer, divided by `max_ray_distance` (50 m); 1.0 = no hit |
+| `goal` | float32 | (T, 3) | unit direction from the camera to the current target (POI, then end), in the camera frame (x right, y up, z forward) |
+| `goal_distance` | float32 | (T,) | Euclidean distance in metres from the camera to the current target. **Mandatory.** Training turns it into proximity = 1 / (1 + d) |
+| `pose` | float32 | (T, 3) | camera world position (Unity metres, y up) |
+| `action_vel` | float32 | (T, 3) | camera velocity between sample *i*-1 and *i*, in the camera frame, m/s (z = forward) |
+| `action_rot` | float32 | (T, 3) | (yaw, pitch, 0) change between sample *i*-1 and *i*, degrees per sample. Row 0 is meaningless |
+| `timestamp` | float64 | (T,) | seconds since the start of recording |
 
-## 3. Episode manifest
+**Camera.** RGB and depth come from the same 60° square pinhole camera (`camera_fov_deg`; `ContractCamera` in Unity). Depth pixel (x, y) is the distance along the ray through the centre of RGB pixel (x, y), so the two are pixel-aligned. Row 0 is the **bottom** image row in both arrays (Unity `ReadPixels` order). The camera sits `camera_height_m` = 1.5 m above the NavMesh, for humans, the bot and the agent alike.
 
-The `manifest.json` file is the canonical description for one recording. It contains at least:
+**Action alignment.** `action_*[i]` is the motion that produced observation *i*. The label for observation *i* is therefore read at *i* + 1 (`SingleEpisodeDataset`). Yaw and pitch labels are averaged over the next `ACTION_HORIZON_SAMPLES` samples.
+
+**Model input** (built identically by `SingleEpisodeDataset` and `ImitationAgent.BuildSensoryTensor`): 16388 floats. That is `goal` (3), then proximity (1), then the 64 × 64 × 4 RGBD frame (RGB / 255, depth as stored). There is no temporal stacking (`temporal_window_size` = 1).
+
+## 3. Manifest
+
+`manifest.json` is written by `ParticipantRecorder.WriteEpisodeManifest` with Unity's `JsonUtility`. Example:
 
 ```json
 {
-  "schema_version": "zarr-v1",
-  "episode_id": "episode_20260813_123456",
-  "participant_id": "P001",
-  "session_id": "S001",
-  "frame_count": 1200,
-  "start_time": 0.0,
-  "end_time": 120.0,
+  "schema_version": "zarr-v2",
+  "recorder_version": "participant_recorder_v1",
+  "episode_id": "episode_20260924_141503_120",
+
+  "scene_name": "Comb_Code_482913",
+  "layout_typology": "Comb",
+  "layout_seed": 482913,
+
+  "source": "human",
+  "participant_id": "P07",
+  "session_id": "20260924_141455",
+  "repetition_index": 2,
+  "input_mode": "desktop",
+
+  "task": {
+    "start": { "x": -12.5, "y": 1.05, "z": 0.0 },
+    "pois":  [ { "x": 0.4, "y": 0.28, "z": -5.6 } ],
+    "end":   { "x": 12.5, "y": 1.0, "z": 0.0 }
+  },
+
+  "frame_count": 412,
+  "start_time": 3.21,
+  "end_time": 44.43,
   "image_width": 64,
   "image_height": 64,
   "total_pixels": 4096,
-  "temporal_window_size": 3,
+  "temporal_window_size": 1,
   "sampling_interval_s": 0.1,
   "max_ray_distance": 50.0,
-  "horizontal_fov_deg": 90.0,
-  "vertical_fov_deg": 90.0,
-  "arrays": {
-    "rgb": { "shape": ["time", 64, 64, 3], "dtype": "uint8" },
-    "depth": { "shape": ["time", 64, 64], "dtype": "float32" },
-    "goal": { "shape": ["time", 3], "dtype": "float32" },
-    "pose": { "shape": ["time", 3], "dtype": "float32" },
-    "action_vel": { "shape": ["time", 3], "dtype": "float32" },
-    "action_rot": { "shape": ["time", 3], "dtype": "float32" },
-    "timestamp": { "shape": ["time"], "dtype": "float64" }
-  }
+  "camera_height_m": 1.502,
+  "camera_fov_deg": 60.0,
+
+  "arrays": [
+    { "name": "rgb",           "shape": [0, 64, 64, 3], "dtype": "uint8" },
+    { "name": "depth",         "shape": [0, 64, 64],    "dtype": "float32" },
+    { "name": "goal",          "shape": [0, 3],         "dtype": "float32" },
+    { "name": "goal_distance", "shape": [0],            "dtype": "float32" },
+    { "name": "pose",          "shape": [0, 3],         "dtype": "float32" },
+    { "name": "action_vel",    "shape": [0, 3],         "dtype": "float32" },
+    { "name": "action_rot",    "shape": [0, 3],         "dtype": "float32" },
+    { "name": "timestamp",     "shape": [0],            "dtype": "float64" }
+  ]
 }
 ```
 
-## 4. Contract rules
+| field | filled from |
+|---|---|
+| `schema_version` | `ZarrDataContract.SchemaVersion`. Must equal `data_contract.DATASET_VERSION` |
+| `recorder_version` | `ZarrDataContract.RecorderVersion`. Bump it whenever the recorder's behaviour changes |
+| `scene_name` | the Unity scene the recorder is in |
+| `layout_typology`, `layout_seed` | the scene's `LayoutInfo` component, which `Tools > Generate Layout` adds to the environment root. Recording refuses to start without exactly one `LayoutInfo` |
+| `source` | `"human"` or `"synthetic"`. The recorder's `source` field; `RecordRandomWalksHarness` and `DaggerHarness` set `"synthetic"` |
+| `participant_id` | the recorder's `participantId`. Recording refuses to start while it is empty or `"unknown"`. Synthetic episodes use the bot name (`synthetic_rrw_v3`, `synthetic_dagger`) |
+| `session_id` | one sitting or one harness run. For humans: the recorder's `sessionId`, or the start time of the first episode in Play mode if left empty. For bots: `rrw_<time>` or `dagger_<time>` |
+| `repetition_index` | the recorder's `repetitionIndex`, which increments after every episode. Harnesses set it to the index of the kept episode within the run |
+| `input_mode` | `"desktop"` (keyboard + mouse), the only mode in use |
+| `task` | world positions, fixed at the start of recording. `start` is the task start marker nearest the mover. `pois` are the POIs in visiting order and `end` is the end marker, both taken from the route `PoiProgressTracker` plans up front, so they are complete even when an episode stops early |
+| `frame_count` | number of samples written |
+| `start_time`, `end_time` | Unity `Time.time` at start and stop |
+| `camera_height_m` | measured camera height above the NavMesh, taken once at sample 10 (or at stop, for shorter episodes). -1 = could not be measured |
+| `camera_fov_deg` | the capture camera's actual field of view |
+| `arrays` | name, shape (0 = time axis) and dtype of every array in section 2 |
 
-1. `rgb` and `depth` must be aligned by frame index.
-2. `goal`, `pose`, `action_vel`, and `action_rot` must be stored in the same time order as the camera frames.
-3. `timestamp` is the authoritative per-frame time vector.
-4. All arrays must use explicit dtypes; no implicit float/string conversions are permitted.
-5. The Python ingestion script is responsible for validating lengths and throwing an error if the arrays are mismatched.
+## 4. Checks (`data_contract.check_manifest`)
 
-## 5. Why this contract
+`ingest_to_zarr.convert_episode` and `load_episodes` (both training scripts) refuse an episode, with a `ValueError` naming every problem, when:
 
-This format solves the current bottleneck in the CSV path:
+1. `schema_version` is not `zarr-v2`;
+2. any field in section 3 is missing or has the wrong JSON type;
+3. `recorder_version`, `episode_id`, `scene_name`, `layout_typology`, `participant_id`, `session_id` or `input_mode` is empty, or `participant_id` is `"unknown"`;
+4. `source` is not `"human"` or `"synthetic"`, `repetition_index` < 0, or `frame_count` ≤ 0;
+5. `task` is not `{start: {x,y,z}, pois: [{x,y,z}, ...], end: {x,y,z}}`;
+6. `camera_fov_deg` ≠ 60, `camera_height_m` is outside 1.5 ± 0.03 m, `sampling_interval_s` ≠ 0.1, the image is not 64 × 64, or `temporal_window_size` ≠ 1;
+7. `arrays` does not list all eight arrays.
 
-- no string-building per row
-- no pandas CSV parse cost for every training run
-- natural chunked storage for large observation tensors
-- direct compatibility with NumPy/Zarr/PyTorch batching
-
-This contract is the fixed reference for the next implementation step: Unity binary recording and the Python ingestion layer.
+Ingestion also fails if any `.bin` file (including `goal_distance.bin`) is missing, or if its size does not equal `frame_count` × the per-sample record size. It then removes the partly written `dataset.zarr`.

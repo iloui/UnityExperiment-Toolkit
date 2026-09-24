@@ -51,12 +51,20 @@ namespace Assets.Scripts.DataRecording
                  "trigger a training run per episode. Default false = unchanged behaviour for human recording.")]
         public bool suppressPythonPipeline = false;
 
-        [Header("Episode Metadata")]
-        [Tooltip("Written to manifest.json. Leave 'unknown' for human recordings; the synthetic harnesses set " +
-                 "'synthetic_rrw' / 'synthetic_dagger' so training can tell the data sources apart.")]
-        public string participantId = "unknown";
-        [Tooltip("Written to manifest.json. The synthetic harnesses set the layout scene name here.")]
-        public string sessionId = "unknown";
+        [Header("Episode Metadata (manifest.json)")]
+        [Tooltip("'human' for participants. The synthetic harnesses set 'synthetic'.")]
+        public string source = ZarrDataContract.EpisodeSources.Human;
+        [Tooltip("Required: recording refuses to start while this is empty or 'unknown'. Set the participant's ID before each " +
+                 "participant; the synthetic harnesses set their bot name (e.g. 'synthetic_rrw_v3').")]
+        public string participantId = "";
+        [Tooltip("Groups the episodes of one sitting. Left empty, it is set to the start time of the first episode " +
+                 "(yyyyMMdd_HHmmss) and kept for the rest of Play mode.")]
+        public string sessionId = "";
+        [Tooltip("repetition_index written to the NEXT episode; incremented after every episode. Reset to 0 for a new " +
+                 "participant, or set it when resuming a participant in a new Play session.")]
+        public int repetitionIndex = 0;
+        [Tooltip("How the mover was controlled. Only 'desktop' (keyboard + mouse) is in use.")]
+        public string inputMode = ZarrDataContract.InputModeDesktop;
 
         /// <summary>Record from this camera instead of the scene's CanonicalRecordingCamera (DaggerHarness: the policy agent's head). null = unchanged behaviour.</summary>
         [HideInInspector] public Camera recordingCameraOverride;
@@ -110,6 +118,11 @@ namespace Assets.Scripts.DataRecording
         private float Azimuth;
         private float Elevation;
 
+        // Manifest metadata captured at StartRecording (see WriteEpisodeManifest).
+        private LayoutInfo layoutInfo;
+        private ZarrDataContract.TaskPositions episodeTask;
+        private float measuredCameraHeight;
+
         /// <summary>True between StartRecording() and StopRecording() (including the automatic stop on reaching the end target).</summary>
         public bool IsRecording => isRecording;
 
@@ -154,6 +167,31 @@ namespace Assets.Scripts.DataRecording
                     $"does not exactly match required layer '{ZarrDataContract.ArchitectureObstacleLayerName}' ({requiredMask.value}).");
             }
 
+            // Episode metadata: training splits by participant and groups by layout from the manifest alone, so an
+            // episode without them is unusable.
+            if (source != ZarrDataContract.EpisodeSources.Human && source != ZarrDataContract.EpisodeSources.Synthetic)
+            {
+                throw new System.InvalidOperationException(
+                    $"[ParticipantRecorder] Cannot start recording: source is '{source}', expected " +
+                    $"'{ZarrDataContract.EpisodeSources.Human}' or '{ZarrDataContract.EpisodeSources.Synthetic}'.");
+            }
+            if (string.IsNullOrWhiteSpace(participantId) || participantId.Trim() == "unknown")
+            {
+                Debug.LogError("[ParticipantRecorder] CRITICAL: participantId is not set. Enter the participant's ID on the " +
+                    "ParticipantRecorder (FPSController) before recording. Recording refused.");
+                throw new System.InvalidOperationException("[ParticipantRecorder] Cannot start recording: participantId is not set.");
+            }
+            if (string.IsNullOrWhiteSpace(inputMode))
+            {
+                throw new System.InvalidOperationException("[ParticipantRecorder] Cannot start recording: inputMode is empty.");
+            }
+            // Throws unless the scene has exactly one LayoutInfo (added by Tools > Generate Layout).
+            layoutInfo = LayoutInfo.ResolveInScene();
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                sessionId = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            }
+
             // Throws if the scene doesn't have exactly one CanonicalRecordingCamera - no
             // fallback to any other camera is allowed (unless a harness explicitly overrides it).
             recordingCamera = recordingCameraOverride != null ? recordingCameraOverride : CanonicalRecordingCamera.ResolveInScene();
@@ -170,6 +208,8 @@ namespace Assets.Scripts.DataRecording
             Elevation = 0f;
 
             poiTracker = new PoiProgressTracker(task);
+            episodeTask = CaptureTaskPositions();
+            measuredCameraHeight = float.NaN;
 
             InitializeHardwareReplication();
             InitializeJobBuffers();
@@ -321,6 +361,7 @@ namespace Assets.Scripts.DataRecording
             colorRenderTexture = new RenderTexture(ImageWidth, ImageHeight, 24, RenderTextureFormat.ARGB32);
             colorRenderTexture.Create();
             hiddenCaptureCamera.targetTexture = colorRenderTexture;
+            ContractCamera.Configure(hiddenCaptureCamera);
 
             colorReadbackTex = new Texture2D(ImageWidth, ImageHeight, TextureFormat.RGB24, false);
         }
@@ -468,11 +509,28 @@ namespace Assets.Scripts.DataRecording
         {
             if (string.IsNullOrEmpty(currentEpisodeDir)) return;
 
+            // Episodes shorter than CameraHeightCheckFrame were never measured; measure now (the rig has not moved vertically).
+            if (float.IsNaN(measuredCameraHeight) && recordingCamera != null) CheckCameraHeight(recordingCamera.transform.position);
+            if (float.IsNaN(measuredCameraHeight))
+            {
+                Debug.LogError("[ParticipantRecorder] Could not measure the camera height above the NavMesh (no NavMesh under the " +
+                    "camera?). camera_height_m is written as -1 and training will refuse this episode.");
+            }
+
             var manifest = new ZarrDataContract.EpisodeManifest
             {
                 episode_id = Path.GetFileName(currentEpisodeDir),
+                scene_name = gameObject.scene.name,
+                layout_typology = layoutInfo.typology,
+                layout_seed = layoutInfo.seed,
+                source = source,
                 participant_id = participantId,
                 session_id = sessionId,
+                repetition_index = repetitionIndex,
+                input_mode = inputMode,
+                task = episodeTask,
+                camera_height_m = float.IsNaN(measuredCameraHeight) ? -1f : measuredCameraHeight,
+                camera_fov_deg = hiddenCaptureCamera != null ? hiddenCaptureCamera.fieldOfView : -1f,
                 frame_count = episodeFrameCount,
                 start_time = startTime,
                 end_time = Time.time,
@@ -491,6 +549,33 @@ namespace Assets.Scripts.DataRecording
 
             string json = JsonUtility.ToJson(manifest, true);
             File.WriteAllText(currentManifestPath, json);
+            repetitionIndex++;
+        }
+
+        /// <summary>
+        /// The episode's task in world coordinates. POIs and end come from the tracker's planned route (the targets the
+        /// recorded goal vector will point at). Start is the task start marker nearest to the mover now: harnesses and
+        /// generated scenes may use the mover itself or a moving marker as the start, so it is read at the start of recording.
+        /// </summary>
+        private ZarrDataContract.TaskPositions CaptureTaskPositions()
+        {
+            if (task.start == null || task.start.Length == 0)
+            {
+                throw new System.InvalidOperationException("[ParticipantRecorder] Cannot start recording: the TaskScript has no start marker.");
+            }
+            Vector3 start = task.start[0].transform.position;
+            float best = float.PositiveInfinity;
+            foreach (var marker in task.start)
+            {
+                if (marker == null) continue;
+                float d = Vector3.Distance(marker.transform.position, transform.position);
+                if (d < best) { best = d; start = marker.transform.position; }
+            }
+
+            var pois = new Vector3[poiTracker.PlannedPois.Count];
+            for (int i = 0; i < pois.Length; i++) pois[i] = poiTracker.PlannedPois[i].position;
+
+            return new ZarrDataContract.TaskPositions { start = start, pois = pois, end = poiTracker.PlannedEnd.position };
         }
 
         private IEnumerator LockedSamplingLoop()
@@ -522,43 +607,16 @@ namespace Assets.Scripts.DataRecording
                 colorReadbackTex.Apply();
                 Color32[] colorPixels = colorReadbackTex.GetPixels32();
 
-                // --- TRIGONOMETRIC MATHEMATICAL CONE CONSTRUCT ---
-                Vector3 origin = hTransform.position + hTransform.forward * 0.1f;
-                int index = 0;
+                // --- DEPTH: one ray per RGB pixel centre, from the same camera (pixel-aligned with colorPixels) ---
+                ContractCamera.FillDepthRays(hiddenCaptureCamera, rayCommands, ArchitectureLayerMask);
+                Vector3 origin = hiddenCaptureCamera.transform.position;
 
-                // Convert overridden parameters directly to radians safely
-                float fovRadH = ZarrDataContract.HorizontalFovDegrees * Mathf.Deg2Rad;
-                float fovRadV = ZarrDataContract.VerticalFovDegrees * Mathf.Deg2Rad;
-
-                // Track extreme index coordinates for custom boundary debugging outputs
-                int indexTopLeft = 0;
-                int indexTopRight = ImageWidth - 1;
-                int indexBottomLeft = (ImageHeight - 1) * ImageWidth;
-                int indexBottomRight = TotalPixels - 1;
+                // Track extreme index coordinates for custom boundary debugging outputs (row 0 is the bottom row)
+                int indexBottomLeft = 0;
+                int indexBottomRight = ImageWidth - 1;
+                int indexTopLeft = (ImageHeight - 1) * ImageWidth;
+                int indexTopRight = TotalPixels - 1;
                 int indexCenter = ((ImageHeight / 2) * ImageWidth) + (ImageWidth / 2);
-
-                for (int y = 0; y < ImageHeight; y++)
-                {
-                    float vFactor = (ImageHeight > 1) ? ((float)y / (ImageHeight - 1)) - 0.5f : 0f;
-                    float vAngle = vFactor * fovRadV;
-
-                    for (int x = 0; x < ImageWidth; x++)
-                    {
-                        float hFactor = (ImageWidth > 1) ? ((float)x / (ImageWidth - 1)) - 0.5f : 0f;
-                        float hAngle = hFactor * fovRadH;
-
-                        Vector3 localDir = new Vector3(Mathf.Tan(hAngle), Mathf.Tan(vAngle), 1.0f).normalized;
-                        Vector3 worldDir = hTransform.TransformDirection(localDir);
-
-                        rayCommands[index] = new RaycastCommand(
-                            origin,
-                            worldDir,
-                            new QueryParameters(ArchitectureLayerMask, true, QueryTriggerInteraction.Collide, false),
-                            ZarrDataContract.MaxRayDistance
-                        );
-                        index++;
-                    }
-                }
 
                 JobHandle handle = RaycastCommand.ScheduleBatch(rayCommands, rayResults, 16);
                 handle.Complete();
@@ -645,6 +703,7 @@ namespace Assets.Scripts.DataRecording
         {
             if (!RecordingRig.TryNavMeshHeight(cameraPosition, out float navMeshY)) return;
             float height = cameraPosition.y - navMeshY;
+            measuredCameraHeight = height;
             if (Mathf.Abs(height - ZarrDataContract.CameraHeightAboveNavMeshMeters) > ZarrDataContract.CameraHeightToleranceMeters)
             {
                 Debug.LogWarning($"[ParticipantRecorder] Recording camera is {height:F2} m above the NavMesh, but the contract (and ImitationAgent) " +

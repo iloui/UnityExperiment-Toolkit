@@ -21,6 +21,8 @@ namespace Assets.Scripts.DataRecording
 
         private readonly TaskScript task;
         private readonly bool[] poiMask;
+        private readonly List<int> plannedPoiIndices = new List<int>();
+        private readonly List<Transform> plannedPois = new List<Transform>();
 
         private State state;
         private int currentPoiIndex = -1;
@@ -29,11 +31,27 @@ namespace Assets.Scripts.DataRecording
         public bool IsFinished { get; private set; }
         public int NeedsFulfilled { get; private set; }
 
+        /// <summary>The POIs this run visits, in order. The whole route is drawn up front (same rules and distribution as
+        /// choosing each POI on arrival), so ParticipantRecorder can write the full task into the manifest even for an
+        /// episode that stops early.</summary>
+        public IReadOnlyList<Transform> PlannedPois => plannedPois;
+        /// <summary>The end marker this run finishes at.</summary>
+        public Transform PlannedEnd { get; }
+
         public PoiProgressTracker(TaskScript task)
         {
             this.task = task;
             poiMask = new bool[task.pointsOfInterest.Length];
             for (int i = 0; i < poiMask.Length; i++) poiMask[i] = true;
+
+            for (int need = 0; need < task.numberOfNeeds; need++)
+            {
+                int index = ChoosePoiIndex();
+                plannedPoiIndices.Add(index);
+                plannedPois.Add(task.pointsOfInterest[index].transform);
+                if (!task.revisit) poiMask[index] = false;
+            }
+            PlannedEnd = task.end[Random.Range(0, task.end.Length)].transform;
 
             NeedsFulfilled = 0;
             IsFinished = false;
@@ -65,7 +83,6 @@ namespace Assets.Scripts.DataRecording
                     $"{NeedsFulfilled + 1}/{task.numberOfNeeds} needs fulfilled.");
 
                 NeedsFulfilled++;
-                if (!task.revisit) poiMask[currentPoiIndex] = false;
                 AdvanceChoosingState();
             }
             else if (state == State.TaskCompleted)
@@ -77,15 +94,15 @@ namespace Assets.Scripts.DataRecording
 
         private void AdvanceChoosingState()
         {
-            if (NeedsFulfilled < task.numberOfNeeds)
+            if (NeedsFulfilled < plannedPoiIndices.Count)
             {
-                currentPoiIndex = ChoosePoiIndex();
-                CurrentTarget = task.pointsOfInterest[currentPoiIndex].transform;
+                currentPoiIndex = plannedPoiIndices[NeedsFulfilled];
+                CurrentTarget = plannedPois[NeedsFulfilled];
                 state = State.FindingPoi;
             }
             else
             {
-                CurrentTarget = task.end[Random.Range(0, task.end.Length)].transform;
+                CurrentTarget = PlannedEnd;
                 state = State.TaskCompleted;
             }
         }

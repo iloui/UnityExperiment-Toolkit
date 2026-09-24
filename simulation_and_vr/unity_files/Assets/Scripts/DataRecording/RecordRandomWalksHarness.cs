@@ -29,8 +29,9 @@ namespace Assets.Scripts.DataRecording
     /// For each of `pairCount` (k) random start/end pairs, `agentsPerPair` (m) walks are recorded one after another.
     /// With probability waypointProbability a walk goes start -> random waypoint -> end, the waypoint registered as the
     /// task's single POI (exactly the human 1-POI format); otherwise start -> end directly. Episodes are written to
-    /// imitationagent_training/zarr_recordings with participant_id = participantId (default "synthetic_rrw_v3"; the v2
-    /// bot without the stop behaviours recorded as "synthetic_rrw") and session_id = scene name.
+    /// imitationagent_training/zarr_recordings with source = "synthetic", participant_id = participantId (default "synthetic_rrw_v3"; the v2
+    /// bot without the stop behaviours recorded as "synthetic_rrw"), session_id = "rrw_" + run start time and
+    /// repetition_index = index of the kept episode within the run.
     ///
     /// An episode is discarded and re-sampled when: no path exists, the route is longer than maxPathLengthFactor x the
     /// shortest path, the end is not reached before the timeout, or it lasted less than minEpisodeSeconds. After
@@ -371,8 +372,9 @@ namespace Assets.Scripts.DataRecording
             recorder.EnableDebugRays = false;
             recorder.AutoStartForTesting = false;
             recorder.suppressPythonPipeline = true;
+            recorder.source = ZarrDataContract.EpisodeSources.Synthetic;
             recorder.participantId = participantId;
-            recorder.sessionId = SceneManager.GetActiveScene().name;
+            recorder.sessionId = $"rrw_{DateTime.Now:yyyyMMdd_HHmmss}"; // one session per harness run
 
             agent = rig.gameObject.GetComponent<RecordRandomWalksAgent>();
             if (agent == null) agent = rig.gameObject.AddComponent<RecordRandomWalksAgent>();
@@ -490,6 +492,7 @@ namespace Assets.Scripts.DataRecording
             float timeout = Mathf.Max(minTimeoutSeconds, timeoutFactor * planned / Mathf.Max(0.1f, rig.WalkSpeed) + behaviourTimeBudgetSeconds + stopTimeBudgetSeconds);
 
             // --- record ---
+            recorder.repetitionIndex = episodesRecorded; // index among this run's kept episodes (discarded ones don't count)
             if (!TryStartRecording()) yield break;
             agent.Begin(rng);
             string episodeDir = recorder.CurrentEpisodeDirectory;

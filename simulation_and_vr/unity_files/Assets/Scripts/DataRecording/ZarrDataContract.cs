@@ -9,7 +9,7 @@ namespace Assets.Scripts.DataRecording
     /// </summary>
     public static class ZarrDataContract
     {
-        public const string SchemaVersion = "zarr-v1";
+        public const string SchemaVersion = "zarr-v2";
         public const string ManifestFileName = "manifest.json";
 
         public const int ImageWidth = 64;
@@ -19,8 +19,12 @@ namespace Assets.Scripts.DataRecording
 
         public const float SamplingIntervalSeconds = 0.1f;
         public const float MaxRayDistance = 50f;
-        public const float HorizontalFovDegrees = 90f;
-        public const float VerticalFovDegrees = 90f;
+        /// <summary>
+        /// Field of view of the capture camera, in degrees. The image is square, so this is both the vertical and the horizontal
+        /// FOV. RGB and depth come from the same camera (see ContractCamera): depth pixel (x, y) is the distance along the ray
+        /// through the centre of RGB pixel (x, y).
+        /// </summary>
+        public const float CameraFovDegrees = 60f;
 
         /// <summary>
         /// The single Unity layer name depth raycasts must be restricted to. Both
@@ -109,13 +113,46 @@ namespace Assets.Scripts.DataRecording
             public const string Timestamp = "float64";
         }
 
+        /// <summary>
+        /// Written to every manifest as recorder_version. Bump it whenever ParticipantRecorder changes what or how it
+        /// records, so episodes from different recorder behaviour can be told apart without the scene.
+        /// </summary>
+        public const string RecorderVersion = "participant_recorder_v1";
+
+        /// <summary>Values of the manifest's 'source' field (data_contract.EPISODE_SOURCES).</summary>
+        public static class EpisodeSources
+        {
+            public const string Human = "human";
+            public const string Synthetic = "synthetic";
+        }
+
+        /// <summary>Value of the manifest's 'input_mode' field. Desktop (keyboard + mouse) is the only mode in use.</summary>
+        public const string InputModeDesktop = "desktop";
+
+        /// <summary>
+        /// Everything Python needs to place an episode without opening the scene: which layout (scene, typology, seed),
+        /// who produced it (source, participant, session, repetition), the task in world coordinates, and the camera it
+        /// was recorded with. data_contract.check_manifest refuses an episode that lacks any of these.
+        /// </summary>
         [Serializable]
         public sealed class EpisodeManifest
         {
             public string schema_version = SchemaVersion;
+            public string recorder_version = RecorderVersion;
             public string episode_id;
+
+            public string scene_name;
+            public string layout_typology;
+            public int layout_seed;
+
+            public string source;
             public string participant_id;
             public string session_id;
+            public int repetition_index;
+            public string input_mode = InputModeDesktop;
+
+            public TaskPositions task;
+
             public int frame_count;
             public float start_time;
             public float end_time;
@@ -125,9 +162,19 @@ namespace Assets.Scripts.DataRecording
             public int temporal_window_size = TemporalWindowSize;
             public float sampling_interval_s = SamplingIntervalSeconds;
             public float max_ray_distance = MaxRayDistance;
-            public float horizontal_fov_deg = HorizontalFovDegrees;
-            public float vertical_fov_deg = VerticalFovDegrees;
+            /// <summary>Measured height of the recording camera above the NavMesh (contract: CameraHeightAboveNavMeshMeters).</summary>
+            public float camera_height_m;
+            public float camera_fov_deg = CameraFovDegrees;
             public ArrayEntry[] arrays;
+        }
+
+        /// <summary>The episode's task in world coordinates: start marker, POIs in visiting order, end marker.</summary>
+        [Serializable]
+        public sealed class TaskPositions
+        {
+            public Vector3 start;
+            public Vector3[] pois;
+            public Vector3 end;
         }
 
         [Serializable]

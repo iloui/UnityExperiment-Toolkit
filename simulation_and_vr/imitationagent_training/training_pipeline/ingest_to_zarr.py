@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import zarr
 
+from data_contract import read_manifest
+
 
 DEFAULT_CHUNK_SIZE = 256
 
@@ -16,15 +18,6 @@ def parse_args():
     parser.add_argument("--episode_dir", type=str, required=True, help="Directory containing the binary episode and manifest.json")
     parser.add_argument("--output_zarr", type=str, default=None, help="Target .zarr directory. Defaults to a sibling dataset.zarr in the same parent folder.")
     return parser.parse_args()
-
-
-def read_manifest(episode_dir: str):
-    manifest_path = os.path.join(episode_dir, "manifest.json")
-    if not os.path.exists(manifest_path):
-        raise FileNotFoundError(f"Manifest missing in episode directory: {manifest_path}")
-
-    with open(manifest_path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
 
 
 def _binary_file_path(episode_dir: str, name: str):
@@ -127,12 +120,13 @@ def convert_episode(episode_dir: str, output_zarr: str = None) -> int:
         output_zarr = os.path.join(os.path.dirname(episode_dir), "dataset.zarr")
 
     try:
-        manifest = read_manifest(episode_dir)
+        manifest = read_manifest(episode_dir)  # raises on an incomplete manifest
         frame_count = _frame_count_from_manifest(manifest)
 
         rgb = load_rgb(episode_dir, frame_count)
         depth = load_depth(episode_dir, frame_count)
         goal = load_vector_file(_binary_file_path(episode_dir, "goal.bin"), frame_count, 3)
+        goal_distance = load_scalar_file(_binary_file_path(episode_dir, "goal_distance.bin"), frame_count)
         pose = load_vector_file(_binary_file_path(episode_dir, "pose.bin"), frame_count, 3)
         action_vel = load_vector_file(_binary_file_path(episode_dir, "action_vel.bin"), frame_count, 3)
         action_rot = load_vector_file(_binary_file_path(episode_dir, "action_rot.bin"), frame_count, 3)
@@ -142,18 +136,7 @@ def convert_episode(episode_dir: str, output_zarr: str = None) -> int:
         write_array(group, "rgb", rgb)
         write_array(group, "depth", depth)
         write_array(group, "goal", goal)
-
-        # Optional: absent on episodes recorded before goal_distance.bin existed. Loaders
-        # downstream (SingleEpisodeDataset) must tolerate its absence rather than assume every
-        # episode has it.
-        goal_distance_path = _binary_file_path(episode_dir, "goal_distance.bin")
-        if os.path.exists(goal_distance_path):
-            goal_distance = load_scalar_file(goal_distance_path, frame_count)
-            write_array(group, "goal_distance", goal_distance)
-        else:
-            print(f"[Zarr Ingest] WARNING: {goal_distance_path} not found - episode has no goal_distance "
-                  f"signal, model will fall back to an 'unknown distance' sentinel for it.")
-
+        write_array(group, "goal_distance", goal_distance)
         write_array(group, "pose", pose)
         write_array(group, "action_vel", action_vel)
         write_array(group, "action_rot", action_rot)

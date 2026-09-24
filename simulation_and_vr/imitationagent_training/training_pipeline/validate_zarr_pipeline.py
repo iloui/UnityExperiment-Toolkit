@@ -12,7 +12,7 @@ try:
 except ImportError:  # pragma: no cover - dependency may be absent in a minimal validation environment
     torch = None
 
-from data_contract import TEMPORAL_WINDOW_SIZE
+from data_contract import SOURCE_SYNTHETIC, TEMPORAL_WINDOW_SIZE, make_episode_manifest
 
 IMAGE_WIDTH = 64
 IMAGE_HEIGHT = 64
@@ -26,6 +26,7 @@ def synthesize_episode(episode_dir: str):
     rgb = np.random.randint(0, 255, size=(FRAME_COUNT, IMAGE_HEIGHT, IMAGE_WIDTH, 3), dtype=np.uint8)
     depth = np.random.rand(FRAME_COUNT, IMAGE_HEIGHT, IMAGE_WIDTH).astype(np.float32)
     goal = np.random.randn(FRAME_COUNT, 3).astype(np.float32)
+    goal_distance = np.random.rand(FRAME_COUNT).astype(np.float32) * 20.0
     pose = np.random.randn(FRAME_COUNT, 3).astype(np.float32)
     action_vel = np.random.randn(FRAME_COUNT, 3).astype(np.float32)
     action_rot = np.random.randn(FRAME_COUNT, 3).astype(np.float32)
@@ -34,37 +35,28 @@ def synthesize_episode(episode_dir: str):
     rgb.tofile(os.path.join(episode_dir, "rgb.bin"))
     depth.tofile(os.path.join(episode_dir, "depth.bin"))
     goal.tofile(os.path.join(episode_dir, "goal.bin"))
+    goal_distance.tofile(os.path.join(episode_dir, "goal_distance.bin"))
     pose.tofile(os.path.join(episode_dir, "pose.bin"))
     action_vel.tofile(os.path.join(episode_dir, "action_vel.bin"))
     action_rot.tofile(os.path.join(episode_dir, "action_rot.bin"))
     timestamp.tofile(os.path.join(episode_dir, "timestamp.bin"))
 
-    manifest = {
-        "schema_version": "zarr-v1",
-        "episode_id": "validation_episode",
-        "participant_id": "P_TEST",
-        "session_id": "S_TEST",
-        "frame_count": FRAME_COUNT,
-        "start_time": 0.0,
-        "end_time": FRAME_COUNT * 0.1,
-        "image_width": IMAGE_WIDTH,
-        "image_height": IMAGE_HEIGHT,
-        "total_pixels": TOTAL_PIXELS,
-        "temporal_window_size": TEMPORAL_WINDOW_SIZE,
-        "sampling_interval_s": 0.1,
-        "max_ray_distance": 50.0,
-        "horizontal_fov_deg": 90.0,
-        "vertical_fov_deg": 90.0,
-        "arrays": {
-            "rgb": {"shape": ["time", IMAGE_HEIGHT, IMAGE_WIDTH, 3], "dtype": "uint8"},
-            "depth": {"shape": ["time", IMAGE_HEIGHT, IMAGE_WIDTH], "dtype": "float32"},
-            "goal": {"shape": ["time", 3], "dtype": "float32"},
-            "pose": {"shape": ["time", 3], "dtype": "float32"},
-            "action_vel": {"shape": ["time", 3], "dtype": "float32"},
-            "action_rot": {"shape": ["time", 3], "dtype": "float32"},
-            "timestamp": {"shape": ["time"], "dtype": "float64"},
-        },
-    }
+    manifest = make_episode_manifest(
+        episode_id="validation_episode",
+        scene_name="validation_scene",
+        layout_typology="validation",
+        layout_seed=0,
+        source=SOURCE_SYNTHETIC,
+        participant_id="P_TEST",
+        session_id="S_TEST",
+        repetition_index=0,
+        task={"start": {"x": 0.0, "y": 0.0, "z": 0.0},
+              "pois": [{"x": 5.0, "y": 0.0, "z": 5.0}],
+              "end": {"x": 10.0, "y": 0.0, "z": 0.0}},
+        frame_count=FRAME_COUNT,
+        start_time=0.0,
+        end_time=FRAME_COUNT * 0.1,
+    )
 
     with open(os.path.join(episode_dir, "manifest.json"), "w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
@@ -77,7 +69,7 @@ def validate_episode_manifest(episode_dir: str):
     with open(manifest_path, "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
 
-    expected_files = ["rgb.bin", "depth.bin", "goal.bin", "pose.bin", "action_vel.bin", "action_rot.bin", "timestamp.bin", "manifest.json"]
+    expected_files = ["rgb.bin", "depth.bin", "goal.bin", "goal_distance.bin", "pose.bin", "action_vel.bin", "action_rot.bin", "timestamp.bin", "manifest.json"]
     missing = [name for name in expected_files if not os.path.exists(os.path.join(episode_dir, name))]
     if missing:
         raise FileNotFoundError(f"Missing required files in episode dir: {missing}")
@@ -91,6 +83,7 @@ def validate_episode_manifest(episode_dir: str):
     rgb_size = np.fromfile(os.path.join(episode_dir, "rgb.bin"), dtype=np.uint8).size
     depth_size = np.fromfile(os.path.join(episode_dir, "depth.bin"), dtype=np.float32).size
     goal_size = np.fromfile(os.path.join(episode_dir, "goal.bin"), dtype=np.float32).size
+    goal_distance_size = np.fromfile(os.path.join(episode_dir, "goal_distance.bin"), dtype=np.float32).size
     pose_size = np.fromfile(os.path.join(episode_dir, "pose.bin"), dtype=np.float32).size
     action_vel_size = np.fromfile(os.path.join(episode_dir, "action_vel.bin"), dtype=np.float32).size
     action_rot_size = np.fromfile(os.path.join(episode_dir, "action_rot.bin"), dtype=np.float32).size
@@ -100,6 +93,7 @@ def validate_episode_manifest(episode_dir: str):
         "rgb": FRAME_COUNT * IMAGE_HEIGHT * IMAGE_WIDTH * 3,
         "depth": FRAME_COUNT * IMAGE_HEIGHT * IMAGE_WIDTH,
         "goal": FRAME_COUNT * 3,
+        "goal_distance": FRAME_COUNT,
         "pose": FRAME_COUNT * 3,
         "action_vel": FRAME_COUNT * 3,
         "action_rot": FRAME_COUNT * 3,
@@ -110,6 +104,7 @@ def validate_episode_manifest(episode_dir: str):
         "rgb": rgb_size,
         "depth": depth_size,
         "goal": goal_size,
+        "goal_distance": goal_distance_size,
         "pose": pose_size,
         "action_vel": action_vel_size,
         "action_rot": action_rot_size,
@@ -131,7 +126,7 @@ def validate_zarr_ingest(episode_dir: str, zarr_output: str):
     ingest_main()
 
     root = zarr.open(zarr_output, mode="r")
-    required = ["rgb", "depth", "goal", "pose", "action_vel", "action_rot", "timestamp"]
+    required = ["rgb", "depth", "goal", "goal_distance", "pose", "action_vel", "action_rot", "timestamp"]
     missing = [name for name in required if name not in root]
     if missing:
         raise KeyError(f"Zarr dataset missing required arrays: {missing}")

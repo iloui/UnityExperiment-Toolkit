@@ -10,26 +10,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, ConcatDataset, DataLoader
 
-from data_contract import TEMPORAL_WINDOW_SIZE, ACTION_HORIZON_SAMPLES, IMAGE_WIDTH, IMAGE_HEIGHT
-from goal_reconstruction import reconstruct_goal_distance, DEFAULT_POI_XZ, DEFAULT_END_XZ
+from data_contract import TEMPORAL_WINDOW_SIZE, ACTION_HORIZON_SAMPLES, IMAGE_WIDTH, IMAGE_HEIGHT, CAMERA_FOV_DEG, read_manifest
 import ingest_to_zarr
-
-# Horizontal field of view of the two sensors, needed to turn a simulated view rotation (degrees)
-# into a column shift. The RGB camera is copied from FirstPersonCharacter (60 deg vertical FOV, 64x64
-# = square aspect -> 60 deg horizontal); the depth raycast fan is 90 deg (ZarrDataContract). They
-# differ, so one heading change shifts the two images by different pixel counts.
-RGB_HFOV_DEG = 60.0
-DEPTH_HFOV_DEG = 90.0
 
 # --- 1. Streamlined 2D CNN Model (Sentis Contract Preserved) ---
 class SimpleImitation2DCNNModel(nn.Module):
-    def __init__(self, img_res: int = 64, mask_proximity: bool = False):
+    def __init__(self, img_res: int = 64):
         super().__init__()
         self.H = self.W = img_res
-        # When the proximity input can't be trained on real values (see --proximity_mode), the model
-        # multiplies it by 0 inside forward(), so whatever Unity feeds at run time is ignored. The
-        # input layout (16388 floats) is unchanged, so no Unity change is needed. Exported as a constant.
-        self.register_buffer("goal_input_scale", torch.tensor([1.0, 1.0, 1.0, 0.0 if mask_proximity else 1.0]))
 
         # Lightweight 2D CNN over a single 4-channel frame (RGB + Depth)
         self.conv2d_encoder = nn.Sequential(
@@ -75,7 +63,7 @@ class SimpleImitation2DCNNModel(nn.Module):
 
     def forward(self, sensory_inputs: torch.Tensor) -> torch.Tensor:
         # 1. Split off the goal vector (direction xyz + proximity, first 4 floats) from the visual payload
-        goal_vec = sensory_inputs[:, :4] * self.goal_input_scale  # Shape: (Batch, 4)
+        goal_vec = sensory_inputs[:, :4]  # Shape: (Batch, 4)
         vis_flat = sensory_inputs[:, 4:]  # Shape: (Batch, 16384)
 
         # 2. Reshape the single most-recent RGBD frame -> (Batch, 64, 64, 4). There is no
@@ -102,19 +90,33 @@ class SimpleImitation2DCNNModel(nn.Module):
         combined = torch.cat([vis_features, goal_vec], dim=1)
         return self.network(combined)
 
-def shift_columns(a: np.ndarray, n: int) -> np.ndarray:
-    """Shift the image content of a (T, H, W, C) array n columns to the right (n < 0: left), replicating
-    the edge column into the gap instead of wrapping around."""
-    if n == 0:
-        return a
-    out = np.empty_like(a)
-    if n > 0:
-        out[:, :, n:] = a[:, :, :-n]
-        out[:, :, :n] = a[:, :, :1]
-    else:
-        out[:, :, :n] = a[:, :, -n:]
-        out[:, :, n:] = a[:, :, -1:]
-    return out
+def yaw_remap_indices(delta_deg: float, height: int = IMAGE_HEIGHT, width: int = IMAGE_WIDTH,
+                      fov_deg: float = CAMERA_FOV_DEG):
+    """Source (row, col) for every output pixel of the view after the camera yaws delta_deg to the right.
+
+    Under the pinhole projection a yaw is not a column shift: the ray through output pixel (u, v) (normalised image
+    coords in [-1, 1], tan(fov/2) at the border) is rotated about the vertical axis and re-projected, which moves
+    columns non-linearly (more at the edges) and scales rows by 1/z'. This does that exactly for pixel centres and
+    samples the nearest source pixel. What it cannot do is invent the strip that rotates into view: those pixels are
+    clamped to the nearest edge pixel (replicating it), which is the only approximation. At 60 deg FOV and |delta| <=
+    15 deg that strip is at most 17 of 64 columns. Depth is the distance along each pixel's ray, which a pure
+    rotation leaves unchanged, so the same remap is exact for depth as well (it would not be for z-depth)."""
+    t = np.tan(np.radians(fov_deg) / 2.0)
+    u = ((np.arange(width) + 0.5) / width * 2.0 - 1.0) * t
+    v = ((np.arange(height) + 0.5) / height * 2.0 - 1.0) * t
+    x, y = np.meshgrid(u, v)  # (H, W) ray directions (x, y, 1) in the new camera frame
+    c, sn = np.cos(np.radians(delta_deg)), np.sin(np.radians(delta_deg))
+    xs, zs = x * c + sn, -x * sn + c  # same ray in the old camera frame (x = right, z = forward)
+    zs = np.maximum(zs, 1e-6)
+    col = (xs / zs / t + 1.0) / 2.0 * width - 0.5
+    row = (y / zs / t + 1.0) / 2.0 * height - 0.5
+    return (np.clip(np.rint(row), 0, height - 1).astype(np.intp),
+            np.clip(np.rint(col), 0, width - 1).astype(np.intp))
+
+
+def rotate_view(a: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    """Apply yaw_remap_indices to a (T, H, W, C) array."""
+    return a[:, rows, cols]
 
 # Converts a raw goal distance (meters) into a bounded [0,1] proximity signal, with resolution
 # concentrated near the goal (where distinguishing 0.5m from 2m matters far more than 40m from
@@ -124,30 +126,18 @@ def shift_columns(a: np.ndarray, n: int) -> np.ndarray:
 def goal_distance_to_proximity(distance_m: float) -> float:
     return 1.0 / (1.0 + max(0.0, distance_m))
 
-# Sentinel proximity fed for episodes recorded before goal_distance.bin existed (see
-# ingest_to_zarr.py) - equivalent to "infinitely far away", i.e. the same value a genuine
-# reading would asymptote to, so it reads as "no proximity information" rather than "very close".
-UNKNOWN_GOAL_DISTANCE_PROXIMITY = 0.0
-
 # --- 2. Zarr Dataset Loader ---
 class SingleEpisodeDataset(Dataset):
     def __init__(self, ep_path: Path, window_size: int = TEMPORAL_WINDOW_SIZE, augment: bool = False,
-                 action_horizon: int = ACTION_HORIZON_SAMPLES, proximity_mode: str = "reconstruct",
-                 rot_aug_deg: float = 0.0, rot_aug_prob: float = 0.7, rot_correction: float = 0.15,
-                 poi_xz=DEFAULT_POI_XZ, end_xz=DEFAULT_END_XZ):
+                 action_horizon: int = ACTION_HORIZON_SAMPLES,
+                 rot_aug_deg: float = 0.0, rot_aug_prob: float = 0.7, rot_correction: float = 0.15):
         zarr_root = zarr.open(str(ep_path / "dataset.zarr"), mode='r')
         self.rgb = zarr_root['rgb']
         self.depth = zarr_root['depth']
         self.goal = zarr_root['goal']
-        try:
-            self.goal_distance = zarr_root['goal_distance']
-        except KeyError:
-            self.goal_distance = None
-            # Episodes recorded before goal_distance existed: rebuild it from the recorded pose (see
-            # goal_reconstruction.py) so training sees the same proximity signal Unity feeds at run time.
-            if proximity_mode == "reconstruct":
-                self.goal_distance = reconstruct_goal_distance(
-                    np.array(zarr_root['pose']), np.array(zarr_root['goal']), poi_xz, end_xz).distance_m
+        if 'goal_distance' not in zarr_root:
+            raise ValueError(f"{ep_path}: dataset.zarr has no goal_distance array. Re-record the episode.")
+        self.goal_distance = zarr_root['goal_distance']
         self.rot_aug_deg = rot_aug_deg
         self.rot_aug_prob = rot_aug_prob
         self.rot_correction = rot_correction
@@ -174,12 +164,8 @@ class SingleEpisodeDataset(Dataset):
         goal_vec = np.array(self.goal[idx + w - 1], dtype=np.float32)
 
         # Proximity signal (see goal_distance_to_proximity) - gives the network the "how close
-        # am I" information the direction-only goal_vec above cannot provide on its own. Falls
-        # back to the unknown-distance sentinel on episodes recorded before this channel existed.
-        if self.goal_distance is not None:
-            goal_proximity = goal_distance_to_proximity(float(self.goal_distance[idx + w - 1]))
-        else:
-            goal_proximity = UNKNOWN_GOAL_DISTANCE_PROXIMITY
+        # am I" information the direction-only goal_vec above cannot provide on its own.
+        goal_proximity = goal_distance_to_proximity(float(self.goal_distance[idx + w - 1]))
 
         # Interleaved (RGBD) frame sequence over window
         rgb_win = np.array(self.rgb[idx:idx+w], dtype=np.float32) / 255.0  # (T, 64, 64, 3)
@@ -213,15 +199,16 @@ class SingleEpisodeDataset(Dataset):
             # correction" idea). Humans never drive into a wall or arrive at a doorway with a bad
             # heading, so the recordings contain no examples of RECOVERING from one - and BC has no way
             # to learn recovery from demonstrations that never needed it. Here the view is rotated by a
-            # random delta (positive = the agent turned right): both images are shifted sideways by the
-            # matching number of pixels, the goal direction is rotated the opposite way in the local
+            # random delta (positive = the agent turned right): both images are re-projected for that
+            # yaw (yaw_remap_indices; RGB and depth share one camera, so one remap), the goal direction is rotated the opposite way in the local
             # frame, and the yaw label gets a proportional correction back towards the demonstrated
             # heading. rot_correction is deg/sample of yaw per degree of error (0.15 -> a 15 deg error
             # asks for 2.25 deg/sample = 22 deg/s, i.e. ~1 s to recover).
             if self.rot_aug_deg > 0.0 and random.random() < self.rot_aug_prob:
                 delta = random.uniform(-self.rot_aug_deg, self.rot_aug_deg)
-                rgb_win = shift_columns(rgb_win, -int(round(delta * IMAGE_WIDTH / RGB_HFOV_DEG)))
-                depth_win = shift_columns(depth_win, -int(round(delta * IMAGE_WIDTH / DEPTH_HFOV_DEG)))
+                rows, cols = yaw_remap_indices(delta)
+                rgb_win = rotate_view(rgb_win, rows, cols)
+                depth_win = rotate_view(depth_win, rows, cols)
                 c, sn = np.cos(np.radians(delta)), np.sin(np.radians(delta))
                 gx, gz = goal_vec[0], goal_vec[2]
                 goal_vec[0] = gx * c - gz * sn
@@ -347,6 +334,28 @@ def ensure_all_episodes_ingested(recordings_dir: Path) -> None:
         ingest_to_zarr.convert_episode(str(ep), str(ep / "dataset.zarr"))
     print(f"[INGEST] Done - converted {len(raw_episode_dirs)} episode(s).")
 
+
+def load_episodes(recordings_dir: Path) -> list:
+    """Ingest what is new, then return [(episode_dir, manifest)] for every episode folder in recordings_dir.
+    Every manifest is checked (data_contract.check_manifest): one episode without layout, participant, task or
+    camera metadata, or without goal_distance, stops training instead of being silently mixed in."""
+    ensure_all_episodes_ingested(recordings_dir)
+    episodes = []
+    bad = []
+    for ep in sorted(p for p in recordings_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        try:
+            manifest = read_manifest(ep)
+            if not (ep / "dataset.zarr").exists():
+                raise FileNotFoundError(f"{ep}: no dataset.zarr")
+        except (OSError, ValueError) as ex:
+            bad.append(str(ex))
+            continue
+        episodes.append((ep, manifest))
+    if bad:
+        raise ValueError(f"{len(bad)} episode(s) in {recordings_dir} violate the data contract - delete or re-record them:\n  "
+                         + "\n  ".join(bad))
+    return episodes
+
 # --- 6. Training Loop ---
 def main():
     parser = argparse.ArgumentParser(description="Simplified 2D Behavior Cloning Pipeline")
@@ -367,19 +376,11 @@ def main():
                          "eval showed a ~0.43 median undershoot ratio and flat yaw output from 10 "
                          "to 180 degrees of required turn). Upweighting by demonstrated |yaw| forces "
                          "the rare hard-turn frames to actually move the gradient. 0 disables it.")
-    parser.add_argument("--proximity_mode", choices=["reconstruct", "mask", "raw"], default="reconstruct",
-                         help="How to treat the goal-proximity input. All current recordings predate the "
-                         "goal_distance array, so 'raw' (the old behaviour) trains with proximity=0 while Unity "
-                         "feeds the real value at run time (train/serve skew on an input that was never "
-                         "trained). 'reconstruct' rebuilds it from the recorded pose (validated; falls back to "
-                         "'mask' if the validation fails). 'mask' makes the model ignore that input entirely.")
     parser.add_argument("--rot_aug_deg", type=float, default=15.0,
                          help="Max simulated heading error (degrees) for the corrective rotation augmentation. 0 disables.")
     parser.add_argument("--rot_aug_prob", type=float, default=0.7, help="Probability of applying it to a training frame.")
     parser.add_argument("--rot_correction", type=float, default=0.15,
                          help="Yaw-label correction, deg/sample per degree of simulated heading error.")
-    parser.add_argument("--poi_xz", type=float, nargs=2, default=list(DEFAULT_POI_XZ), help="World xz of the POI marker (goal reconstruction).")
-    parser.add_argument("--end_xz", type=float, nargs=2, default=list(DEFAULT_END_XZ), help="World xz of the end marker (goal reconstruction).")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -387,36 +388,11 @@ def main():
     torch.manual_seed(args.seed)
 
     recordings_path = Path(args.recordings_dir)
-    ensure_all_episodes_ingested(recordings_path)
-    episodes = [p for p in recordings_path.iterdir() if p.is_dir() and (p / "dataset.zarr").exists()]
-    
+    episodes = [ep for ep, _ in load_episodes(recordings_path)]
+
     if not episodes:
         print(f"[ERROR] No valid Zarr episode folders found in '{args.recordings_dir}'")
         return
-
-    episodes_missing_goal_distance = [
-        ep for ep in episodes if "goal_distance" not in zarr.open(str(ep / "dataset.zarr"), mode="r")
-    ]
-    proximity_mode = args.proximity_mode
-    if episodes_missing_goal_distance:
-        print(f"[DATASET] {len(episodes_missing_goal_distance)}/{len(episodes)} episodes have no goal_distance channel "
-              f"(proximity_mode={proximity_mode}).")
-        if proximity_mode == "raw":
-            print(f"[DATASET] WARNING: 'raw' trains those frames with proximity={UNKNOWN_GOAL_DISTANCE_PROXIMITY} while Unity "
-                  f"feeds the real value at run time - train/serve skew on an untrained input.")
-        elif proximity_mode == "reconstruct":
-            recs = []
-            for ep in episodes_missing_goal_distance:
-                zr = zarr.open(str(ep / "dataset.zarr"), mode="r")
-                recs.append(reconstruct_goal_distance(np.array(zr["pose"]), np.array(zr["goal"]), tuple(args.poi_xz), tuple(args.end_xz)))
-            ok_frac = sum(r.ok for r in recs) / len(recs)
-            print(f"[DATASET] goal_distance reconstruction validated on {sum(r.ok for r in recs)}/{len(recs)} episodes "
-                  f"(POI->end switch from pose vs recorded goal jump, max disagreement "
-                  f"{max(r.switch_disagreement for r in recs)} frames)")
-            if ok_frac < 0.8:
-                print("[DATASET] WARNING: reconstruction validation failed (marker positions wrong for these recordings?) "
-                      "- falling back to proximity_mode=mask. Check --poi_xz/--end_xz.")
-                proximity_mode = "mask"
 
     # Episode-level Train/Val Split
     random.shuffle(episodes)
@@ -428,12 +404,11 @@ def main():
 
     # Augment only the training split - val must stay a clean, deterministic measurement of
     # generalization to unseen (real, non-mirrored/non-jittered) episodes.
-    ds_kwargs = dict(proximity_mode=proximity_mode, poi_xz=tuple(args.poi_xz), end_xz=tuple(args.end_xz))
     train_dataset = ConcatDataset([
         SingleEpisodeDataset(ep, augment=True, rot_aug_deg=args.rot_aug_deg, rot_aug_prob=args.rot_aug_prob,
-                             rot_correction=args.rot_correction, **ds_kwargs) for ep in train_episodes])
-    val_dataset = ConcatDataset([SingleEpisodeDataset(ep, augment=False, **ds_kwargs) for ep in val_episodes])
-    print(f"[TRAINING] proximity_mode={proximity_mode} rot_aug_deg={args.rot_aug_deg} rot_aug_prob={args.rot_aug_prob} "
+                             rot_correction=args.rot_correction) for ep in train_episodes])
+    val_dataset = ConcatDataset([SingleEpisodeDataset(ep, augment=False) for ep in val_episodes])
+    print(f"[TRAINING] rot_aug_deg={args.rot_aug_deg} rot_aug_prob={args.rot_aug_prob} "
           f"rot_correction={args.rot_correction} turn_weight_alpha={args.turn_weight_alpha}")
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
@@ -454,7 +429,7 @@ def main():
     label_mean, label_std = label_mean.to(device), label_std.to(device)
     print(f"[LABEL STATS] mean(forward,yaw,pitch)={label_mean.tolist()} std={label_std.tolist()}")
 
-    model = SimpleImitation2DCNNModel(mask_proximity=(proximity_mode == "mask")).to(device)
+    model = SimpleImitation2DCNNModel().to(device)
     # weight_decay=1e-4 and grad_clip_norm=1.0 were previously tuned to curb erratic yaw/pitch
     # extrapolation in live Unity testing, but open-loop (teacher-forcing) evaluation against
     # the model's own training episodes showed that clipping the *global* gradient norm to 1.0

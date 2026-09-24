@@ -30,16 +30,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import zarr
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, WeightedRandomSampler
 
-from data_contract import (DISCRETE_OUTPUT_SIZE, WALK_THRESHOLD_MPS, YAW_BIN_CENTERS_DEG, YAW_BIN_EDGES_DEG,
-                           YAW_CLASS_COUNT, YAW_STRAIGHT_CLASS)
-from goal_reconstruction import DEFAULT_END_XZ, DEFAULT_POI_XZ, reconstruct_goal_distance
-from train_onAllRecordings_2DCNNModel import (SimpleImitation2DCNNModel, SingleEpisodeDataset,
-                                              ensure_all_episodes_ingested, export_onnx)
+from data_contract import (DISCRETE_OUTPUT_SIZE, SOURCE_HUMAN, WALK_THRESHOLD_MPS, YAW_BIN_CENTERS_DEG,
+                           YAW_BIN_EDGES_DEG, YAW_CLASS_COUNT, YAW_STRAIGHT_CLASS)
+from train_onAllRecordings_2DCNNModel import (SimpleImitation2DCNNModel, SingleEpisodeDataset, export_onnx,
+                                              load_episodes)
 
-HUMAN = "human"
+HUMAN = SOURCE_HUMAN
 
 
 # --- 1. Label discretisation (mirrored by ImitationAgent.DecodeDiscreteYaw in Unity) ---
@@ -72,8 +70,8 @@ def decode_yaw(yaw_logits: torch.Tensor) -> torch.Tensor:
 class DiscreteImitation2DCNNModel(SimpleImitation2DCNNModel):
     """motor_actions = [walk_logit, yaw_logit_0..6, pitch_deg_per_sample]."""
 
-    def __init__(self, img_res: int = 64, mask_proximity: bool = False):
-        super().__init__(img_res=img_res, mask_proximity=mask_proximity)
+    def __init__(self, img_res: int = 64):
+        super().__init__(img_res=img_res)
         self.network[-1] = nn.Linear(self.network[-1].in_features, DISCRETE_OUTPUT_SIZE)
 
 
@@ -98,14 +96,10 @@ class DiscreteLabelDataset(Dataset):
 
 
 # --- 4. Episode discovery by source ---
-def episode_source(ep: Path) -> str:
-    """'human' for human recordings (participant ids not starting with 'synthetic'), else the synthetic participant id
-    (synthetic_rrw = v2 bot, synthetic_rrw_v3 = bot with stop behaviours, synthetic_dagger = DaggerHarness)."""
-    try:
-        pid = json.loads((ep / "manifest.json").read_text()).get("participant_id", "")
-    except (OSError, ValueError):
-        pid = ""
-    return pid if pid.startswith("synthetic") else HUMAN
+def episode_source(manifest: dict) -> str:
+    """'human' for human recordings (manifest source), else the synthetic participant id
+    (synthetic_rrw_v3 = bot with stop behaviours, synthetic_dagger = DaggerHarness)."""
+    return HUMAN if manifest["source"] == SOURCE_HUMAN else manifest["participant_id"]
 
 
 def split_per_source(episodes_by_source: dict, val_ratio: float):
@@ -119,10 +113,10 @@ def split_per_source(episodes_by_source: dict, val_ratio: float):
     return train, val
 
 
-def build_dataset(episodes, augment: bool, args, proximity_mode: str):
+def build_dataset(episodes, augment: bool, args):
     parts, sources = [], []
     for ep, src in episodes:
-        kwargs = dict(proximity_mode=proximity_mode, poi_xz=tuple(args.poi_xz), end_xz=tuple(args.end_xz))
+        kwargs = {}
         if augment:
             kwargs.update(rot_aug_deg=args.rot_aug_deg, rot_aug_prob=args.rot_aug_prob, rot_correction=args.rot_correction)
         ds = SingleEpisodeDataset(ep, augment=augment, **kwargs)
@@ -245,9 +239,9 @@ def main():
     parser = argparse.ArgumentParser(description="2D CNN behaviour cloning with discrete walk/yaw head")
     parser.add_argument("--recordings_dir", type=str, default="../zarr_recordings")
     parser.add_argument("--output_onnx", type=str, default="../imitation_agent_model/ImitationAgentModel_discrete.onnx")
-    parser.add_argument("--sources", type=str, nargs="+", default=[HUMAN, "synthetic_rrw"],
-                        help="Episode sources to train on: 'human' and/or synthetic participant ids "
-                             "(synthetic_rrw = v2 bot, synthetic_rrw_v3 = bot with stop behaviours, synthetic_dagger).")
+    parser.add_argument("--sources", type=str, nargs="+", default=[HUMAN, "synthetic_rrw_v3"],
+                        help="Episode sources to train on: 'human' (manifest source) and/or synthetic participant ids "
+                             "(synthetic_rrw_v3 = bot with stop behaviours, synthetic_dagger).")
     parser.add_argument("--human_share", type=float, default=0.5, help="Expected share of human frames per batch.")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
@@ -264,12 +258,9 @@ def main():
                         help="Up-weight stop frames until they carry this share of the walk/stop loss (humans stand in "
                              "~20%% of samples, v2 synthetic in 4%%). 0 disables.")
     parser.add_argument("--pitch_loss_weight", type=float, default=0.25)
-    parser.add_argument("--proximity_mode", choices=["reconstruct", "mask", "raw"], default="reconstruct")
     parser.add_argument("--rot_aug_deg", type=float, default=15.0)
     parser.add_argument("--rot_aug_prob", type=float, default=0.7)
     parser.add_argument("--rot_correction", type=float, default=0.15)
-    parser.add_argument("--poi_xz", type=float, nargs=2, default=list(DEFAULT_POI_XZ))
-    parser.add_argument("--end_xz", type=float, nargs=2, default=list(DEFAULT_END_XZ))
     parser.add_argument("--num_workers", type=int, default=2)
     args = parser.parse_args()
 
@@ -278,11 +269,10 @@ def main():
     torch.manual_seed(args.seed)
 
     recordings_path = Path(args.recordings_dir)
-    ensure_all_episodes_ingested(recordings_path)
     by_source: dict = {}
     skipped: dict = {}
-    for ep in sorted(p for p in recordings_path.iterdir() if p.is_dir() and (p / "dataset.zarr").exists()):
-        src = episode_source(ep)
+    for ep, manifest in load_episodes(recordings_path):  # raises on any episode that violates the data contract
+        src = episode_source(manifest)
         (by_source if src in args.sources else skipped).setdefault(src, []).append(ep)
     print("[DATASET] using: " + ", ".join(f"{k}={len(v)}" for k, v in sorted(by_source.items())))
     if skipped:
@@ -294,24 +284,10 @@ def main():
         print(f"[ERROR] No episodes for {args.sources} in '{args.recordings_dir}'")
         return
 
-    # Human episodes predate goal_distance.bin; rebuild it exactly as the M4 script does.
-    proximity_mode = args.proximity_mode
-    all_eps = [ep for eps in by_source.values() for ep in eps]
-    no_dist = [ep for ep in all_eps if "goal_distance" not in zarr.open(str(ep / "dataset.zarr"), mode="r")]
-    if no_dist and proximity_mode == "reconstruct":
-        recs = [reconstruct_goal_distance(np.array(zarr.open(str(ep / "dataset.zarr"), mode="r")["pose"]),
-                                          np.array(zarr.open(str(ep / "dataset.zarr"), mode="r")["goal"]),
-                                          tuple(args.poi_xz), tuple(args.end_xz)) for ep in no_dist]
-        ok = sum(r.ok for r in recs)
-        print(f"[DATASET] goal_distance reconstructed for {len(no_dist)} episodes, validated on {ok}")
-        if ok < 0.8 * len(recs):
-            print("[DATASET] WARNING: reconstruction validation failed - falling back to proximity_mode=mask.")
-            proximity_mode = "mask"
-
     train_eps, val_eps = split_per_source(by_source, args.val_ratio)
     print(f"[DATASET] episodes train={len(train_eps)} val={len(val_eps)} (split per source)")
-    train_ds, train_sources = build_dataset(train_eps, True, args, proximity_mode)
-    val_ds, _ = build_dataset(val_eps, False, args, proximity_mode)
+    train_ds, train_sources = build_dataset(train_eps, True, args)
+    val_ds, _ = build_dataset(val_eps, False, args)
     print(f"[DATASET] frames train={len(train_ds)} val={len(val_ds)} | human frames in train: "
           f"{sum(s == HUMAN for s in train_sources)}")
 
@@ -330,7 +306,7 @@ def main():
                                                      np.random.choice(len(train_ds), min(4000, len(train_ds)), replace=False)]))),
                              device=device)
 
-    model = DiscreteImitation2DCNNModel(mask_proximity=(proximity_mode == "mask")).to(device)
+    model = DiscreteImitation2DCNNModel().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     min_best_epoch = max(1, args.epochs // 4)
     best = (float("inf"), -1, None)

@@ -715,8 +715,6 @@ namespace Agent_Based_Modelling
         // a ~40x scale mismatch on every depth value fed to the network).
         [Header("Hardware Simulation (64x64 Complete Eyes)")]
         public Transform AgentHeadAnchor;
-        private const float HorizonalFovOverride = ZarrDataContract.HorizontalFovDegrees;
-        private const float VerticalFovOverride = ZarrDataContract.VerticalFovDegrees;
         private const float MaxRayDistance = ZarrDataContract.MaxRayDistance;
 
         private const int ImageWidth = ZarrDataContract.ImageWidth;
@@ -1018,16 +1016,13 @@ namespace Agent_Based_Modelling
 
             hiddenCaptureCamera.clearFlags = CameraClearFlags.SolidColor;
             hiddenCaptureCamera.backgroundColor = Color.black;
-            // Deliberately do NOT reset fieldOfView here. The RGB camera's FOV is whatever
-            // CopyFrom pulled from the canonical camera (e.g. FirstPersonCharacter's 60 deg in
-            // FPSController.prefab) - that is what actually produced the training images.
-            // HorizonalFovOverride/VerticalFovOverride (90 deg) only shape the separate depth
-            // raycast fan below; the two are intentionally different, and both now come from
-            // ZarrDataContract on both sides instead of two independently-tunable fields.
 
             colorRenderTexture = new RenderTexture(ImageWidth, ImageHeight, 24, RenderTextureFormat.ARGB32);
             colorRenderTexture.Create();
             hiddenCaptureCamera.targetTexture = colorRenderTexture;
+            // FOV and aspect come from the contract, not from the canonical camera, and the depth rays are cast
+            // through this camera's pixel centres (ContractCamera), exactly as ParticipantRecorder does.
+            ContractCamera.Configure(hiddenCaptureCamera);
             colorReadbackTex = new Texture2D(ImageWidth, ImageHeight, TextureFormat.RGB24, false);
 
             Debug.Log($"[Sensory Hardware] Visual Camera initialized ({ImageWidth}x{ImageHeight} render target).");
@@ -1169,28 +1164,7 @@ namespace Agent_Based_Modelling
             colorReadbackTex.Apply();
             Color32[] colorPixels = colorReadbackTex.GetPixels32();
 
-            Vector3 origin = AgentHeadAnchor.position + AgentHeadAnchor.forward * 0.1f;
-            float fovRadH = HorizonalFovOverride * Mathf.Deg2Rad;
-            float fovRadV = VerticalFovOverride * Mathf.Deg2Rad;
-            int index = 0;
-
-            for (int y = 0; y < ImageHeight; y++)
-            {
-                float vAngle = (((ImageHeight > 1) ? ((float)y / (ImageHeight - 1)) - 0.5f : 0f)) * fovRadV;
-                for (int x = 0; x < ImageWidth; x++)
-                {
-                    float hAngle = (((ImageWidth > 1) ? ((float)x / (ImageWidth - 1)) - 0.5f : 0f)) * fovRadH;
-                    Vector3 localDir = new Vector3(Mathf.Tan(hAngle), Mathf.Tan(vAngle), 1.0f).normalized;
-        
-                    rayCommands[index] = new RaycastCommand(
-                        origin, 
-                        AgentHeadAnchor.TransformDirection(localDir), 
-                        new QueryParameters(ArchitectureLayerMask, true, QueryTriggerInteraction.Collide, false), 
-                        MaxRayDistance
-                    );
-                    index++;
-                }
-            }
+            ContractCamera.FillDepthRays(hiddenCaptureCamera, rayCommands, ArchitectureLayerMask);
 
             JobHandle handle = RaycastCommand.ScheduleBatch(rayCommands, rayResults, 32);
             handle.Complete();
