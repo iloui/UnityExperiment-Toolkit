@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Assets.Scripts.DataRecording;
+using Unity.AI.Navigation;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -80,11 +81,11 @@ namespace Assets.Scripts.Editor
             int rigs = PlaceAndWireControllers(scene, task);
             Physics.SyncTransforms();
             int cameras = RecordingRigTools.ApplyInScene(scene);
-            ExportOccupancyGrid(scene);
+            string gridPath = OccupancyGridExporter.Export(scene, task, layoutInfo, root.GetComponent<NavMeshSurface>());
 
             EditorSceneManager.MarkSceneDirty(scene);
             string summary = $"'{scene.name}': NavMesh baked; {taskMessage}; {rigs} FPSController(s) moved to Start and wired; " +
-                $"camera height applied to {cameras}.";
+                $"camera height applied to {cameras}; occupancy grid written to {gridPath}.";
             Debug.Log("[ScenePreparation] " + summary);
             return summary;
         }
@@ -359,7 +360,7 @@ namespace Assets.Scripts.Editor
         }
 
         // ------------------------------------------------------------------
-        // FPSController, occupancy grid
+        // FPSController
         // ------------------------------------------------------------------
 
         /// <summary>Puts every FPSController on the start marker, facing along the path to the POI, and points its recorder at the task.</summary>
@@ -396,12 +397,6 @@ namespace Assets.Scripts.Editor
                 }
             }
             return count;
-        }
-
-        private static void ExportOccupancyGrid(Scene scene)
-        {
-            // TODO(item 11): export the occupancy grid for this layout once the exporter exists.
-            Debug.LogWarning($"[ScenePreparation] '{scene.name}': occupancy grid export is not implemented yet (item 11) - skipped.");
         }
 
         private static GameObject FindRoot(Scene scene, string name)
