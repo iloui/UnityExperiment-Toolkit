@@ -30,6 +30,21 @@ TEMPORAL_WINDOW_SIZE = 1
 # in the recordings, so existing episodes stay valid. 1 restores the old single-sample target.
 ACTION_HORIZON_SAMPLES = 5
 
+# --- Discrete action head (train_2DCNN_discrete.py) ---
+# A single MSE yaw output averages "turn left" and "turn right" to ~0 wherever both are demonstrated
+# (wall ahead with the goal behind it, T-junctions), which is what froze M4 against walls. The discrete
+# model instead classifies the 0.5 s mean yaw (see ACTION_HORIZON_SAMPLES) into straight + 3 strengths per
+# side. Edges/centers are |yaw| in deg per 0.1 s sample; centers are the per-bin label means of the human
+# and v2 synthetic data. Must match ZarrDataContract.DiscreteHead in Unity.
+YAW_BIN_EDGES_DEG = (0.5, 3.0, 8.0)          # straight | weak | medium | strong
+YAW_BIN_CENTERS_DEG = (0.0, 1.5, 5.0, 12.0)  # magnitude per bin, straight first
+YAW_CLASS_COUNT = 2 * (len(YAW_BIN_CENTERS_DEG) - 1) + 1  # 7: strong-left ... straight ... strong-right
+YAW_STRAIGHT_CLASS = YAW_CLASS_COUNT // 2
+# Forward labels are ~binary (0 or 1.3 m/s, 1.6% ramp samples in between): walk = forward above this.
+WALK_THRESHOLD_MPS = 0.65
+# ONNX 'motor_actions' layout of the discrete model: [walk_logit, yaw_logit_0..6, pitch_deg_per_sample].
+DISCRETE_OUTPUT_SIZE = 1 + YAW_CLASS_COUNT + 1
+
 # Unity captures RGB at 64x64x3 and depth as a single normalized scalar per pixel.
 RGB_SHAPE = ("time", IMAGE_HEIGHT, IMAGE_WIDTH, 3)
 DEPTH_SHAPE = ("time", IMAGE_HEIGHT, IMAGE_WIDTH)

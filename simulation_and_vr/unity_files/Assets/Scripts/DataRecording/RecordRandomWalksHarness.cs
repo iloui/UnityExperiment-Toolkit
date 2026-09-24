@@ -29,7 +29,8 @@ namespace Assets.Scripts.DataRecording
     /// For each of `pairCount` (k) random start/end pairs, `agentsPerPair` (m) walks are recorded one after another.
     /// With probability waypointProbability a walk goes start -> random waypoint -> end, the waypoint registered as the
     /// task's single POI (exactly the human 1-POI format); otherwise start -> end directly. Episodes are written to
-    /// imitationagent_training/zarr_recordings with participant_id "synthetic_rrw" and session_id = scene name.
+    /// imitationagent_training/zarr_recordings with participant_id = participantId (default "synthetic_rrw_v3"; the v2
+    /// bot without the stop behaviours recorded as "synthetic_rrw") and session_id = scene name.
     ///
     /// An episode is discarded and re-sampled when: no path exists, the route is longer than maxPathLengthFactor x the
     /// shortest path, the end is not reached before the timeout, or it lasted less than minEpisodeSeconds. After
@@ -86,11 +87,16 @@ namespace Assets.Scripts.DataRecording
         [Tooltip("Extra seconds for the start turn, look-around pauses and wall excursions.")]
         public float behaviourTimeBudgetSeconds = 15f;
 
+        [Tooltip("Extra seconds for the v3 stops (start pause, scan stops, wall stops, POI pause), added to the timeout.")]
+        public float stopTimeBudgetSeconds = 15f;
+
         [Header("Episode filter")]
         [Tooltip("Episodes shorter than this (simulated seconds) are discarded and re-sampled.")]
         public float minEpisodeSeconds = 5f;
 
         [Header("Synthetic participant")]
+        [Tooltip("participant_id written to every manifest; train_2DCNN_discrete.py selects training data by it (--sources).")]
+        public string participantId = "synthetic_rrw_v3";
         public RandomWalkBotSettings bot = new RandomWalkBotSettings();
 
         private System.Random rng;
@@ -365,7 +371,7 @@ namespace Assets.Scripts.DataRecording
             recorder.EnableDebugRays = false;
             recorder.AutoStartForTesting = false;
             recorder.suppressPythonPipeline = true;
-            recorder.participantId = "synthetic_rrw";
+            recorder.participantId = participantId;
             recorder.sessionId = SceneManager.GetActiveScene().name;
 
             agent = rig.gameObject.GetComponent<RecordRandomWalksAgent>();
@@ -481,7 +487,7 @@ namespace Assets.Scripts.DataRecording
                 yield return null;
             }
 
-            float timeout = Mathf.Max(minTimeoutSeconds, timeoutFactor * planned / Mathf.Max(0.1f, rig.WalkSpeed) + behaviourTimeBudgetSeconds);
+            float timeout = Mathf.Max(minTimeoutSeconds, timeoutFactor * planned / Mathf.Max(0.1f, rig.WalkSpeed) + behaviourTimeBudgetSeconds + stopTimeBudgetSeconds);
 
             // --- record ---
             if (!TryStartRecording()) yield break;
@@ -512,7 +518,8 @@ namespace Assets.Scripts.DataRecording
             }
 
             Debug.Log($"[RecordRandomWalks] Episode ok: {duration:F1}s, {(useWaypoint ? "via waypoint (POI)" : "direct")}, " +
-                $"turns-in-place={agent.TurnsInPlace}, look-arounds={agent.LookArounds}, wall excursions={agent.WallExcursions}, stall recoveries={agent.StallRecoveries}.");
+                $"turns-in-place={agent.TurnsInPlace}, look-arounds={agent.LookArounds}, wall excursions={agent.WallExcursions}, stall recoveries={agent.StallRecoveries}, " +
+                $"scan stops={agent.ScanStops}, wall stops={agent.WallStops}, POI pauses={agent.PoiPauses}.");
             episodesRecorded++;
             lastEpisodeOk = true;
         }

@@ -664,17 +664,24 @@ namespace Agent_Based_Modelling
                  "every depth value fed to the model.")]
         public LayerMask ArchitectureLayerMask;
 
-        // Task-locations & attributes
+        // Task-locations & attributes. The body itself (radius, height, walk speed) is the recording body from
+        // ZarrDataContract.RecordingBody, not task.agentRadius/agentSpeed - see InitializeRecordingBody.
         private float agentSize;
-        private float agentRadius;
         private float agentSpeed;
+
+        // Moves exactly like FPSController.prefab (human and synthetic recordings): same CharacterController capsule,
+        // FixedUpdate movement with wall sliding, stick-to-ground force and gravity. The old SphereCast mover used a
+        // 0.4 m cast that stopped dead at walls, so the policy saw states (and wall distances) no recording contains.
+        private CharacterController body;
+        private float bodyVerticalVelocity;
+        private float executedForwardMetersPerSec;
 
         // Shared start -> POI(s) -> end progression, identical to ParticipantRecorder's.
         private PoiProgressTracker poiTracker;
         public bool destroyRequest = false;
 
         // Eval-harness instrumentation: read-only counters exposing the two existing failure
-        // signals (SphereCast wall-block in MoveAgentLocomotion, DisplaceDeadlocks stuck-nudge)
+        // signals (CharacterController side contact in MoveRecordingBody, DisplaceDeadlocks stuck-nudge)
         // as data instead of just log lines, without changing either's actual behavior.
         // CollisionCount only increments on the rising edge (not-blocked -> blocked), so resting
         // against a wall for many frames counts as one collision event, not hundreds.
@@ -765,7 +772,21 @@ namespace Agent_Based_Modelling
         // Below this forward SPEED (m/s, not per-frame distance) the agent is considered
         // standing still. Framerate-independent, unlike the old per-frame moveAmount check.
         private const float MinForwardSpeedMetersPerSec = 0.01f;
-        
+
+        // Discrete-head models (train_2DCNN_discrete.py, ZarrDataContract.DiscreteHead) are detected from the output size.
+        // Walk/stop is a key press like the humans' W key (ramped through the recording body's axis sensitivity), and
+        // yaw is decoded by committing to one side first, so "turn left" and "turn right" can no longer average to 0.
+        [Header("Discrete Head Decoding")]
+        [Tooltip("Walk while P(walk) is at least this.")]
+        [Range(0.05f, 0.95f)] public float walkProbabilityThreshold = 0.5f;
+        [Tooltip("The side (left/straight/right) chosen last tick is kept unless another side's probability beats it by more " +
+                 "than this, so a near-tie at a junction can't flip the turn direction every 0.1 s.")]
+        [Range(0f, 0.5f)] public float yawSideHysteresis = 0.1f;
+        private bool discreteHead = false;
+        private int lastYawSide = 0;
+        private bool walkKeyDown = false;
+        private float walkAxis = 0f;
+
         private Model runtimeModel;
         private Worker inferenceEngine;
         private bool isModelLoaded = false;
@@ -881,8 +902,12 @@ namespace Agent_Based_Modelling
             }
 
             agentSize = task.agentSize;
-            agentRadius = task.agentRadius;
             agentSpeed = task.agentSpeed;
+            if (Mathf.Abs(agentSpeed - ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond) > 0.01f)
+            {
+                Debug.LogWarning($"[ImitationAgent Start] task.agentSpeed={agentSpeed} differs from the recording walk speed " +
+                    $"({ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond} m/s); the discrete head and heuristic walk at the recording speed.");
+            }
 
             // Dummy-proof precondition: refuse to run rather than silently feed the model
             // depth values raycast against the wrong set of colliders. Mirrors
@@ -936,6 +961,7 @@ namespace Agent_Based_Modelling
             }
 
             transform.localScale = new Vector3(agentSize, agentSize, agentSize);
+            InitializeRecordingBody();
 
             if (AgentHeadAnchor == null)
             {
@@ -1007,6 +1033,34 @@ namespace Agent_Based_Modelling
             Debug.Log($"[Sensory Hardware] Visual Camera initialized ({ImageWidth}x{ImageHeight} render target).");
         }
 
+        /// <summary>
+        /// Gives the agent FPSController.prefab's CharacterController. The capsule stands on the floor collider, but the pivot
+        /// must stay at NavMesh height (the NavMesh is baked a few cm above the floor), because the head anchor sits
+        /// CameraHeightAboveNavMeshMeters above the pivot. So the capsule is raised by half its height plus the skin width,
+        /// minus the NavMesh-to-floor gap measured under the spawn point. Radius, height and center are in local units, hence
+        /// divided by agentSize (the transform is scaled by it). Call with the transform already on the NavMesh.
+        /// </summary>
+        private void InitializeRecordingBody()
+        {
+            float navMeshAboveFloor = 0f;
+            if (Physics.Raycast(transform.position + Vector3.up * 0.5f, Vector3.down, out RaycastHit floor, 1.5f, Physics.AllLayers, QueryTriggerInteraction.Ignore)
+                && !floor.transform.IsChildOf(transform))
+            {
+                navMeshAboveFloor = Mathf.Clamp(transform.position.y - floor.point.y, -0.3f, 0.3f);
+            }
+
+            body = GetComponent<CharacterController>();
+            if (body == null) body = gameObject.AddComponent<CharacterController>();
+            float s = Mathf.Max(0.01f, agentSize);
+            body.radius = ZarrDataContract.RecordingBody.Radius / s;
+            body.height = ZarrDataContract.RecordingBody.Height / s;
+            body.center = new Vector3(0f, (ZarrDataContract.RecordingBody.Height * 0.5f + ZarrDataContract.RecordingBody.SkinWidth - navMeshAboveFloor) / s, 0f);
+            body.stepOffset = ZarrDataContract.RecordingBody.StepOffset;
+            body.slopeLimit = ZarrDataContract.RecordingBody.SlopeLimitDegrees;
+            body.skinWidth = ZarrDataContract.RecordingBody.SkinWidth;
+            bodyVerticalVelocity = 0f;
+        }
+
         private void InitializeJobBuffers()
         {
             rayCommands = new NativeArray<RaycastCommand>(TotalPixels, Allocator.Persistent);
@@ -1051,7 +1105,7 @@ namespace Agent_Based_Modelling
             // ZarrDataContract.SamplingIntervalSeconds, so the 3-frame temporal window spans
             // the same fixed ~0.3s of real time the recorded training data's window does,
             // instead of however many frames the engine happens to render in that time.
-            // MoveAgentLocomotion below still runs every Update(), applying the most recently
+            // ApplyRotation (every Update) and MoveRecordingBody (every FixedUpdate) apply the most recently
             // computed action between capture ticks.
             captureAccumulator += Time.deltaTime;
             if (captureAccumulator >= ZarrDataContract.SamplingIntervalSeconds)
@@ -1070,9 +1124,26 @@ namespace Agent_Based_Modelling
                 Debug.Log($"[Temporal Buffer] Filling observation window: {stateHistoryQueue.Count}/{TemporalWindowSize} frames ready.");
             }
 
+            if (discreteHead)
+            {
+                // The walk key goes through the same axis ramp as the humans' W key (1/3 s to full speed, instant release).
+                walkAxis = walkKeyDown
+                    ? Mathf.Min(1f, walkAxis + ZarrDataContract.RecordingBody.WalkAxisSensitivity * Time.deltaTime)
+                    : Mathf.Max(0f, walkAxis - ZarrDataContract.RecordingBody.WalkAxisGravity * Time.deltaTime);
+                networkForwardAction = walkAxis * ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond;
+            }
+
             Vector3 executed = new Vector3(networkForwardAction, networkYawAction, networkPitchAction);
             if (ExecutedActionOverride != null) executed = ExecutedActionOverride(executed);
-            MoveAgentLocomotion(executed.x, executed.y, executed.z);
+            executedForwardMetersPerSec = Mathf.Clamp(executed.x, -MaxModelForwardMetersPerSec, MaxModelForwardMetersPerSec);
+            ApplyRotation(executed.y, executed.z);
+        }
+
+        /// <summary>Translation, as FirstPersonController.FixedUpdate does it (50 Hz, CharacterController.Move).</summary>
+        void FixedUpdate()
+        {
+            if (body == null || !body.enabled) return;
+            MoveRecordingBody(executedForwardMetersPerSec);
         }
 
         private void CaptureCurrentObservations()
@@ -1196,8 +1267,8 @@ namespace Agent_Based_Modelling
 
                     if (poiTracker.CurrentTarget != null && !poiTracker.IsFinished)
                     {
-                        // forward/yaw/pitch are rates (m/s, deg/s, deg/s) - see MoveAgentLocomotion
-                        networkForwardAction = agentSpeed;
+                        // forward/yaw/pitch are rates (m/s, deg/s, deg/s) - see ApplyRotation/MoveRecordingBody
+                        networkForwardAction = ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond;
                         networkYawAction = Mathf.Clamp(localGoalVector3D.x * 2.0f, -1f, 1f) * HeuristicMaxTurnRateDegPerSec;
                         networkPitchAction = Mathf.Clamp(localGoalVector3D.y * 2.0f, -1f, 1f) * HeuristicMaxTurnRateDegPerSec;
                     }
@@ -1238,6 +1309,12 @@ namespace Agent_Based_Modelling
                     if (outputTensor != null)
                     {
                         float[] outputData = outputTensor.DownloadToArray();
+                        if (outputData.Length == ZarrDataContract.DiscreteHead.OutputSize)
+                        {
+                            ApplyDiscreteHeadOutput(outputData);
+                            return;
+                        }
+                        discreteHead = false;
                         // forward is already m/s (matches ParticipantRecorder action_vel.z); yaw/pitch are
                         // degrees accumulated over one RecordingSamplingInterval, so convert to deg/s here.
                         // Clamp to the range the model was actually trained on before doing anything else
@@ -1290,74 +1367,131 @@ namespace Agent_Based_Modelling
             }
         }
 
-        private void MoveAgentLocomotion(float forward, float yaw, float pitch)
+        /// <summary>
+        /// Discrete head: [walk_logit, yaw_logit_0..6, pitch_deg_per_sample] (ZarrDataContract.DiscreteHead). Walk/stop sets
+        /// the walk key (ramped in Update); yaw commits to one side before averaging (DecodeDiscreteYaw).
+        /// </summary>
+        private void ApplyDiscreteHeadOutput(float[] outputData)
         {
-            // forward/yaw/pitch are rates (m/s, deg/s, deg/s) set in ExecuteNeuralNetworkInference above.
-            // 1. Rotation (Yaw & Pitch)
+            if (!discreteHead)
+            {
+                discreteHead = true;
+                Debug.Log("[Neural Inference Core] Discrete walk/yaw head detected (" + outputData.Length + " outputs).");
+            }
+            float pWalk = 1f / (1f + Mathf.Exp(-outputData[0]));
+            walkKeyDown = pWalk >= walkProbabilityThreshold;
+            float yawPerSample = DecodeDiscreteYaw(outputData, 1, ref lastYawSide, yawSideHysteresis, out Vector3 sideProbabilities);
+            float rawPitch = Mathf.Clamp(outputData[ZarrDataContract.DiscreteHead.OutputSize - 1], -MaxModelRawPitchDegPerSample, MaxModelRawPitchDegPerSample);
+
+            networkYawAction = yawPerSample / RecordingSamplingInterval;
+            networkPitchAction = rawPitch / RecordingSamplingInterval;
+
+            if (TickLogSink != null)
+            {
+                // Same columns as the regression head: raw_fwd = P(walk), raw_yaw = decoded deg/sample.
+                var ci = System.Globalization.CultureInfo.InvariantCulture;
+                TickLogSink(string.Join(";",
+                    Time.time.ToString("F2", ci),
+                    transform.position.x.ToString("F3", ci), transform.position.z.ToString("F3", ci),
+                    transform.eulerAngles.y.ToString("F1", ci),
+                    localGoalVector3D.x.ToString("F3", ci), localGoalVector3D.y.ToString("F3", ci), localGoalVector3D.z.ToString("F3", ci),
+                    localGoalDistanceMeters.ToString("F2", ci),
+                    pWalk.ToString("F3", ci), yawPerSample.ToString("F2", ci), rawPitch.ToString("F2", ci),
+                    (walkKeyDown ? ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond : 0f).ToString("F3", ci), networkYawAction.ToString("F1", ci),
+                    wasCollidingLastFrame ? "1" : "0",
+                    NeedsFulfilledCount.ToString(ci)));
+            }
+
+            if (Time.frameCount % DiagnosticLogInterval == 0)
+            {
+                Debug.Log($"[Neural Model Output] P(walk) {pWalk:F2} | P(left/straight/right) {sideProbabilities.x:F2}/{sideProbabilities.y:F2}/{sideProbabilities.z:F2} " +
+                          $"-> yaw {yawPerSample:F2} deg/sample | Local Goal: {localGoalVector3D.ToString("F2")}");
+            }
+        }
+
+        /// <summary>
+        /// Softmax over the 7 yaw logits at output[offset..], then: pick the side (left / straight / right) with the largest
+        /// summed probability - keeping lastSide unless another side beats it by more than hysteresis - and return the
+        /// probability-weighted mean of that side's bin centers (deg per sampling interval; 0 for straight). Averaging only
+        /// within one side is what keeps a left/right split from cancelling to ~0 in front of a wall. Mirrors
+        /// decode_yaw in train_2DCNN_discrete.py (which has no hysteresis). sideProbabilities = (left, straight, right).
+        /// </summary>
+        public static float DecodeDiscreteYaw(float[] output, int offset, ref int lastSide, float hysteresis, out Vector3 sideProbabilities)
+        {
+            int n = ZarrDataContract.DiscreteHead.YawClassCount;
+            int straight = ZarrDataContract.DiscreteHead.StraightClass;
+            float max = float.NegativeInfinity;
+            for (int c = 0; c < n; c++) max = Mathf.Max(max, output[offset + c]);
+            float[] p = new float[n];
+            float sum = 0f;
+            for (int c = 0; c < n; c++) { p[c] = Mathf.Exp(output[offset + c] - max); sum += p[c]; }
+            for (int c = 0; c < n; c++) p[c] /= sum;
+
+            float left = 0f, right = 0f, leftValue = 0f, rightValue = 0f;
+            for (int c = 0; c < n; c++)
+            {
+                int k = c - straight;
+                if (k == 0) continue;
+                float center = Mathf.Sign(k) * ZarrDataContract.DiscreteHead.YawBinCentersDeg[Mathf.Abs(k)];
+                if (k < 0) { left += p[c]; leftValue += p[c] * center; }
+                else { right += p[c]; rightValue += p[c] * center; }
+            }
+            sideProbabilities = new Vector3(left, p[straight], right);
+
+            float SideP(int side) => side < 0 ? left : side > 0 ? right : p[straight];
+            int best = left >= right && left >= p[straight] ? -1 : right >= p[straight] ? 1 : 0;
+            int chosen = SideP(best) > SideP(lastSide) + hysteresis ? best : lastSide;
+            lastSide = chosen;
+            if (chosen < 0) return leftValue / Mathf.Max(1e-8f, left);
+            if (chosen > 0) return rightValue / Mathf.Max(1e-8f, right);
+            return 0f;
+        }
+
+        private void ApplyRotation(float yaw, float pitch)
+        {
+            // yaw/pitch are rates (deg/s). Yaw turns the body like MouseLook; pitch tilts only the head.
             transform.Rotate(0f, yaw * Time.deltaTime, 0f, Space.Self);
-    
+
             float targetPitch = AgentHeadAnchor.localEulerAngles.x + (-pitch * Time.deltaTime);
             if (targetPitch > 180f) targetPitch -= 360f;
             targetPitch = Mathf.Clamp(targetPitch, -45f, 45f);
             AgentHeadAnchor.localEulerAngles = new Vector3(targetPitch, 0f, 0f);
+        }
 
-            // 2. Forward Movement Calculation
-            // Checked against the forward SPEED (m/s) itself, not the per-frame displacement -
-            // comparing moveAmount (which shrinks as framerate rises) against a fixed distance
-            // threshold used to false-positive at high/uncapped framerates even for a normal
-            // walking-speed forward action.
-            if (Mathf.Abs(forward) < MinForwardSpeedMetersPerSec)
+        /// <summary>
+        /// FirstPersonController.FixedUpdate for a forward-only input: move along the ground normal at the given speed, stick
+        /// to the ground when grounded, fall otherwise, and let the CharacterController slide along walls. A side contact
+        /// while trying to move counts as a collision (rising edge only, as before).
+        /// </summary>
+        private void MoveRecordingBody(float forward)
+        {
+            float dt = Time.fixedDeltaTime;
+            Vector3 desired = transform.forward;
+            Vector3 capsuleCenter = transform.TransformPoint(body.center);
+            if (Physics.SphereCast(capsuleCenter, ZarrDataContract.RecordingBody.Radius, Vector3.down, out RaycastHit ground,
+                    ZarrDataContract.RecordingBody.Height * 0.5f, Physics.AllLayers, QueryTriggerInteraction.Ignore))
             {
-                if (Time.frameCount % DiagnosticLogInterval == 0)
-                {
-                    Debug.LogWarning($"[Locomotion Warning] Forward speed near zero ({forward:F4} m/s). Agent is standing still.");
-                }
-                return;
+                desired = Vector3.ProjectOnPlane(desired, ground.normal).normalized;
             }
 
-            float moveAmount = forward * Time.deltaTime;
-            Vector3 targetDisplacement = transform.forward * moveAmount;
-            Vector3 proposedPosition = transform.position + targetDisplacement;
+            if (body.isGrounded) bodyVerticalVelocity = -ZarrDataContract.RecordingBody.StickToGroundForce;
+            else bodyVerticalVelocity += Physics.gravity.y * ZarrDataContract.RecordingBody.GravityMultiplier * dt;
 
-            // 3. Physical Wall Collision & NavMesh Surface Constraint
-            Vector3 castOrigin = transform.position + Vector3.up * 0.5f;
-            bool hitWall = Physics.SphereCast(castOrigin, agentRadius * 0.8f, transform.forward, out RaycastHit wallHit, Mathf.Abs(moveAmount) + 0.1f, ArchitectureLayerMask);
+            Vector3 velocity = desired * forward;
+            velocity.y = bodyVerticalVelocity;
+            CollisionFlags flags = body.Move(velocity * dt);
 
-            if (!hitWall)
+            bool blocked = (flags & CollisionFlags.Sides) != 0 && Mathf.Abs(forward) >= MinForwardSpeedMetersPerSec;
+            if (blocked && !wasCollidingLastFrame)
             {
-                wasCollidingLastFrame = false;
-
-                NavMeshHit navHit;
-                if (NavMesh.SamplePosition(proposedPosition, out navHit, agentRadius * 2.0f, NavMesh.AllAreas))
+                CollisionCount++;
+                if (!HasCollided)
                 {
-                    transform.position = navHit.position;
-                }
-                else
-                {
-                    if (Time.frameCount % DiagnosticLogInterval == 0)
-                    {
-                        Debug.LogWarning($"[Locomotion Warning] Proposed position {proposedPosition} is OFF the NavMesh. Movement blocked.");
-                    }
+                    HasCollided = true;
+                    FirstCollisionRealtime = Time.realtimeSinceStartup;
                 }
             }
-            else
-            {
-                if (!wasCollidingLastFrame)
-                {
-                    CollisionCount++;
-                    if (!HasCollided)
-                    {
-                        HasCollided = true;
-                        FirstCollisionRealtime = Time.realtimeSinceStartup;
-                    }
-                }
-                wasCollidingLastFrame = true;
-
-                if (Time.frameCount % DiagnosticLogInterval == 0)
-                {
-                    Debug.LogWarning($"[Locomotion Collision] SphereCast blocked forward movement into '{wallHit.collider.gameObject.name}' at distance {wallHit.distance:F2}m.");
-                }
-            }
+            wasCollidingLastFrame = blocked;
         }
 
         private void CheckForPendingModelHotSwaps()
@@ -1410,7 +1544,9 @@ namespace Agent_Based_Modelling
                     NavMeshHit hit;
                     if (NavMesh.SamplePosition(targetPos, out hit, 1.0f, NavMesh.AllAreas))
                     {
+                        if (body != null) body.enabled = false;
                         transform.position = hit.position;
+                        if (body != null) body.enabled = true;
                     }
                 }
             }

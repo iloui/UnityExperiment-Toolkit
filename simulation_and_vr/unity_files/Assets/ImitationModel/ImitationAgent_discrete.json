@@ -1,0 +1,61 @@
+{
+  "head": "discrete",
+  "output_layout": "walk_logit, yaw_logit_0..6, pitch_deg_per_sample",
+  "yaw_bin_edges_deg": [
+    0.5,
+    3.0,
+    8.0
+  ],
+  "yaw_bin_centers_deg": [
+    0.0,
+    1.5,
+    5.0,
+    12.0
+  ],
+  "walk_threshold_mps": 0.65,
+  "sources": [
+    "human",
+    "synthetic_rrw"
+  ],
+  "episodes": {
+    "synthetic_rrw": 73,
+    "human": 25
+  },
+  "human_share": 0.5,
+  "best_epoch": 13,
+  "args": {
+    "recordings_dir": "../zarr_recordings",
+    "output_onnx": "../../unity_files/Assets/ImitationModel/ImitationAgent_discrete.onnx",
+    "sources": [
+      "human",
+      "synthetic_rrw"
+    ],
+    "human_share": 0.5,
+    "epochs": 20,
+    "batch_size": 64,
+    "lr": 0.0005,
+    "weight_decay": 1e-05,
+    "grad_clip_norm": 5.0,
+    "val_ratio": 0.2,
+    "seed": 42,
+    "class_weight_power": 0.5,
+    "label_smoothing": 0.05,
+    "walk_loss_weight": 1.0,
+    "target_stop_share": 0.2,
+    "pitch_loss_weight": 0.25,
+    "proximity_mode": "reconstruct",
+    "rot_aug_deg": 15.0,
+    "rot_aug_prob": 0.7,
+    "rot_correction": 0.15,
+    "poi_xz": [
+      -0.01,
+      -5.6
+    ],
+    "end_xz": [
+      11.25,
+      0.0
+    ],
+    "num_workers": 2,
+    "stop_weight": 1.811192690921825
+  }
+}

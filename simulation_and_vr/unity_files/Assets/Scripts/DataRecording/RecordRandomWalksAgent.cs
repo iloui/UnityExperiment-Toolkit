@@ -105,6 +105,45 @@ namespace Assets.Scripts.DataRecording
         public float recoverySeconds = 1.5f;
         [Tooltip("Look-ahead used while recovering, meters.")]
         public float recoveryLookAheadMeters = 0.75f;
+
+        // v3 stop behaviours. Humans stand in 20.5% of samples (~4 stops per episode, median 2.0 s, 76% in open space,
+        // 40% of standing samples turning); the v2 bot stood in 4.3% (median 0.4 s), so its data barely showed the model
+        // when to stop and turn. All new fields, so existing scene components pick up these defaults.
+        [Header("Stop: start orientation")]
+        [Tooltip("Every walk starts standing for this long (uniform range, seconds) before the first turn / step.")]
+        public float startPauseMinSeconds = 0.5f;
+        public float startPauseMaxSeconds = 3f;
+        [Tooltip("Chance of a glance to one side during the start pause.")]
+        [Range(0f, 1f)] public float startGlanceProbability = 0.5f;
+
+        [Header("Stop: orient-and-scan in open space")]
+        [Tooltip("Mean scan stops per minute of walking (Poisson), on top of look-around pauses. 0 disables.")]
+        public float scanStopRatePerMinute = 3f;
+        [Tooltip("Standing still at the current heading before any glance (uniform range, seconds).")]
+        public float scanHoldMinSeconds = 0.5f;
+        public float scanHoldMaxSeconds = 2.5f;
+        [Tooltip("Glances per scan stop: 0 with this probability, otherwise 1 or 2 (50/50).")]
+        [Range(0f, 1f)] public float scanNoGlanceProbability = 0.35f;
+        [Tooltip("Mean hold time per scan glance, seconds.")]
+        public float scanGlanceDwellSeconds = 0.8f;
+
+        [Header("Stop: turn in place at walls")]
+        [Tooltip("While walking, a wall closer than this straight ahead (from the capsule centre)...")]
+        public float wallStopDistanceMeters = 1.5f;
+        [Tooltip("...with the path heading off by more than this makes the bot stop, stand, then turn on the spot toward the path.")]
+        public float wallStopMinErrorDegrees = 20f;
+        [Tooltip("Standing time facing the wall before turning (uniform range, seconds).")]
+        public float wallStopDwellMinSeconds = 0.3f;
+        public float wallStopDwellMaxSeconds = 1.2f;
+        [Tooltip("No new wall stop within this many seconds of the last one.")]
+        public float wallStopCooldownSeconds = 2f;
+
+        [Header("Stop: pause at POI")]
+        [Tooltip("On reaching a POI (the recorder switches to the next target) the bot stands for this long (uniform range, seconds)...")]
+        public float poiPauseMinSeconds = 0.5f;
+        public float poiPauseMaxSeconds = 2f;
+        [Tooltip("...with a glance to one side with this probability, then turns toward the next target.")]
+        [Range(0f, 1f)] public float poiGlanceProbability = 0.3f;
     }
 
     /// <summary>
@@ -121,6 +160,9 @@ namespace Assets.Scripts.DataRecording
     /// exactly 0 in between, like the humans'. The walk key is released for errors above turnInPlaceDegrees, so large
     /// reorientations (including every episode's random start heading) happen standing, then walking resumes.
     /// Look-around pauses and wall excursions (walk up to a wall, stop, turn away) add stop-and-turn situations.
+    /// v3 adds stops the humans show and v2 lacked: a standing start, orient-and-scan stops in open space, stopping
+    /// in front of a wall that blocks the path and turning on the spot toward it, and a pause at each POI. All of them
+    /// are "stops": a LookAround sequence whose first entry holds the current heading.
     ///
     /// Runs before FirstPersonController (execution order) so this frame's mouse delta is used this frame.
     /// </summary>
@@ -137,6 +179,9 @@ namespace Assets.Scripts.DataRecording
         public int LookArounds { get; private set; }
         public int WallExcursions { get; private set; }
         public int StallRecoveries { get; private set; }
+        public int ScanStops { get; private set; }
+        public int WallStops { get; private set; }
+        public int PoiPauses { get; private set; }
 
         private const string VerticalAxis = "Vertical";
         private const string HorizontalAxis = "Horizontal";
@@ -177,6 +222,8 @@ namespace Assets.Scripts.DataRecording
         private int lookIndex;
         private Vector3 wallPoint;
         private float wallStopGap;
+        private float nextWallStopTime;
+        private Transform lastTarget;
 
         public void Configure(FirstPersonController controller, Transform camera, ParticipantRecorder recorder, LayerMask architecture)
         {
@@ -207,7 +254,12 @@ namespace Assets.Scripts.DataRecording
             corners = null;
             pathTarget = null;
             nextPathTime = 0f;
-            TurnsInPlace = LookArounds = WallExcursions = StallRecoveries = 0;
+            TurnsInPlace = LookArounds = WallExcursions = StallRecoveries = ScanStops = WallStops = PoiPauses = 0;
+            nextWallStopTime = 0f;
+            lastTarget = null;
+            // Start orientation: stand (and maybe glance) before the first turn toward the path.
+            BeginStop(transform.eulerAngles.y, UniformRange(settings.startPauseMinSeconds, settings.startPauseMaxSeconds),
+                rng.NextDouble() < settings.startGlanceProbability ? 1 : 0, settings.lookAroundDwellSeconds);
             IsActive = true;
         }
 
@@ -233,6 +285,15 @@ namespace Assets.Scripts.DataRecording
             Vector3 pos = transform.position;
             float yaw = transform.eulerAngles.y;
             UpdatePath(pos, target);
+
+            // Pause at POI: the recorder switched to the next target, so stand (maybe glance) before turning toward it.
+            if (lastTarget != null && target != lastTarget)
+            {
+                BeginStop(yaw, UniformRange(settings.poiPauseMinSeconds, settings.poiPauseMaxSeconds),
+                    rng.NextDouble() < settings.poiGlanceProbability ? 1 : 0, settings.lookAroundDwellSeconds);
+                PoiPauses++;
+            }
+            lastTarget = target;
 
             headingWander = StepOu(headingWander, settings.headingWanderSigmaDegrees, settings.headingWanderTauSeconds, dt);
             float offsetCap = settings.lateralOffsetMaxSigmas * settings.lateralOffsetSigmaMeters;
@@ -271,10 +332,23 @@ namespace Assets.Scripts.DataRecording
                         recoverUntil = Time.time + settings.recoverySeconds;
                         StallRecoveries++;
                     }
+                    // A wall close ahead while the path turns away: stop facing it, then turn on the spot (the walk key stays
+                    // up until the error is below walkStartDegrees). This is the state M4 froze in - left/right both occur
+                    // in the demonstrations, but each stop here commits to the path's side.
+                    if (keyDown && Time.time >= nextWallStopTime && Mathf.Abs(error) > settings.wallStopMinErrorDegrees
+                        && HorizontalDistance(pos, target.position) > ZarrDataContract.ArrivalRadiusMeters
+                        && Physics.Raycast(pos, Flat(transform.forward), settings.wallStopDistanceMeters, architectureMask, QueryTriggerInteraction.Ignore))
+                    {
+                        nextWallStopTime = Time.time + settings.wallStopCooldownSeconds;
+                        BeginStop(yaw, UniformRange(settings.wallStopDwellMinSeconds, settings.wallStopDwellMaxSeconds), 0, 0f);
+                        WallStops++;
+                        break;
+                    }
                     if (keyDown && behaviourCooldown <= 0f && HorizontalDistance(pos, target.position) > settings.behaviourMinTargetDistanceMeters)
                     {
                         if (Chance(settings.wallExcursionRatePerMinute, dt)) TryBeginWallExcursion(pos, yaw);
                         else if (Chance(settings.lookAroundRatePerMinute, dt)) BeginLookAround(yaw);
+                        else if (Chance(settings.scanStopRatePerMinute, dt)) BeginScanStop(yaw);
                     }
                     break;
 
@@ -434,6 +508,34 @@ namespace Assets.Scripts.DataRecording
             lookIndex = 0;
             mode = Mode.LookAround;
             LookArounds++;
+        }
+
+        /// <summary>
+        /// A stop: stand at the current heading for holdSeconds, then `glances` look-arounds to alternating sides (each held
+        /// ~glanceDwellSeconds), then back to walking - which turns on the spot first if the path is far off.
+        /// </summary>
+        private void BeginStop(float yaw, float holdSeconds, int glances, float glanceDwellSeconds)
+        {
+            lookYawTargets.Clear();
+            lookDwellTimes.Clear();
+            lookYawTargets.Add(yaw);
+            lookDwellTimes.Add(Mathf.Max(0f, holdSeconds));
+            float side = rng.NextDouble() < 0.5 ? -1f : 1f;
+            for (int g = 0; g < glances; g++, side = -side)
+            {
+                lookYawTargets.Add(yaw + side * UniformRange(settings.lookAroundMinYawDegrees, settings.lookAroundMaxYawDegrees));
+                lookDwellTimes.Add(glanceDwellSeconds * UniformRange(0.5f, 1.5f));
+            }
+            lookIndex = 0;
+            keyDown = false;
+            mode = Mode.LookAround;
+        }
+
+        private void BeginScanStop(float yaw)
+        {
+            int glances = rng.NextDouble() < settings.scanNoGlanceProbability ? 0 : (rng.NextDouble() < 0.5 ? 1 : 2);
+            BeginStop(yaw, UniformRange(settings.scanHoldMinSeconds, settings.scanHoldMaxSeconds), glances, settings.scanGlanceDwellSeconds);
+            ScanStops++;
         }
 
         private void TryBeginWallExcursion(Vector3 pos, float yaw)
