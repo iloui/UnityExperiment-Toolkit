@@ -6,7 +6,7 @@ Usage:
   python3 summarize_eval.py RUN_DIR [RUN_DIR ...] # specific runs
   python3 summarize_eval.py --ref 45 --csv out.csv
 
-Standard library only. Needs harness_version 5 folders (agent_kind column; ShortestPath runs leave the
+Standard library only. Needs harness_version 6 folders (agent_kind column; ShortestPath runs leave the
 model, nudge and collision columns empty, shown as "-").
 Success = outcome == "success" (episodes flagged invalid_speed count as failures and are reported separately).
 "success@ref" applies the human-comparable cutoff (--ref, default 45 sim seconds) to success_time_s / episode length.
@@ -53,10 +53,10 @@ def fmt(x, nd=1):
     return "-" if x is None or (isinstance(x, float) and math.isnan(x)) else f"{x:.{nd}f}"
 
 
-def blocked_seconds_from_ticks(run_dir, config_id, agent_id):
-    """Sum of tick durations where the agent was wall-blocked, from ticks_config<C>_agent<A>.csv.
-    None if not logged, or if blocked is empty (ShortestPath: a NavMeshAgent cannot be blocked)."""
-    path = os.path.join(run_dir, f"ticks_config{config_id}_agent{agent_id}.csv")
+def blocked_seconds_from_model_debug(run_dir, config_id, agent_id):
+    """Sum of tick durations where the agent was wall-blocked, from modeldebug_config<C>_agent<A>.csv.
+    None if not logged (EvalHarness.logModelDebugTicks off, or ShortestPath: a NavMeshAgent cannot be blocked)."""
+    path = os.path.join(run_dir, f"modeldebug_config{config_id}_agent{agent_id}.csv")
     if not os.path.exists(path):
         return None
     total, prev_t, measured = 0.0, None, False
@@ -98,7 +98,7 @@ def summarise(run_dir, ref):
     ref_k = sum(1 for r in rows if succ_within_ref(r))
     rlo, rhi = wilson(ref_k, n)
 
-    blocked = [blocked_seconds_from_ticks(run_dir, r["config_id"], r["agent_id"]) for r in rows]
+    blocked = [blocked_seconds_from_model_debug(run_dir, r["config_id"], r["agent_id"]) for r in rows]
     kind = cfg.get("agent_kind") or (rows[0].get("agent_kind") if rows else "") or "?"
 
     return {

@@ -12,7 +12,7 @@ try:
 except ImportError:  # pragma: no cover - dependency may be absent in a minimal validation environment
     torch = None
 
-from data_contract import SOURCE_SYNTHETIC, TEMPORAL_WINDOW_SIZE, make_episode_manifest
+from data_contract import POSE_COLUMNS, SOURCE_SYNTHETIC, TEMPORAL_WINDOW_SIZE, make_episode_manifest
 
 IMAGE_WIDTH = 64
 IMAGE_HEIGHT = 64
@@ -27,7 +27,7 @@ def synthesize_episode(episode_dir: str):
     depth = np.random.rand(FRAME_COUNT, IMAGE_HEIGHT, IMAGE_WIDTH).astype(np.float32)
     goal = np.random.randn(FRAME_COUNT, 3).astype(np.float32)
     goal_distance = np.random.rand(FRAME_COUNT).astype(np.float32) * 20.0
-    pose = np.random.randn(FRAME_COUNT, 3).astype(np.float32)
+    pose = np.random.randn(FRAME_COUNT, len(POSE_COLUMNS)).astype(np.float32)
     action_vel = np.random.randn(FRAME_COUNT, 3).astype(np.float32)
     action_rot = np.random.randn(FRAME_COUNT, 3).astype(np.float32)
     timestamp = np.arange(FRAME_COUNT, dtype=np.float64)
@@ -94,7 +94,7 @@ def validate_episode_manifest(episode_dir: str):
         "depth": FRAME_COUNT * IMAGE_HEIGHT * IMAGE_WIDTH,
         "goal": FRAME_COUNT * 3,
         "goal_distance": FRAME_COUNT,
-        "pose": FRAME_COUNT * 3,
+        "pose": FRAME_COUNT * len(POSE_COLUMNS),
         "action_vel": FRAME_COUNT * 3,
         "action_rot": FRAME_COUNT * 3,
         "timestamp": FRAME_COUNT,

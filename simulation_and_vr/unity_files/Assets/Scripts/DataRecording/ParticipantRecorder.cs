@@ -452,7 +452,7 @@ namespace Assets.Scripts.DataRecording
                     new ZarrDataContract.ArrayEntry { name = "depth", shape = new int[] { 0, ZarrDataContract.ImageHeight, ZarrDataContract.ImageWidth }, dtype = ZarrDataContract.ArrayDtypes.Depth },
                     new ZarrDataContract.ArrayEntry { name = "goal", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "goal_distance", shape = new int[] { 0 }, dtype = ZarrDataContract.ArrayDtypes.Scalar },
-                    new ZarrDataContract.ArrayEntry { name = "pose", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
+                    new ZarrDataContract.ArrayEntry { name = "pose", shape = new int[] { 0, ZarrDataContract.PoseColumns.Length }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "action_vel", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "action_rot", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "timestamp", shape = new int[] { 0 }, dtype = ZarrDataContract.ArrayDtypes.Timestamp }
@@ -578,10 +578,13 @@ namespace Assets.Scripts.DataRecording
                 else
                 {
                     if (episodeFrameCount == CameraHeightCheckFrame) CheckCameraHeight(currentPosition);
+                    ZarrDataContract.HeadingPitch(hTransform, out float headingDeg, out float pitchDeg);
                     WriteFrameBinary(
                         colorPixels,
                         currentRayBuffer,
                         currentPosition,
+                        headingDeg,
+                        pitchDeg,
                         localGoalVector,
                         goalDistanceMeters,
                         localVelocityAction,
@@ -646,7 +649,7 @@ namespace Assets.Scripts.DataRecording
             csvWriter.WriteLine(rowBuilder.ToString());
         }
 
-        private void WriteFrameBinary(Color32[] colorPixels, float[] depthBuffer, Vector3 pose, Vector3 goal, float goalDistance, Vector3 actionVel, Vector3 actionRot, double timeStamp)
+        private void WriteFrameBinary(Color32[] colorPixels, float[] depthBuffer, Vector3 pose, float headingDeg, float pitchDeg, Vector3 goal, float goalDistance, Vector3 actionVel, Vector3 actionRot, double timeStamp)
         {
             if (rgbWriter == null || depthWriter == null || goalWriter == null || goalDistanceWriter == null || poseWriter == null || actionVelWriter == null || actionRotWriter == null || timestampWriter == null)
             {
@@ -675,6 +678,8 @@ namespace Assets.Scripts.DataRecording
             poseWriter.Write(pose.x);
             poseWriter.Write(pose.y);
             poseWriter.Write(pose.z);
+            poseWriter.Write(headingDeg);
+            poseWriter.Write(pitchDeg);
 
             actionVelWriter.Write(actionVel.x);
             actionVelWriter.Write(actionVel.y);

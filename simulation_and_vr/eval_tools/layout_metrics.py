@@ -21,7 +21,7 @@ Definitions (thesis metrics):
   contact event  = a run of contact samples; a new event starts only after >= EVENT_GAP_S without contact.
 
 Trajectories: human/synthetic episodes (dataset.zarr or the raw pose.bin + timestamp.bin; pose is the camera, which sits
-above the body centre) and EvalHarness ticks_config<C>_agent<A>.csv (t, x, z).
+above the body centre) and EvalHarness traj_config<C>_agent<A>.csv (t, x, z of the eye, which sits above the body centre).
 
 Usage:
   python layout_metrics.py plot  LAYOUT.npz [--episode DIR ...] [--ticks CSV ...] [-o out.png]
@@ -121,13 +121,13 @@ def trajectory_from_episode(episode_dir: str | Path):
         pose = np.asarray(root["pose"][:], dtype=np.float64)
         t = np.asarray(root["timestamp"][:], dtype=np.float64)
     else:
-        pose = np.fromfile(ep / "pose.bin", dtype="<f4").reshape(-1, 3).astype(np.float64)
+        pose = np.fromfile(ep / "pose.bin", dtype="<f4").reshape(-1, 5).astype(np.float64)  # data_contract.POSE_COLUMNS
         t = np.fromfile(ep / "timestamp.bin", dtype="<f8")
     return t - t[0], pose[:, [0, 2]], scene
 
 
 def trajectory_from_ticks(ticks_csv: str | Path):
-    """(t, xz) from an EvalHarness ticks_config<C>_agent<A>.csv (';'-separated, columns t, x, z)."""
+    """(t, xz) from an EvalHarness traj_config<C>_agent<A>.csv (';'-separated, columns t, x, z)."""
     t, xz = [], []
     with open(ticks_csv, newline="") as f:
         for row in csv.DictReader(f, delimiter=";"):
@@ -237,7 +237,7 @@ def main():
         s = sub.add_parser(name)
         s.add_argument("layout", help="eval_tools/layouts/<scene>.npz, or just the scene name")
         s.add_argument("--episode", nargs="*", help="recorded episode folder(s)")
-        s.add_argument("--ticks", nargs="*", help="EvalHarness ticks_config<C>_agent<A>.csv file(s)")
+        s.add_argument("--ticks", nargs="*", help="EvalHarness traj_config<C>_agent<A>.csv file(s)")
         if name == "plot":
             s.add_argument("-o", "--output", help="PNG path (default: eval_tools/layouts/<scene>.png)")
         s.set_defaults(fn=fn)

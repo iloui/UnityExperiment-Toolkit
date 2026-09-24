@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import zarr
 
-from data_contract import read_manifest
+from data_contract import POSE_COLUMNS, read_manifest
 
 
 DEFAULT_CHUNK_SIZE = 256
@@ -127,7 +127,7 @@ def convert_episode(episode_dir: str, output_zarr: str = None) -> int:
         depth = load_depth(episode_dir, frame_count)
         goal = load_vector_file(_binary_file_path(episode_dir, "goal.bin"), frame_count, 3)
         goal_distance = load_scalar_file(_binary_file_path(episode_dir, "goal_distance.bin"), frame_count)
-        pose = load_vector_file(_binary_file_path(episode_dir, "pose.bin"), frame_count, 3)
+        pose = load_vector_file(_binary_file_path(episode_dir, "pose.bin"), frame_count, len(POSE_COLUMNS))
         action_vel = load_vector_file(_binary_file_path(episode_dir, "action_vel.bin"), frame_count, 3)
         action_rot = load_vector_file(_binary_file_path(episode_dir, "action_rot.bin"), frame_count, 3)
         timestamp = load_timestamp(episode_dir, frame_count)

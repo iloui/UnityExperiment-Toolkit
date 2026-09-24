@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-DATASET_VERSION = "zarr-v2"
+DATASET_VERSION = "zarr-v3"
 MANIFEST_FILENAME = "manifest.json"
 
 IMAGE_WIDTH = 64
@@ -64,7 +64,10 @@ GOAL_SHAPE = ("time", 3)
 # SingleEpisodeDataset/ImitationAgent.BuildSensoryTensor) can be changed later without
 # re-recording. Mandatory: ingest and training refuse an episode without it.
 GOAL_DISTANCE_SHAPE = ("time",)
-POSE_SHAPE = ("time", 3)
+# Recording camera pose: world position (Unity metres, y up), then heading (camera eulerAngles.y, deg in [0, 360),
+# clockwise from above, 0 = +z) and pitch (camera eulerAngles.x wrapped to (-180, 180], + = looking down).
+POSE_COLUMNS = ("x", "y", "z", "heading_deg", "pitch_deg")
+POSE_SHAPE = ("time", len(POSE_COLUMNS))
 ACTION_VEL_SHAPE = ("time", 3)
 ACTION_ROT_SHAPE = ("time", 3)
 TIMESTAMP_SHAPE = ("time",)
@@ -93,11 +96,22 @@ ARRAY_SPECS = {
     "depth": ([0, IMAGE_HEIGHT, IMAGE_WIDTH], DEPTH_DTYPE),
     "goal": ([0, 3], VECTOR_DTYPE),
     "goal_distance": ([0], GOAL_DISTANCE_DTYPE),
-    "pose": ([0, 3], VECTOR_DTYPE),
+    "pose": ([0, len(POSE_COLUMNS)], VECTOR_DTYPE),
     "action_vel": ([0, 3], VECTOR_DTYPE),
     "action_rot": ([0, 3], VECTOR_DTYPE),
     "timestamp": ([0], TIMESTAMP_DTYPE),
 }
+
+# --- Unified trajectory (eval_tools/trajectories.py; EvalHarness traj_*.csv = ZarrDataContract.Trajectory) ---
+# One row per SAMPLING_INTERVAL_S of sim time, t = 0 at the first sample, for every source (imitation, shortest path,
+# human, synthetic). x, y, z are the eye/camera position; heading/pitch as in POSE_COLUMNS. speed_mps is the
+# horizontal distance moved since the previous row / dt, yaw_rate_deg_s the wrapped heading change since the previous
+# row / dt (+ = clockwise from above); both are 0 in the first row. phase: 0 = walking to a POI, 1 = walking to the end.
+TRAJECTORY_COLUMNS = ("t", "x", "y", "z", "heading_deg", "pitch_deg", "speed_mps", "yaw_rate_deg_s", "phase",
+                      "pois_reached")
+TRAJECTORY_CSV_DELIMITER = ";"
+PHASE_TO_POI = 0
+PHASE_TO_END = 1
 
 # --- Episode manifest (ZarrDataContract.EpisodeManifest) ---
 # Everything Python needs about an episode without opening the Unity scene. check_manifest refuses an episode
@@ -203,7 +217,7 @@ def make_episode_manifest(
 
 def check_manifest(manifest: Dict[str, Any], source: str = "manifest") -> None:
     """Refuse an episode whose manifest is missing a field, was recorded under another schema or camera (e.g. zarr-v1:
-    90 deg depth fan, unaligned with RGB), or has no goal_distance array. Raises ValueError listing every problem."""
+    90 deg depth fan, unaligned with RGB; zarr-v2: position-only pose), or has no goal_distance array. Raises ValueError listing every problem."""
     version = manifest.get("schema_version")
     if version != DATASET_VERSION:
         raise ValueError(f"{source}: schema_version is {version!r}, expected {DATASET_VERSION!r}. Re-record the episode.")
@@ -252,6 +266,11 @@ def check_manifest(manifest: Dict[str, Any], source: str = "manifest") -> None:
     missing_arrays = [name for name in ARRAY_NAMES if name not in array_names]
     if missing_arrays:
         problems.append(f"'arrays' lacks {missing_arrays}")
+    for entry in manifest["arrays"]:
+        if isinstance(entry, dict) and entry.get("name") in ARRAY_SPECS:
+            shape, dtype = ARRAY_SPECS[entry["name"]]
+            if list(entry.get("shape", [])) != shape or entry.get("dtype") != dtype:
+                problems.append(f"array '{entry['name']}' is {entry.get('shape')} {entry.get('dtype')}, expected {shape} {dtype}")
 
     if problems:
         raise ValueError(f"{source}: invalid manifest ({'; '.join(problems)}).")

@@ -1,7 +1,7 @@
 {
   "shape": [
     8,
-    3
+    5
   ],
   "data_type": "float32",
   "chunk_grid": {
@@ -9,7 +9,7 @@
     "configuration": {
       "chunk_shape": [
         8,
-        3
+        5
       ]
     }
   },

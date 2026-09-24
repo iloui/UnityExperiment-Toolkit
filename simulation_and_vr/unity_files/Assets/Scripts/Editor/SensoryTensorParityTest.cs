@@ -332,9 +332,7 @@ namespace Assets.Scripts.Editor
 
                     goalDistanceWriter.Write(goalDistanceMeters);
 
-                    poseWriter.Write(0f);
-                    poseWriter.Write(0f);
-                    poseWriter.Write(0f);
+                    for (int c = 0; c < ZarrDataContract.PoseColumns.Length; c++) poseWriter.Write(0f);
 
                     actionVelWriter.Write(0f);
                     actionVelWriter.Write(0f);
@@ -372,7 +370,7 @@ namespace Assets.Scripts.Editor
                     new ZarrDataContract.ArrayEntry { name = "depth", shape = new int[] { 0, ZarrDataContract.ImageHeight, ZarrDataContract.ImageWidth }, dtype = ZarrDataContract.ArrayDtypes.Depth },
                     new ZarrDataContract.ArrayEntry { name = "goal", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "goal_distance", shape = new int[] { 0 }, dtype = ZarrDataContract.ArrayDtypes.Scalar },
-                    new ZarrDataContract.ArrayEntry { name = "pose", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
+                    new ZarrDataContract.ArrayEntry { name = "pose", shape = new int[] { 0, ZarrDataContract.PoseColumns.Length }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "action_vel", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "action_rot", shape = new int[] { 0, 3 }, dtype = ZarrDataContract.ArrayDtypes.Vector },
                     new ZarrDataContract.ArrayEntry { name = "timestamp", shape = new int[] { 0 }, dtype = ZarrDataContract.ArrayDtypes.Timestamp }

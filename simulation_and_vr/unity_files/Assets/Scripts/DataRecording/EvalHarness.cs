@@ -29,9 +29,11 @@ namespace Assets.Scripts.DataRecording
     /// top-down trajectory PNG is appended per agent, immediately on that agent's completion,
     /// so an unattended multi-hour run survives a mid-run Editor stop.
     ///
-    /// Both kinds get the same configurations, start jitter, timeout, metrics, episodes.csv columns and ticks CSV (the
-    /// harness samples every agent on a 0.1 s sim-time grid itself); columns that only exist for the imitation model
-    /// (model identity, raw outputs, wall-blocked, collisions, nudges) are left empty for ShortestPath. AgentScript/
+    /// Both kinds get the same configurations, start jitter, timeout, metrics, episodes.csv columns and trajectory file
+    /// (traj_config<C>_agent<A>.csv in the unified ZarrDataContract.Trajectory schema, sampled by the harness itself on a
+    /// 0.1 s sim-time grid - the same schema eval_tools/trajectories.py derives for human episodes); columns that only
+    /// exist for the imitation model (model identity, collisions, nudges) are left empty for ShortestPath, and its per-tick
+    /// model outputs go to a separate optional modeldebug_config<C>_agent<A>.csv. AgentScript/
     /// EngineScript are not used - see ShortestPathAgent for why.
     /// Aggregating these rows into Goal Completion Rate / Collision Frequency / MTTC / SPL is a
     /// deliberately separate downstream (pandas) step, not this harness's job.
@@ -48,6 +50,10 @@ namespace Assets.Scripts.DataRecording
         public AgentKind agentKind = AgentKind.Imitation;
         [Tooltip("The .onnx model every spawned agent runs. Only used with agentKind = Imitation.")]
         public ModelAsset modelAsset;
+        [Tooltip("Training condition of modelAsset: A = synthetic only, B = synthetic + some training participants, C = synthetic + " +
+                 "all training participants. Required for Imitation, ignored for ShortestPath. Written to run_config.json and every " +
+                 "episodes.csv row, and read by eval_tools/trajectories.py.")]
+        public string condition = "";
 
         [Header("Shortest-Path Baseline (agentKind = ShortestPath)")]
         [Tooltip("m/s. Default = the recording body's walk speed (humans, bot and ImitationAgent all walk at 1.3 m/s).")]
@@ -138,10 +144,10 @@ namespace Assets.Scripts.DataRecording
                  "episode at 60fps accumulates thousands of points (trajectory.Add() runs every Update(), not just " +
                  "every sampling tick), which is the main cause of the per-episode stall/lag.")]
         public int maxHeatmapTrajectoryPoints = 300;
-        [Tooltip("If true, writes ticks_config<C>_agent<A>.csv per agent into the run folder: one row every 0.1 s of episode sim time " +
-                 "with pose, heading, pitch, measured forward speed and yaw rate, goal vector/distance, and (Imitation only) the " +
-                 "latest raw and commanded model outputs and the wall-blocked flag. Use analyze_stall.py to inspect where and why an agent stalls.")]
-        public bool logPerTickOutputs = true;
+        [Tooltip("Imitation only: also write modeldebug_config<C>_agent<A>.csv, one row per trajectory row (same t) with the goal " +
+                 "vector/distance the model sees, the wall-blocked flag and the latest raw and commanded model outputs. The " +
+                 "trajectory file (traj_*.csv) is always written. Use analyze_stall.py to inspect where and why an agent stalls.")]
+        public bool logModelDebugTicks = true;
 
         [Header("Visualization")]
         [Tooltip("Color applied to every spawned agent's capsule.")]
@@ -166,9 +172,13 @@ namespace Assets.Scripts.DataRecording
         private int consecutivePlacementFailures = 0;
         private const int MaxConsecutivePlacementFailures = 10;
 
-        private const string HarnessVersion = "5";
-        private const string TickCsvHeader = "t;x;z;heading_deg;pitch_deg;fwd_speed_mps;yaw_rate_deg_per_s;goal_x;goal_y;goal_z;goal_dist_m;" +
-            "pois_reached;blocked;raw_fwd;raw_yaw_deg_per_sample;raw_pitch;applied_fwd_mps;applied_yaw_deg_per_s";
+        private const string HarnessVersion = "6";
+        private static readonly string TrajectoryCsvHeader = string.Join(ZarrDataContract.Trajectory.CsvDelimiter, ZarrDataContract.Trajectory.Columns);
+        private static readonly string ModelDebugCsvHeader = string.Join(ZarrDataContract.Trajectory.CsvDelimiter, new[]
+        {
+            "t", "goal_x", "goal_y", "goal_z", "goal_dist_m", "blocked",
+            "raw_fwd", "raw_yaw_deg_per_sample", "raw_pitch", "applied_fwd_mps", "applied_yaw_deg_per_s"
+        });
         private string modelSha256 = "";
         private string diskModelPath;
         private string diskModelMtimeAtStart = "";
@@ -201,7 +211,9 @@ namespace Assets.Scripts.DataRecording
             public int seed;
             public List<Vector3> poiPositions;
             public Vector3 endPos;
-            public StreamWriter tickWriter;
+            public StreamWriter trajWriter;
+            public StreamWriter modelDebugWriter;
+            public string trajFileName;
 
             // Harness-side episode clock/metrics. Everything is derived from the agent's own trajectory
             // (one point per agent Update) and Time.deltaTime, so it is independent of realtime stalls
@@ -234,10 +246,10 @@ namespace Assets.Scripts.DataRecording
             public float startOffsetM;
             public float headingJitterDeg;
 
-            // Per-tick CSV sampling (sim time).
+            // Trajectory sampling (sim time).
             public float nextTickSim;
             public float prevTickSim;
-            public Vector3 prevTickPos;
+            public Vector3 prevTickEyePos;
             public float prevTickHeading;
         }
         private readonly List<ActiveEpisode> activeEpisodes = new List<ActiveEpisode>();
@@ -260,6 +272,12 @@ namespace Assets.Scripts.DataRecording
             if (agentKind == AgentKind.Imitation && modelAsset == null)
             {
                 Debug.LogError("[EvalHarness] agentKind is Imitation but 'modelAsset' is not assigned. Refusing to start.");
+                enabled = false;
+                return;
+            }
+            if (agentKind == AgentKind.Imitation && string.IsNullOrWhiteSpace(condition))
+            {
+                Debug.LogError("[EvalHarness] agentKind is Imitation but 'condition' (A/B/C: what modelAsset was trained on) is empty. Refusing to start.");
                 enabled = false;
                 return;
             }
@@ -458,6 +476,7 @@ namespace Assets.Scripts.DataRecording
         {
             public string harness_version;
             public string agent_kind;
+            public string condition;
             public string scene;
             public string started_at;
             public string unity_version;
@@ -511,6 +530,7 @@ namespace Assets.Scripts.DataRecording
                 {
                     harness_version = HarnessVersion,
                     agent_kind = agentKind.ToString(),
+                    condition = ConditionName(),
                     scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name,
                     started_at = DateTime.Now.ToString("o", CultureInfo.InvariantCulture),
                     unity_version = Application.unityVersion,
@@ -560,6 +580,7 @@ namespace Assets.Scripts.DataRecording
         }
 
         private string ModelName() => agentKind == AgentKind.Imitation && modelAsset != null ? modelAsset.name : "";
+        private string ConditionName() => agentKind == AgentKind.Imitation ? condition.Trim() : "";
 
         private static List<Vector3> MarkerPositions(GameObject[] markers)
         {
@@ -581,7 +602,7 @@ namespace Assets.Scripts.DataRecording
                 if (ep.agentGO == null)
                 {
                     // Destroyed some other way than FinishEpisode() - drop it without a row rather than crash.
-                    CloseTickWriter(ep);
+                    CloseTickWriters(ep);
                     activeEpisodes.RemoveAt(i);
                     currentConfigAgentsCompleted++;
                     continue;
@@ -726,17 +747,23 @@ namespace Assets.Scripts.DataRecording
                 agent = shortestPath;
             }
 
-            StreamWriter tickWriter = null;
-            if (logPerTickOutputs)
+            // AutoFlush: both files survive stopping Play mid-episode.
+            string episodeKey = $"config{currentConfigId}_agent{currentConfigAgentsSpawned}";
+            string trajFileName = $"traj_{episodeKey}.csv";
+            var trajWriter = new StreamWriter(Path.Combine(runFolderPath, trajFileName), false) { AutoFlush = true };
+            trajWriter.WriteLine(TrajectoryCsvHeader);
+            StreamWriter modelDebugWriter = null;
+            if (logModelDebugTicks && imitation != null)
             {
-                string tickPath = Path.Combine(runFolderPath, $"ticks_config{currentConfigId}_agent{currentConfigAgentsSpawned}.csv");
-                tickWriter = new StreamWriter(tickPath, false) { AutoFlush = true }; // survives stopping Play mid-episode
-                tickWriter.WriteLine(TickCsvHeader);
+                modelDebugWriter = new StreamWriter(Path.Combine(runFolderPath, $"modeldebug_{episodeKey}.csv"), false) { AutoFlush = true };
+                modelDebugWriter.WriteLine(ModelDebugCsvHeader);
             }
 
             activeEpisodes.Add(new ActiveEpisode
             {
-                tickWriter = tickWriter,
+                trajWriter = trajWriter,
+                modelDebugWriter = modelDebugWriter,
+                trajFileName = trajFileName,
                 agentGO = agentGO,
                 agent = agent,
                 imitation = imitation,
@@ -769,8 +796,8 @@ namespace Assets.Scripts.DataRecording
                 // The agent's Start() has just spawned it facing its goal; apply the (seeded) heading jitter now,
                 // before the model's temporal window has filled and produced its first action.
                 if (Mathf.Abs(ep.headingJitterDeg) > 0.001f) ep.agentGO.transform.Rotate(0f, ep.headingJitterDeg, 0f, Space.World);
-                ep.prevTickPos = ep.agentGO.transform.position;
-                ep.prevTickHeading = ep.agentGO.transform.eulerAngles.y;
+                ep.prevTickEyePos = Eye(ep).position;
+                ZarrDataContract.HeadingPitch(Eye(ep), out ep.prevTickHeading, out _);
                 WriteTick(ep);
                 return;
             }
@@ -825,55 +852,56 @@ namespace Assets.Scripts.DataRecording
             }
         }
 
+        private static Transform Eye(ActiveEpisode ep) => ep.agent.EyeAnchor != null ? ep.agent.EyeAnchor : ep.agentGO.transform;
+
         /// <summary>
-        /// One ticks-CSV row at the current episode sim time. Called on a ZarrDataContract.SamplingIntervalSeconds grid
-        /// (t = 0 on the agent's first Update); t is the actual sim time of the frame that crossed the grid point. Forward
-        /// speed and yaw rate are measured from the pose change since the previous row, so they mean the same thing for
-        /// both agent kinds. Pitch is the eye's local x rotation (Unity convention: positive = looking down; always 0 for
-        /// ShortestPath). The goal vector is in the eye's frame, as in the model input. Imitation-only columns are empty
-        /// for ShortestPath, and the model columns are empty until the model's first call.
+        /// One row of the trajectory file (ZarrDataContract.Trajectory) and, if enabled, of the model-debug file, at the current
+        /// episode sim time. Called on a ZarrDataContract.SamplingIntervalSeconds grid (t = 0 on the agent's first Update); t is
+        /// the actual sim time of the frame that crossed the grid point (eval_tools/trajectories.py resamples onto the exact grid).
+        /// Position, heading and pitch are the eye's, as ParticipantRecorder's pose is the camera's; speed and yaw rate come from
+        /// the eye's change since the previous row, so they mean the same thing for both agent kinds and for recorded episodes.
+        /// Model-debug: the goal vector is in the eye's frame, as in the model input; model columns are empty until the first call.
         /// </summary>
         private void WriteTick(ActiveEpisode ep)
         {
             float interval = ZarrDataContract.SamplingIntervalSeconds;
             while (ep.nextTickSim <= ep.simElapsed + 1e-4f) ep.nextTickSim += interval;
-            if (ep.tickWriter == null) return;
+            if (ep.trajWriter == null) return;
 
-            Transform tr = ep.agentGO.transform;
-            Vector3 pos = tr.position;
-            float heading = tr.eulerAngles.y;
+            Transform eye = Eye(ep);
+            Vector3 pos = eye.position;
+            ZarrDataContract.HeadingPitch(eye, out float heading, out float pitch);
 
             float dt = ep.simElapsed - ep.prevTickSim;
-            float fwdSpeed = 0f, yawRate = 0f;
+            float speed = 0f, yawRate = 0f;
             if (dt > 1e-5f)
             {
-                Vector3 moved = pos - ep.prevTickPos;
+                Vector3 moved = pos - ep.prevTickEyePos;
                 moved.y = 0f;
-                Vector3 midForward = Quaternion.Euler(0f, Mathf.LerpAngle(ep.prevTickHeading, heading, 0.5f), 0f) * Vector3.forward;
-                fwdSpeed = Vector3.Dot(moved, midForward) / dt;
+                speed = moved.magnitude / dt;
                 yawRate = Mathf.DeltaAngle(ep.prevTickHeading, heading) / dt;
             }
             ep.prevTickSim = ep.simElapsed;
-            ep.prevTickPos = pos;
+            ep.prevTickEyePos = pos;
             ep.prevTickHeading = heading;
 
-            Transform eye = ep.agent.EyeAnchor != null ? ep.agent.EyeAnchor : tr;
-            float pitch = eye.localEulerAngles.x;
-            if (pitch > 180f) pitch -= 360f;
-            Vector3 goalOffset = ep.agent.CurrentGoalPosition - eye.position;
-            Vector3 goalLocal = eye.InverseTransformDirection(goalOffset.normalized);
+            int poisReached = ep.agent.NeedsFulfilledCount;
+            int poiCount = ep.agent.PlannedPois != null ? ep.agent.PlannedPois.Count : ep.poiPositions.Count;
+            int phase = poisReached >= poiCount ? ZarrDataContract.Trajectory.PhaseToEnd : ZarrDataContract.Trajectory.PhaseToPoi;
+
+            string d = ZarrDataContract.Trajectory.CsvDelimiter;
+            ep.trajWriter.WriteLine(string.Join(d,
+                F(ep.simElapsed), F(pos.x), F(pos.y), F(pos.z), F(heading), F(pitch), F(speed), F(yawRate), I(phase), I(poisReached)));
 
             ImitationAgent im = ep.imitation;
-            ep.tickWriter.WriteLine(string.Join(";",
-                F(ep.simElapsed), F(pos.x), F(pos.z), F(heading), F(pitch), F(fwdSpeed), F(yawRate),
-                F(goalLocal.x), F(goalLocal.y), F(goalLocal.z), F(goalOffset.magnitude),
-                I(ep.agent.NeedsFulfilledCount),
-                im != null ? B(im.IsWallBlocked) : "",
-                im != null ? FOrEmpty(im.LastRawForward) : "",
-                im != null ? FOrEmpty(im.LastRawYawPerSample) : "",
-                im != null ? FOrEmpty(im.LastRawPitch) : "",
-                im != null ? FOrEmpty(im.LastCommandedForwardMps) : "",
-                im != null ? FOrEmpty(im.LastCommandedYawDegPerSecond) : ""));
+            if (ep.modelDebugWriter == null || im == null) return;
+            Vector3 goalOffset = ep.agent.CurrentGoalPosition - pos;
+            Vector3 goalLocal = eye.InverseTransformDirection(goalOffset.normalized);
+            ep.modelDebugWriter.WriteLine(string.Join(d,
+                F(ep.simElapsed), F(goalLocal.x), F(goalLocal.y), F(goalLocal.z), F(goalOffset.magnitude),
+                B(im.IsWallBlocked),
+                FOrEmpty(im.LastRawForward), FOrEmpty(im.LastRawYawPerSample), FOrEmpty(im.LastRawPitch),
+                FOrEmpty(im.LastCommandedForwardMps), FOrEmpty(im.LastCommandedYawDegPerSecond)));
         }
 
         private static void ProcessNewTrajectoryPoints(ActiveEpisode ep)
@@ -993,20 +1021,21 @@ namespace Assets.Scripts.DataRecording
                 longestStallPos = ep.longestStallSeconds > 0f ? (Vector3?)ep.longestStallPos : null,
                 nudgeCount = stuckCount,
                 png = pngFilename,
+                trajectoryFile = ep.trajFileName,
                 error = note
             });
 
-            CloseTickWriter(ep);
+            CloseTickWriters(ep);
             Destroy(ep.agentGO);
             episodeIndex++;
         }
 
-        private static void CloseTickWriter(ActiveEpisode ep)
+        private static void CloseTickWriters(ActiveEpisode ep)
         {
-            if (ep.tickWriter == null) return;
-            ep.tickWriter.Flush();
-            ep.tickWriter.Close();
-            ep.tickWriter = null;
+            ep.trajWriter?.Close();
+            ep.trajWriter = null;
+            ep.modelDebugWriter?.Close();
+            ep.modelDebugWriter = null;
         }
 
         private void FinishRun()
@@ -1285,7 +1314,7 @@ namespace Assets.Scripts.DataRecording
 
         private static readonly string[] CsvColumns =
         {
-            "episode_id", "config_id", "agent_id", "timestamp", "harness_version", "agent_kind", "scene",
+            "episode_id", "config_id", "agent_id", "timestamp", "harness_version", "agent_kind", "condition", "scene",
             "model_checkpoint", "model_sha256", "model_disk_mtime_utc", "random_seed",
             "layout_mode", "sim_speed", "timeout_s", "nudge_enabled",
             "start_pos", "start_offset_m", "start_heading_jitter_deg", "poi_positions", "end_pos",
@@ -1297,7 +1326,7 @@ namespace Assets.Scripts.DataRecording
             "mean_speed_mps", "max_window_speed_mps", "max_step_m", "final_dist_to_goal_m",
             "collision_count", "collision_events", "steps_to_first_collision", "seconds_to_first_collision",
             "stall_seconds", "stall_events", "longest_stall_s", "longest_stall_pos",
-            "nudge_count", "png_filename", "error_message"
+            "nudge_count", "png_filename", "trajectory_file", "error_message"
         };
 
         private class EpisodeRecord
@@ -1338,6 +1367,7 @@ namespace Assets.Scripts.DataRecording
             public float stallSeconds;
             public int nudgeCount;
             public string png = "";
+            public string trajectoryFile = "";
             public string error;
         }
 
@@ -1379,6 +1409,7 @@ namespace Assets.Scripts.DataRecording
                 DateTime.Now.ToString("o", CultureInfo.InvariantCulture),
                 HarnessVersion,
                 agentKind.ToString(),
+                ConditionName(),
                 UnityEngine.SceneManagement.SceneManager.GetActiveScene().name,
                 ModelName(),
                 modelSha256,
@@ -1424,6 +1455,7 @@ namespace Assets.Scripts.DataRecording
                 r.longestStallPos.HasValue ? FormatVector(r.longestStallPos.Value) : "",
                 imitation ? I(r.nudgeCount) : "",
                 r.png ?? "",
+                r.trajectoryFile ?? "",
                 r.error ?? ""
             };
 
@@ -1440,7 +1472,7 @@ namespace Assets.Scripts.DataRecording
         void OnDestroy()
         {
             RestoreTimeSettings();
-            foreach (ActiveEpisode ep in activeEpisodes) CloseTickWriter(ep);
+            foreach (ActiveEpisode ep in activeEpisodes) CloseTickWriters(ep);
             if (csvWriter != null)
             {
                 csvWriter.Flush();

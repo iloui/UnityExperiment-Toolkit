@@ -1,6 +1,6 @@
 """
-Diagnoses where and why closed-loop agents stall, using the per-tick logs EvalHarness writes
-(ticks_config<C>_agent<A>.csv in an EvalRun folder, needs EvalHarness.logPerTickOutputs = true).
+Diagnoses where and why closed-loop agents stall, using the per-tick logs EvalHarness writes into an EvalRun folder:
+traj_config<C>_agent<A>.csv (always) and modeldebug_config<C>_agent<A>.csv (ImitationAgent, EvalHarness.logModelDebugTicks).
 
 For every agent it finds the stall (the first moment after which the agent never again moves
 more than --stall_move_m within --stall_window_s), then prints what the model was outputting there
@@ -23,15 +23,29 @@ import zarr
 TICK_DT = 0.1  # ZarrDataContract.SamplingIntervalSeconds
 
 
-def load_ticks(path):
+def load_csv_columns(path):
     with open(path) as f:
         header = f.readline().strip().split(";")
-        # Empty cells (model columns before the first model call; all model/blocked columns for ShortestPath) -> NaN.
+        # Empty cells (model columns before the first model call) -> NaN.
         rows = [[float(c) if c else np.nan for c in ln.strip().split(";")] for ln in f if ln.strip()]
     if not rows:
         return None
     arr = np.array(rows)
     return {name: arr[:, i] for i, name in enumerate(header)}
+
+
+def load_ticks(traj_path):
+    """Trajectory columns, plus the model-debug columns (goal_*, blocked, raw_*, applied_*) when that file exists.
+    Both files get one row per tick with the same t, so they are joined row by row."""
+    tk = load_csv_columns(traj_path)
+    debug_path = os.path.join(os.path.dirname(traj_path), "modeldebug_" + os.path.basename(traj_path)[len("traj_"):])
+    if tk is not None and os.path.exists(debug_path):
+        md = load_csv_columns(debug_path)
+        if md is not None:
+            n = min(len(tk["t"]), len(md["t"]))  # a run stopped mid-episode can leave one file a row ahead
+            tk = {k: v[:n] for k, v in tk.items()}
+            tk.update({k: v[:n] for k, v in md.items() if k != "t"})
+    return tk
 
 
 def load_humans(recordings_dir):
@@ -70,16 +84,18 @@ def describe_agent(name, tk, humans, args):
         return None
     sl = slice(i0, None)
     pos = xz[i0]
-    bearing = np.degrees(np.arctan2(tk["goal_x"][sl], tk["goal_z"][sl]))  # 0 = goal straight ahead
     print(f"\n[{name}] stalls at x={pos[0]:.2f}, z={pos[1]:.2f}  (tick {i0}/{len(t)}, t={t[i0] - t[0]:.1f}s into the episode, "
-          f"{(len(t) - i0) * TICK_DT:.0f}s spent stalled)")
-    print(f"  goal: {tk['goal_dist_m'][i0]:.2f} m away, bearing {bearing.mean():+.0f} deg from heading (mean while stalled), pois_reached={int(tk['pois_reached'][i0])}")
+          f"{(len(t) - i0) * TICK_DT:.0f}s spent stalled), pois_reached={int(tk['pois_reached'][i0])}")
+    if "raw_fwd" not in tk:
+        print("  (no modeldebug_*.csv for this agent - model outputs not available)")
+        return pos
+    bearing = np.degrees(np.arctan2(tk["goal_x"][sl], tk["goal_z"][sl]))  # 0 = goal straight ahead
+    print(f"  goal: {tk['goal_dist_m'][i0]:.2f} m away, bearing {bearing.mean():+.0f} deg from heading (mean while stalled)")
     print(f"  model raw forward  : mean {np.nanmean(tk['raw_fwd'][sl]):+.3f} m/s  (min {np.nanmin(tk['raw_fwd'][sl]):+.3f}, max {np.nanmax(tk['raw_fwd'][sl]):+.3f})   <- negative/near 0 = model chose to stop")
     print(f"  applied forward    : mean {np.nanmean(tk['applied_fwd_mps'][sl]):.3f} m/s")
     print(f"  raw yaw (deg/samp) : mean {np.nanmean(tk['raw_yaw_deg_per_sample'][sl]):+.2f}, std {np.nanstd(tk['raw_yaw_deg_per_sample'][sl]):.2f}  <- large std/sign flips = oscillation")
     print(f"  wall-blocked ticks : {100 * np.nanmean(tk['blocked'][sl]):.0f}%  <- ~100% = pushing into a wall; ~0% = stationary by choice")
-    speed = np.linalg.norm(np.diff(xz[sl], axis=0), axis=1) / TICK_DT
-    print(f"  actual speed       : mean {speed.mean():.3f} m/s" if len(speed) else "  actual speed: n/a")
+    print(f"  actual speed       : mean {tk['speed_mps'][sl].mean():.3f} m/s")
 
     # what did humans do near this spot?
     fw, yw, n_frames, n_eps = [], [], 0, 0
@@ -161,9 +177,9 @@ def main():
     humans = load_humans(args.recordings)
     print(f"Loaded {len(humans)} human episodes.")
     agents, stalls = [], []
-    for p in sorted(glob.glob(os.path.join(args.run_dir, "ticks_*.csv"))):
+    for p in sorted(glob.glob(os.path.join(args.run_dir, "traj_*.csv"))):
         tk = load_ticks(p)
-        name = os.path.basename(p)[len("ticks_"):-len(".csv")]
+        name = os.path.basename(p)[len("traj_"):-len(".csv")]
         if tk is None:
             print(f"\n[{name}] empty tick log.")
             continue
@@ -172,7 +188,7 @@ def main():
         if s is not None:
             stalls.append(s)
     if not agents:
-        print("\nNo ticks_*.csv found - rerun the harness with logPerTickOutputs enabled. Drawing the human overlay only.")
+        print("\nNo traj_*.csv found (EvalRun folder from before harness_version 6?). Drawing the human overlay only.")
 
     out = args.out or os.path.join(args.run_dir, "stall_map.svg")
     write_svg(out, humans, agents, markers_from_episodes_csv(args.run_dir), stalls)

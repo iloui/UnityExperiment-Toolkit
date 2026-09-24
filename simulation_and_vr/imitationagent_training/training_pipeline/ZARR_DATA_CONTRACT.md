@@ -1,4 +1,4 @@
-# Episode data contract (`zarr-v2`)
+# Episode data contract (`zarr-v3`)
 
 The synthetic bot, human participants and the ImitationAgent all share one recording format. It is defined twice, and the two copies must match:
 
@@ -39,7 +39,7 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
 | `depth` | float32 | (T, 64, 64) | distance along each pixel's ray to the `Architecture_Obstacle` layer, divided by `max_ray_distance` (50 m); 1.0 = no hit |
 | `goal` | float32 | (T, 3) | unit direction from the camera to the current target (POI, then end), in the camera frame (x right, y up, z forward) |
 | `goal_distance` | float32 | (T,) | Euclidean distance in metres from the camera to the current target. **Mandatory.** Training turns it into proximity = 1 / (1 + d) |
-| `pose` | float32 | (T, 3) | camera world position (Unity metres, y up) |
+| `pose` | float32 | (T, 5) | camera world position x, y, z (Unity metres, y up), heading (camera yaw, degrees in [0, 360), clockwise from above, 0 = +z) and pitch (degrees, + = looking down) |
 | `action_vel` | float32 | (T, 3) | camera velocity between sample *i*-1 and *i*, in the camera frame, m/s (z = forward) |
 | `action_rot` | float32 | (T, 3) | (yaw, pitch, 0) change between sample *i*-1 and *i*, degrees per sample. Row 0 is meaningless |
 | `timestamp` | float64 | (T,) | seconds since the start of recording |
@@ -56,7 +56,7 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
 
 ```json
 {
-  "schema_version": "zarr-v2",
+  "schema_version": "zarr-v3",
   "recorder_version": "participant_recorder_v2",
   "episode_id": "episode_20260924_141503_120",
 
@@ -94,7 +94,7 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
     { "name": "depth",         "shape": [0, 64, 64],    "dtype": "float32" },
     { "name": "goal",          "shape": [0, 3],         "dtype": "float32" },
     { "name": "goal_distance", "shape": [0],            "dtype": "float32" },
-    { "name": "pose",          "shape": [0, 3],         "dtype": "float32" },
+    { "name": "pose",          "shape": [0, 5],         "dtype": "float32" },
     { "name": "action_vel",    "shape": [0, 3],         "dtype": "float32" },
     { "name": "action_rot",    "shape": [0, 3],         "dtype": "float32" },
     { "name": "timestamp",     "shape": [0],            "dtype": "float64" }
@@ -125,12 +125,20 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
 
 `ingest_to_zarr.convert_episode` and `load_episodes` (both training scripts) refuse an episode, with a `ValueError` naming every problem, when:
 
-1. `schema_version` is not `zarr-v2`;
+1. `schema_version` is not `zarr-v3`;
 2. any field in section 3 is missing or has the wrong JSON type;
 3. `recorder_version`, `episode_id`, `scene_name`, `layout_typology`, `participant_id`, `session_id` or `input_mode` is empty, or `participant_id` is `"unknown"`;
 4. `source` is not `"human"` or `"synthetic"`, `repetition_index` < 0, or `frame_count` ≤ 0;
 5. `task` is not `{start: {x,y,z}, pois: [{x,y,z}, ...], end: {x,y,z}}`;
 6. `camera_fov_deg` ≠ 60, `camera_height_m` is outside 1.5 ± 0.03 m, `sampling_interval_s` ≠ 0.1, the image is not 64 × 64, or `temporal_window_size` ≠ 1;
-7. `arrays` does not list all eight arrays.
+7. `arrays` does not list all eight arrays, or lists one with another shape or dtype than section 2.
 
 Ingestion also fails if any `.bin` file (including `goal_distance.bin`) is missing, or if its size does not equal `frame_count` × the per-sample record size. It then removes the partly written `dataset.zarr`.
+
+## 5. Unified trajectory (evaluation)
+
+Every evaluation source (ImitationAgent under conditions A/B/C, the ShortestPath baseline, held-out humans) is compared as one table, `data_contract.TRAJECTORY_COLUMNS` = `ZarrDataContract.Trajectory.Columns`:
+
+`t, x, y, z, heading_deg, pitch_deg, speed_mps, yaw_rate_deg_s, phase, pois_reached`
+
+One row per 0.1 s of sim time; x, y, z, heading and pitch are the eye/camera pose as in `pose`; `phase` is 0 while walking to a POI and 1 while walking to the end. `EvalHarness` writes it per episode as `traj_config<C>_agent<A>.csv` (`;`-separated), and the imitation model's per-tick outputs go to the optional `modeldebug_config<C>_agent<A>.csv`. `eval_tools/trajectories.py` loads eval runs (`load_eval_run`) and recorded episodes (`load_human_episode`, `load_recordings`) into the same DataFrame. It resamples every source onto the exact 0.1 s grid and recomputes speed and yaw rate from the resampled pose, so one definition applies to all of them.

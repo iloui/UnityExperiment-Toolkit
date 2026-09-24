@@ -9,7 +9,7 @@ namespace Assets.Scripts.DataRecording
     /// </summary>
     public static class ZarrDataContract
     {
-        public const string SchemaVersion = "zarr-v2";
+        public const string SchemaVersion = "zarr-v3";
         public const string ManifestFileName = "manifest.json";
 
         public const int ImageWidth = 64;
@@ -87,6 +87,36 @@ namespace Assets.Scripts.DataRecording
             public const int OutputSize = 1 + YawClassCount + 1;
         }
 
+        /// <summary>
+        /// Columns of the 'pose' array (data_contract.POSE_COLUMNS): camera world position, heading (eulerAngles.y, degrees in
+        /// [0, 360), clockwise from above, 0 = +z) and pitch (eulerAngles.x wrapped to (-180, 180], + = looking down).
+        /// </summary>
+        public static readonly string[] PoseColumns = { "x", "y", "z", "heading_deg", "pitch_deg" };
+
+        /// <summary>Heading and pitch of a camera/eye transform in the 'pose' and trajectory convention.</summary>
+        public static void HeadingPitch(Transform eye, out float headingDeg, out float pitchDeg)
+        {
+            Vector3 euler = eye.eulerAngles;
+            headingDeg = euler.y;
+            pitchDeg = euler.x > 180f ? euler.x - 360f : euler.x;
+        }
+
+        /// <summary>
+        /// The unified trajectory every evaluation source is compared in (data_contract.TRAJECTORY_COLUMNS; EvalHarness writes it
+        /// as traj_*.csv, eval_tools/trajectories.py derives it for recorded episodes). One row per SamplingIntervalSeconds of
+        /// sim time, t = 0 at the first row. x, y, z = eye position; heading/pitch as in PoseColumns; speed_mps = horizontal
+        /// distance since the previous row / dt; yaw_rate_deg_s = wrapped heading change since the previous row / dt (both 0 in
+        /// the first row); phase 0 = walking to a POI, 1 = walking to the end.
+        /// </summary>
+        public static class Trajectory
+        {
+            public static readonly string[] Columns =
+                { "t", "x", "y", "z", "heading_deg", "pitch_deg", "speed_mps", "yaw_rate_deg_s", "phase", "pois_reached" };
+            public const string CsvDelimiter = ";";
+            public const int PhaseToPoi = 0;
+            public const int PhaseToEnd = 1;
+        }
+
         public static readonly string[] ArrayNames = new[]
         {
             "rgb",
@@ -117,7 +147,7 @@ namespace Assets.Scripts.DataRecording
         /// Written to every manifest as recorder_version. Bump it whenever ParticipantRecorder changes what or how it
         /// records, so episodes from different recorder behaviour can be told apart without the scene.
         /// </summary>
-        public const string RecorderVersion = "participant_recorder_v2";
+        public const string RecorderVersion = "participant_recorder_v3";
 
         /// <summary>Values of the manifest's 'source' field (data_contract.EPISODE_SOURCES).</summary>
         public static class EpisodeSources
