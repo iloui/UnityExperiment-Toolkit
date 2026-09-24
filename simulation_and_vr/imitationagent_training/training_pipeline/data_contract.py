@@ -126,6 +126,7 @@ MANIFEST_FIELDS = {
     "repetition_index": int,
     "input_mode": str,
     "task": dict,
+    "start_jitter_heading_deg": _NUMBER,
     "frame_count": int,
     "start_time": _NUMBER,
     "end_time": _NUMBER,
@@ -165,6 +166,7 @@ def make_episode_manifest(
     camera_height_m: float = CAMERA_HEIGHT_M,
     input_mode: str = INPUT_MODE_DESKTOP,
     recorder_version: str = "python",
+    start_jitter_heading_deg: float = 0.0,
 ) -> Dict[str, Any]:
     """Build an episode manifest in exactly the layout ParticipantRecorder writes (for synthetic test episodes).
     task = {"start": {x,y,z}, "pois": [{x,y,z}, ...], "end": {x,y,z}} in Unity world coordinates."""
@@ -181,6 +183,7 @@ def make_episode_manifest(
         "repetition_index": repetition_index,
         "input_mode": input_mode,
         "task": task,
+        "start_jitter_heading_deg": start_jitter_heading_deg,
         "frame_count": frame_count,
         "start_time": start_time,
         "end_time": end_time,

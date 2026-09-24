@@ -24,6 +24,7 @@ import copy
 import json
 import os
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,7 @@ from train_onAllRecordings_2DCNNModel import (SimpleImitation2DCNNModel, SingleE
                                               load_episodes)
 
 HUMAN = SOURCE_HUMAN
+DRY_RUN_PREFIX = "dryrun_"  # ParticipantSession's dry-run IDs; never trained on
 
 
 # --- 1. Label discretisation (mirrored by ImitationAgent.DecodeDiscreteYaw in Unity) ---
@@ -100,6 +102,56 @@ def episode_source(manifest: dict) -> str:
     """'human' for human recordings (manifest source), else the synthetic participant id
     (synthetic_rrw_v3 = bot with stop behaviours, synthetic_dagger = DaggerHarness)."""
     return HUMAN if manifest["source"] == SOURCE_HUMAN else manifest["participant_id"]
+
+
+def load_splits(path: str, condition: str):
+    """(held-out participant ids, human participant ids allowed for this condition or None = every non-held-out human).
+
+    splits.json: {"held_out": ["P09", ...], "conditions": {"B": ["P01", "P02"], ...}}. A condition without an entry
+    defaults to: A = no humans, C = every human not held out; B must be listed."""
+    with open(path) as f:
+        splits = json.load(f)
+    held_out = set(splits.get("held_out", []))
+    listed = splits.get("conditions", {})
+    if condition in listed:
+        allowed = set(listed[condition])
+        leaked = sorted(allowed & held_out)
+        if leaked:
+            raise ValueError(f"{path}: condition {condition} lists held-out participants {leaked}")
+    elif condition == "A":
+        allowed = set()
+    elif condition == "C":
+        allowed = None
+    else:
+        raise ValueError(f"{path}: no participant list for condition {condition}")
+    return held_out, allowed
+
+
+def select_episodes(episodes, sources, held_out: set, allowed_humans, condition: str):
+    """-> (by_source {source: [episode_dir]}, participants {participant_id: episode count}, skipped {"who (why)": count}).
+    sources may contain 'all' = human + every synthetic* participant id in the manifests."""
+    wanted = set(sources)
+    if "all" in wanted:
+        wanted = {HUMAN} | {episode_source(m) for _, m in episodes if episode_source(m).startswith("synthetic")}
+    by_source, participants, skipped = {}, {}, {}
+    for ep, manifest in episodes:
+        src, pid = episode_source(manifest), manifest["participant_id"]
+        why = None
+        if src not in wanted:
+            why = "not in --sources"
+        elif src == HUMAN and pid.startswith(DRY_RUN_PREFIX):
+            why = "dry run"
+        elif src == HUMAN and pid in held_out:
+            why = "held out"
+        elif src == HUMAN and allowed_humans is not None and pid not in allowed_humans:
+            why = f"not in condition {condition}"
+        if why:
+            key = f"{pid if src == HUMAN else src} ({why})"
+            skipped[key] = skipped.get(key, 0) + 1
+            continue
+        by_source.setdefault(src, []).append(ep)
+        participants[pid] = participants.get(pid, 0) + 1
+    return by_source, participants, skipped
 
 
 def split_per_source(episodes_by_source: dict, val_ratio: float):
@@ -241,7 +293,13 @@ def main():
     parser.add_argument("--output_onnx", type=str, default="../imitation_agent_model/ImitationAgentModel_discrete.onnx")
     parser.add_argument("--sources", type=str, nargs="+", default=[HUMAN, "synthetic_rrw_v3"],
                         help="Episode sources to train on: 'human' (manifest source) and/or synthetic participant ids "
-                             "(synthetic_rrw_v3 = bot with stop behaviours, synthetic_dagger).")
+                             "(synthetic_rrw_v3 = bot with stop behaviours, synthetic_dagger), or 'all' = human + every "
+                             "synthetic* participant id found in the manifests.")
+    parser.add_argument("--splits", type=str, default=None,
+                        help="splits.json: its held-out participants are never trained on (see load_splits).")
+    parser.add_argument("--condition", type=str, default="C", choices=["A", "B", "C"],
+                        help="With --splits: which human participants to train on (A none, B listed, C all not held out).")
+    parser.add_argument("--reason", type=str, default="manual", help="Why this run was started; written to the sidecar.")
     parser.add_argument("--human_share", type=float, default=0.5, help="Expected share of human frames per batch.")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=64)
@@ -268,21 +326,26 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    print(f"[RUN] reason: {args.reason}")
+    held_out, allowed_humans = set(), None
+    if args.splits:
+        held_out, allowed_humans = load_splits(args.splits, args.condition)
+        print(f"[SPLITS] {args.splits}, condition {args.condition}: held out {sorted(held_out)}, humans "
+              f"{'all not held out' if allowed_humans is None else sorted(allowed_humans)}")
+
     recordings_path = Path(args.recordings_dir)
-    by_source: dict = {}
-    skipped: dict = {}
-    for ep, manifest in load_episodes(recordings_path):  # raises on any episode that violates the data contract
-        src = episode_source(manifest)
-        (by_source if src in args.sources else skipped).setdefault(src, []).append(ep)
-    print("[DATASET] using: " + ", ".join(f"{k}={len(v)}" for k, v in sorted(by_source.items())))
+    episodes = load_episodes(recordings_path)  # raises on any episode that violates the data contract
+    by_source, participants, skipped = select_episodes(episodes, args.sources, held_out, allowed_humans, args.condition)
+    print("[DATASET] episodes per source: " + ", ".join(f"{k}={len(v)}" for k, v in sorted(by_source.items())))
+    print("[DATASET] episodes per participant: " + ", ".join(f"{k}={v}" for k, v in sorted(participants.items())))
     if skipped:
-        print("[DATASET] skipped (not in --sources): " + ", ".join(f"{k}={len(v)}" for k, v in sorted(skipped.items())))
-    missing = [s for s in args.sources if s not in by_source]
+        print("[DATASET] skipped: " + ", ".join(f"{k}={v}" for k, v in sorted(skipped.items())))
+    missing = [s for s in args.sources if s != "all" and s not in by_source]
     if missing:
         print(f"[DATASET] WARNING: no episodes for {missing}")
     if not by_source:
         print(f"[ERROR] No episodes for {args.sources} in '{args.recordings_dir}'")
-        return
+        sys.exit(1)
 
     train_eps, val_eps = split_per_source(by_source, args.val_ratio)
     print(f"[DATASET] episodes train={len(train_eps)} val={len(val_eps)} (split per source)")
@@ -344,7 +407,9 @@ def main():
         json.dump({"head": "discrete", "output_layout": "walk_logit, yaw_logit_0..6, pitch_deg_per_sample",
                    "yaw_bin_edges_deg": YAW_BIN_EDGES_DEG, "yaw_bin_centers_deg": YAW_BIN_CENTERS_DEG,
                    "walk_threshold_mps": WALK_THRESHOLD_MPS, "sources": sorted(by_source),
-                   "episodes": {k: len(v) for k, v in by_source.items()}, "human_share": args.human_share,
+                   "episodes": {k: len(v) for k, v in by_source.items()}, "participants": participants,
+                   "reason": args.reason, "splits": args.splits, "condition": args.condition if args.splits else None,
+                   "held_out_participants": sorted(held_out), "human_share": args.human_share,
                    "best_epoch": best[1], "args": vars(args)}, f, indent=2)
     print(f"[EXPORT] Contract sidecar written to {sidecar}")
 

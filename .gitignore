@@ -44,6 +44,8 @@ simulation_and_vr/unity_files/data_abm_batch/
 
 # Python embedded environment
 simulation_and_vr/imitationagent_training/python_embedded/
+simulation_and_vr/imitationagent_training/retrain.lock
+simulation_and_vr/imitationagent_training/retrain_logs/
 
 # Training outputs (user-generated)
 simulation_and_vr/imitationagent_training/vr_recordings/

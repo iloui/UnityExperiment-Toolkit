@@ -117,7 +117,7 @@ namespace Assets.Scripts.DataRecording
         /// Written to every manifest as recorder_version. Bump it whenever ParticipantRecorder changes what or how it
         /// records, so episodes from different recorder behaviour can be told apart without the scene.
         /// </summary>
-        public const string RecorderVersion = "participant_recorder_v1";
+        public const string RecorderVersion = "participant_recorder_v2";
 
         /// <summary>Values of the manifest's 'source' field (data_contract.EPISODE_SOURCES).</summary>
         public static class EpisodeSources
@@ -152,6 +152,11 @@ namespace Assets.Scripts.DataRecording
             public string input_mode = InputModeDesktop;
 
             public TaskPositions task;
+            /// <summary>
+            /// Random offset (degrees, + = clockwise from above) added to the start heading, which otherwise faces the first
+            /// target. Set by the synthetic harnesses; 0 for humans, who start with the scene's FPSController heading.
+            /// </summary>
+            public float start_jitter_heading_deg;
 
             public int frame_count;
             public float start_time;

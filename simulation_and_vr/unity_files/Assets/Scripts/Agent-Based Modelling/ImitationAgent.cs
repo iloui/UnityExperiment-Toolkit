@@ -652,7 +652,7 @@ namespace Agent_Based_Modelling
     using Assets.Scripts.DataRecording;
     using Debug = UnityEngine.Debug;
 
-    public class ImitationAgent : MonoBehaviour
+    public class ImitationAgent : MonoBehaviour, IEvalAgent
     {
         [Header("Linked Framework Components")]
         [Tooltip("Defines this scene's start/POI(s)/end locations and selection rules. The same " +
@@ -690,8 +690,16 @@ namespace Agent_Based_Modelling
         [HideInInspector] public bool HasCollided = false;
         [HideInInspector] public float FirstCollisionRealtime = 0f;
         private bool wasCollidingLastFrame = false;
-        /// <summary>Optional per-inference-tick diagnostic sink (one CSV row per model call: raw and applied outputs, pose, goal). Set by EvalHarness; null = no logging.</summary>
-        [HideInInspector] public System.Action<string> TickLogSink;
+        // Latest model output, sampled by EvalHarness's per-tick CSV. NaN until the first model call.
+        // Discrete head: LastRawForward = P(walk), LastRawYawPerSample = decoded deg/sample.
+        public float LastRawForward { get; private set; } = float.NaN;
+        public float LastRawYawPerSample { get; private set; } = float.NaN;
+        public float LastRawPitch { get; private set; } = float.NaN;
+        /// <summary>Commanded forward speed (m/s) from the latest model call; for the discrete head, the walk key's target speed.</summary>
+        public float LastCommandedForwardMps { get; private set; } = float.NaN;
+        public float LastCommandedYawDegPerSecond { get; private set; } = float.NaN;
+        /// <summary>The body pushed sideways into a wall in the last FixedUpdate.</summary>
+        public bool IsWallBlocked => wasCollidingLastFrame;
         /// <summary>
         /// Optional hook set by DaggerHarness: receives the policy's (forward m/s, yaw deg/s, pitch deg/s) and returns
         /// the rates actually executed this frame (e.g. the NavMesh expert's while it is rescuing the agent).
@@ -703,6 +711,13 @@ namespace Agent_Based_Modelling
         public Vector3 CurrentGoalPosition => (poiTracker != null && poiTracker.CurrentTarget != null) ? poiTracker.CurrentTarget.position : transform.position;
         /// <summary>How many POIs have been fulfilled so far, for eval-harness partial-credit logging.</summary>
         public int NeedsFulfilledCount => poiTracker != null ? poiTracker.NeedsFulfilled : 0;
+        /// <summary>The POIs this agent must visit, in visiting order (empty until Start() has run), for the eval harness's optimal-path computation.</summary>
+        public IReadOnlyList<Transform> PlannedPois => poiTracker != null ? poiTracker.PlannedPois : null;
+        /// <summary>The end marker this agent finishes at (null until Start() has run).</summary>
+        public Transform PlannedEnd => poiTracker != null ? poiTracker.PlannedEnd : null;
+        List<Vector3> IEvalAgent.Trajectory => trajectory;
+        bool IEvalAgent.DestroyRequest => destroyRequest;
+        Transform IEvalAgent.EyeAnchor => AgentHeadAnchor;
 
         [HideInInspector]
         public int startIndex;
@@ -790,13 +805,15 @@ namespace Agent_Based_Modelling
         private bool isModelLoaded = false;
         private object modelLock = new object();
 
-        [Header("Automated Python Lifecycle Pipeline")]
-        [Tooltip("The path to the newly exported model that Python writes out.")]
+        [Header("Model hot-reload")]
+        [Tooltip("ONNX file watched for a newer write time; left empty, RetrainPipeline's ImitationAgent_discrete_latest.onnx. " +
+                 "When it changes (a finished retrain), the agent swaps to it. Editor only (it is loaded as the re-imported ModelAsset).")]
         public string OutputOnnxModelPath = "";
-
-        private static string lastKnownExportPath = "";
-        private static DateTime lastLoadedModelWriteTime = DateTime.MinValue;
-        private static bool pendingModelReload = false;
+        [Tooltip("Off: the agent keeps BaselineModelAsset for its whole life. EvalHarness turns this off so an eval run never " +
+                 "switches models mid-run.")]
+        public bool hotReloadModel = true;
+        private const float HotReloadCheckIntervalSeconds = 1f;
+        private float nextHotReloadCheck;
         private DateTime lastModelWriteTime;
 
         // Trajectory Mechanics
@@ -821,75 +838,6 @@ namespace Agent_Based_Modelling
         [Tooltip("Log neural network outputs every N frames to avoid flooding the console.")]
         public int DiagnosticLogInterval = 60;
         private bool hasLoggedModelFallbackWarning = false;
-
-        public static void NotifyRecordingCompleted(string exportedModelPath)
-        {
-            if (string.IsNullOrEmpty(exportedModelPath)) return;
-            lastKnownExportPath = exportedModelPath;
-            pendingModelReload = true;
-            Debug.Log($"[Pipeline Debug] New model export notification received at path: {exportedModelPath}");
-        }
-
-        public static bool TryLoadNewestModelOnce()
-        {
-            if (!pendingModelReload || string.IsNullOrEmpty(lastKnownExportPath) || !File.Exists(lastKnownExportPath))
-            {
-                return false;
-            }
-
-            try
-            {
-                DateTime currentWriteTime = File.GetLastWriteTime(lastKnownExportPath);
-                if (currentWriteTime <= lastLoadedModelWriteTime)
-                {
-                    pendingModelReload = false;
-                    return false;
-                }
-
-                lastLoadedModelWriteTime = currentWriteTime;
-                pendingModelReload = false;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[Model Swap] Failed to inspect exported model: {ex.Message}");
-                pendingModelReload = false;
-                return false;
-            }
-        }
-
-        public bool ApplyLatestExportedModel()
-        {
-            if (string.IsNullOrEmpty(lastKnownExportPath) || !File.Exists(lastKnownExportPath))
-            {
-                Debug.LogWarning($"[Hot-Swap] Attempted hot-swap, but invalid file path: '{lastKnownExportPath}'");
-                return false;
-            }
-
-            try
-            {
-                lock (modelLock)
-                {
-                    if (inferenceEngine != null)
-                    {
-                        inferenceEngine.Dispose();
-                    }
-
-                    runtimeModel = ModelLoader.Load(lastKnownExportPath);
-                    inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute);
-                    isModelLoaded = true;
-                    lastModelWriteTime = File.GetLastWriteTime(lastKnownExportPath);
-                    hasLoggedModelFallbackWarning = false;
-                    Debug.Log($"[HOT-SWAP SUCCESS] Model hot-swap completed successfully from path: {lastKnownExportPath}");
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[Hot-Swap Failure] Loading failed: {ex.Message}\n{ex.StackTrace}");
-                return false;
-            }
-        }
 
         void Start()
         {
@@ -974,7 +922,7 @@ namespace Agent_Based_Modelling
 
             if (string.IsNullOrEmpty(OutputOnnxModelPath))
             {
-                OutputOnnxModelPath = Path.Combine(Application.dataPath, "ImitationModel", "ImitationAgentModel.onnx");
+                OutputOnnxModelPath = RetrainPipeline.LatestModelPath;
             }
 
             InitializeHardwareReplication();
@@ -1087,6 +1035,12 @@ namespace Agent_Based_Modelling
 
         void Update()
         {
+            if (hotReloadModel && Time.unscaledTime >= nextHotReloadCheck)
+            {
+                nextHotReloadCheck = Time.unscaledTime + HotReloadCheckIntervalSeconds;
+                CheckForPendingModelHotSwaps();
+            }
+
             trajectory.Add(transform.position);
             if (trajectory.Count > 1) DisplaceDeadlocks();
 
@@ -1307,20 +1261,11 @@ namespace Agent_Based_Modelling
                         networkYawAction     = rawYaw / RecordingSamplingInterval;
                         networkPitchAction   = rawPitch / RecordingSamplingInterval;
 
-                        if (TickLogSink != null)
-                        {
-                            var ci = System.Globalization.CultureInfo.InvariantCulture;
-                            TickLogSink(string.Join(";",
-                                Time.time.ToString("F2", ci),
-                                transform.position.x.ToString("F3", ci), transform.position.z.ToString("F3", ci),
-                                transform.eulerAngles.y.ToString("F1", ci),
-                                localGoalVector3D.x.ToString("F3", ci), localGoalVector3D.y.ToString("F3", ci), localGoalVector3D.z.ToString("F3", ci),
-                                localGoalDistanceMeters.ToString("F2", ci),
-                                outputData[0].ToString("F3", ci), outputData[1].ToString("F2", ci), outputData[2].ToString("F2", ci),
-                                networkForwardAction.ToString("F3", ci), networkYawAction.ToString("F1", ci),
-                                wasCollidingLastFrame ? "1" : "0",
-                                NeedsFulfilledCount.ToString(ci)));
-                        }
+                        LastRawForward = outputData[0];
+                        LastRawYawPerSample = outputData[1];
+                        LastRawPitch = outputData[2];
+                        LastCommandedForwardMps = networkForwardAction;
+                        LastCommandedYawDegPerSecond = networkYawAction;
 
                         // Diagnostic check for Model anomalies (NaN, Inf, or Constant Zeroes)
                         if (float.IsNaN(networkForwardAction) || float.IsNaN(networkYawAction) || float.IsNaN(networkPitchAction))
@@ -1360,21 +1305,11 @@ namespace Agent_Based_Modelling
             networkYawAction = yawPerSample / RecordingSamplingInterval;
             networkPitchAction = rawPitch / RecordingSamplingInterval;
 
-            if (TickLogSink != null)
-            {
-                // Same columns as the regression head: raw_fwd = P(walk), raw_yaw = decoded deg/sample.
-                var ci = System.Globalization.CultureInfo.InvariantCulture;
-                TickLogSink(string.Join(";",
-                    Time.time.ToString("F2", ci),
-                    transform.position.x.ToString("F3", ci), transform.position.z.ToString("F3", ci),
-                    transform.eulerAngles.y.ToString("F1", ci),
-                    localGoalVector3D.x.ToString("F3", ci), localGoalVector3D.y.ToString("F3", ci), localGoalVector3D.z.ToString("F3", ci),
-                    localGoalDistanceMeters.ToString("F2", ci),
-                    pWalk.ToString("F3", ci), yawPerSample.ToString("F2", ci), rawPitch.ToString("F2", ci),
-                    (walkKeyDown ? ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond : 0f).ToString("F3", ci), networkYawAction.ToString("F1", ci),
-                    wasCollidingLastFrame ? "1" : "0",
-                    NeedsFulfilledCount.ToString(ci)));
-            }
+            LastRawForward = pWalk;
+            LastRawYawPerSample = yawPerSample;
+            LastRawPitch = rawPitch;
+            LastCommandedForwardMps = walkKeyDown ? ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond : 0f;
+            LastCommandedYawDegPerSecond = networkYawAction;
 
             if (Time.frameCount % DiagnosticLogInterval == 0)
             {
@@ -1468,36 +1403,45 @@ namespace Agent_Based_Modelling
             wasCollidingLastFrame = blocked;
         }
 
+        /// <summary>
+        /// Swaps to OutputOnnxModelPath once its write time is newer than at Start or the last swap. RetrainPipeline copies a
+        /// finished retrain there and re-imports it on the main thread, so the ModelAsset is current by the time this runs.
+        /// ModelLoader.Load(path) only reads .sentis files, hence the detour through the asset in the Editor.
+        /// </summary>
         private void CheckForPendingModelHotSwaps()
         {
-            if (File.Exists(OutputOnnxModelPath))
+            try
             {
-                try
+                if (!File.Exists(OutputOnnxModelPath)) return;
+                DateTime currentWriteTime = File.GetLastWriteTime(OutputOnnxModelPath);
+                if (currentWriteTime <= lastModelWriteTime) return;
+                lastModelWriteTime = currentWriteTime;
+#if UNITY_EDITOR
+                string assetPath = "Assets" + Path.GetFullPath(OutputOnnxModelPath).Substring(Path.GetFullPath(Application.dataPath).Length).Replace('\\', '/');
+                ModelAsset asset = UnityEditor.AssetDatabase.LoadAssetAtPath<ModelAsset>(assetPath);
+                if (asset == null)
                 {
-                    DateTime currentWriteTime = File.GetLastWriteTime(OutputOnnxModelPath);
-
-                    if (currentWriteTime > lastModelWriteTime)
-                    {
-                        lastModelWriteTime = currentWriteTime;
-
-                        lock (modelLock)
-                        {
-                            if (inferenceEngine != null) inferenceEngine.Dispose();
-
-                            runtimeModel = ModelLoader.Load(OutputOnnxModelPath);
-                            inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute);
-                            isModelLoaded = true;
-                            hasLoggedModelFallbackWarning = false;
-                            
-                            Debug.Log($"[HOT-SWAP SUCCESS] Silent hot-swap completed from path: {OutputOnnxModelPath}");
-                        }
-                    }
+                    Debug.LogError($"[Hot-Swap Failure] '{OutputOnnxModelPath}' changed, but no ModelAsset at '{assetPath}' (must be under Assets/).");
+                    return;
                 }
-                catch (IOException) { }
-                catch (Exception ex)
+                lock (modelLock)
                 {
-                    Debug.LogError($"[Hot-Swap Failure] Loading failed: {ex.Message}");
+                    inferenceEngine?.Dispose();
+                    BaselineModelAsset = asset;
+                    runtimeModel = ModelLoader.Load(asset);
+                    inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute);
+                    isModelLoaded = true;
+                    hasLoggedModelFallbackWarning = false;
                 }
+                Debug.Log($"[HOT-SWAP SUCCESS] {name} now runs {assetPath} (written {currentWriteTime:HH:mm:ss}).");
+#else
+                Debug.LogWarning($"[Hot-Swap] '{OutputOnnxModelPath}' changed, but a player build cannot import ONNX at run time - restart with the new model.");
+#endif
+            }
+            catch (IOException) { }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[Hot-Swap Failure] Loading failed: {ex.Message}");
             }
         }
 

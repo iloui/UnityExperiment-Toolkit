@@ -57,7 +57,7 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
 ```json
 {
   "schema_version": "zarr-v2",
-  "recorder_version": "participant_recorder_v1",
+  "recorder_version": "participant_recorder_v2",
   "episode_id": "episode_20260924_141503_120",
 
   "scene_name": "Comb_Code_482913",
@@ -75,6 +75,7 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
     "pois":  [ { "x": 0.4, "y": 0.28, "z": -5.6 } ],
     "end":   { "x": 12.5, "y": 1.0, "z": 0.0 }
   },
+  "start_jitter_heading_deg": 0.0,
 
   "frame_count": 412,
   "start_time": 3.21,
@@ -113,6 +114,7 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
 | `repetition_index` | the recorder's `repetitionIndex`, which increments after every episode. Harnesses set it to the index of the kept episode within the run |
 | `input_mode` | `"desktop"` (keyboard + mouse), the only mode in use |
 | `task` | world positions, fixed at the start of recording. `start` is the task start marker nearest the mover. `pois` are the POIs in visiting order and `end` is the end marker, both taken from the route `PoiProgressTracker` plans up front, so they are complete even when an episode stops early |
+| `start_jitter_heading_deg` | random offset in degrees added to the start heading, which otherwise faces the first target. Set per episode by `RecordRandomWalksHarness` (`bot.startHeadingJitterDegrees`) and `DaggerHarness`; always 0 for humans |
 | `frame_count` | number of samples written |
 | `start_time`, `end_time` | Unity `Time.time` at start and stop |
 | `camera_height_m` | measured camera height above the NavMesh, taken once at sample 10 (or at stop, for shorter episodes). -1 = could not be measured |

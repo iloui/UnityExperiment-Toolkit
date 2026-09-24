@@ -153,9 +153,9 @@ namespace Assets.Scripts.Editor
                 layoutInfo.seed = internalSeed;
                 layoutInfo.seedCode = finalSeedCode;
                 AgentLinker.SpawnAndWireParticipants(root.transform, settings, layoutData);
-                SceneExporter.ConfigureAndBakeNavMesh(root);
-                // Needs the baked NavMesh: puts the FPSController camera at the contract eye height (ImitationAgent's).
-                RecordingRigTools.ApplyInScene(scene);
+                // Bakes the NavMesh, places Start/POI_0/End + the TaskScript and puts the FPSController on Start at the
+                // contract eye height (the same steps as Tools > Thesis > Prepare Scene).
+                ScenePreparation.Prepare(scene);
 
                 string sceneFileName = $"{topology}_Code_{internalSeed}";
                 var savedPath = SceneExporter.SaveGeneratedScene(scene, sceneFileName);

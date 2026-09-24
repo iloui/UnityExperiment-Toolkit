@@ -12,9 +12,10 @@ namespace Assets.Scripts.Editor
         {
             if (root == null) throw new ArgumentNullException(nameof(root));
 
+            // The task (Start/POI_0/End + TaskScript) and the recorder's task reference are set by ScenePreparation.Prepare,
+            // which also moves the controller onto the Start marker once the NavMesh is baked.
             var controller = SpawnController(root, settings, layoutData.SpawnPosition, layoutData.SpawnRotation);
-            var goal = SpawnGoal(root, layoutData.GoalPosition);
-            WireRecorder(controller, goal, settings);
+            WireRecorder(controller);
         }
 
         private static GameObject SpawnController(Transform root, LayoutGenerationSettings settings, Vector3 spawnPosition, Quaternion spawnRotation)
@@ -37,23 +38,7 @@ namespace Assets.Scripts.Editor
             return controller;
         }
 
-        private static GameObject SpawnGoal(Transform root, Vector3 goalPosition)
-        {
-            var goal = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            goal.name = "Goal_POI";
-            goal.transform.SetParent(root, false);
-            goal.transform.position = goalPosition;
-            goal.transform.localScale = Vector3.one * 0.4f;
-            var collider = goal.GetComponent<Collider>();
-            if (collider != null)
-            {
-                collider.enabled = false;
-            }
-
-            return goal;
-        }
-
-        private static void WireRecorder(GameObject controller, GameObject goal, LayoutGenerationSettings settings)
+        private static void WireRecorder(GameObject controller)
         {
             var recorder = controller.GetComponent<ParticipantRecorder>();
             if (recorder == null)
@@ -87,28 +72,6 @@ namespace Assets.Scripts.Editor
                 camera.gameObject.AddComponent<CanonicalRecordingCamera>();
             }
 
-            // PoiProgressTracker (shared by ParticipantRecorder and ImitationAgent) reads its
-            // start/POI(s)/end configuration from a TaskScript rather than a directly-assigned
-            // target Transform. This generator only ever produces a single goal marker, so that
-            // maps onto a zero-POI task (numberOfNeeds = 0) whose sole "end" is that goal -
-            // PoiProgressTracker treats that as the current target from the very first tick,
-            // exactly matching the previous direct CurrentPOITarget = goal.transform behaviour.
-            var taskScript = controller.GetComponent<TaskScript>();
-            if (taskScript == null)
-            {
-                taskScript = controller.AddComponent<TaskScript>();
-            }
-            taskScript.taskName = "Generated_" + controller.scene.name;
-            taskScript.agentType = "ImitationAgent";
-            taskScript.start = new[] { controller };
-            taskScript.pointsOfInterest = Array.Empty<GameObject>();
-            taskScript.end = new[] { goal };
-            taskScript.numberOfNeeds = 0;
-            taskScript.revisit = false;
-            taskScript.chooseNonDeterministically = false;
-
-            recorder.task = taskScript;
-
             // Set (not OR) the mask to exactly the obstacle layer - both ParticipantRecorder and
             // ImitationAgent now hard-fail unless ArchitectureLayerMask equals exactly
             // LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName), so merging it into
@@ -118,7 +81,6 @@ namespace Assets.Scripts.Editor
             recorder.ArchitectureLayerMask = 1 << obstacleLayer;
 
             UnityEditor.EditorUtility.SetDirty(recorder);
-            UnityEditor.EditorUtility.SetDirty(taskScript);
         }
     }
 }

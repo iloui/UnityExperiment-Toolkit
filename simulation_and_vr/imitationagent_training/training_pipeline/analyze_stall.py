@@ -8,8 +8,8 @@ more than --stall_move_m within --stall_window_s), then prints what the model wa
 the recorded human episodes did within --radius_m of that same spot. It also writes an SVG map
 overlaying all human trajectories (grey), the agents (colored) and the start/POI/end markers.
 
-Usage (needs numpy + zarr; from imitationagent_training/):
-    PYTHONPATH=python_embedded /usr/bin/python3 training_pipeline/analyze_stall.py \\
+Usage (needs numpy + zarr, from python_embedded - see training_pipeline/README.md; from imitationagent_training/):
+    PYTHONPATH=python_embedded /opt/homebrew/bin/python3 training_pipeline/analyze_stall.py \\
         ../unity_files/SimulationLogs/EvalRun_<...> --recordings zarr_recordings
 """
 
@@ -26,7 +26,8 @@ TICK_DT = 0.1  # ZarrDataContract.SamplingIntervalSeconds
 def load_ticks(path):
     with open(path) as f:
         header = f.readline().strip().split(";")
-        rows = [list(map(float, ln.strip().split(";"))) for ln in f if ln.strip()]
+        # Empty cells (model columns before the first model call; all model/blocked columns for ShortestPath) -> NaN.
+        rows = [[float(c) if c else np.nan for c in ln.strip().split(";")] for ln in f if ln.strip()]
     if not rows:
         return None
     arr = np.array(rows)
@@ -73,10 +74,10 @@ def describe_agent(name, tk, humans, args):
     print(f"\n[{name}] stalls at x={pos[0]:.2f}, z={pos[1]:.2f}  (tick {i0}/{len(t)}, t={t[i0] - t[0]:.1f}s into the episode, "
           f"{(len(t) - i0) * TICK_DT:.0f}s spent stalled)")
     print(f"  goal: {tk['goal_dist_m'][i0]:.2f} m away, bearing {bearing.mean():+.0f} deg from heading (mean while stalled), pois_reached={int(tk['pois_reached'][i0])}")
-    print(f"  model raw forward  : mean {tk['raw_fwd'][sl].mean():+.3f} m/s  (min {tk['raw_fwd'][sl].min():+.3f}, max {tk['raw_fwd'][sl].max():+.3f})   <- negative/near 0 = model chose to stop")
-    print(f"  applied forward    : mean {tk['applied_fwd_mps'][sl].mean():.3f} m/s")
-    print(f"  raw yaw (deg/samp) : mean {tk['raw_yaw_deg_per_sample'][sl].mean():+.2f}, std {tk['raw_yaw_deg_per_sample'][sl].std():.2f}  <- large std/sign flips = oscillation")
-    print(f"  wall-blocked ticks : {100 * tk['blocked'][sl].mean():.0f}%  <- ~100% = pushing into a wall; ~0% = stationary by choice")
+    print(f"  model raw forward  : mean {np.nanmean(tk['raw_fwd'][sl]):+.3f} m/s  (min {np.nanmin(tk['raw_fwd'][sl]):+.3f}, max {np.nanmax(tk['raw_fwd'][sl]):+.3f})   <- negative/near 0 = model chose to stop")
+    print(f"  applied forward    : mean {np.nanmean(tk['applied_fwd_mps'][sl]):.3f} m/s")
+    print(f"  raw yaw (deg/samp) : mean {np.nanmean(tk['raw_yaw_deg_per_sample'][sl]):+.2f}, std {np.nanstd(tk['raw_yaw_deg_per_sample'][sl]):.2f}  <- large std/sign flips = oscillation")
+    print(f"  wall-blocked ticks : {100 * np.nanmean(tk['blocked'][sl]):.0f}%  <- ~100% = pushing into a wall; ~0% = stationary by choice")
     speed = np.linalg.norm(np.diff(xz[sl], axis=0), axis=1) / TICK_DT
     print(f"  actual speed       : mean {speed.mean():.3f} m/s" if len(speed) else "  actual speed: n/a")
 

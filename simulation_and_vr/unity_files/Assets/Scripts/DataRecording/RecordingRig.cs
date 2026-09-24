@@ -77,7 +77,7 @@ namespace Assets.Scripts.DataRecording
         /// <summary>
         /// Finds the marker look (mesh, material, scale, shadows, height) humans see in this scene: the first TaskScript
         /// whose end marker is rendered. start is null when the scene's start is not a visible marker (e.g. the
-        /// FPSController itself, as in generated layouts) - then the synthetic runs show no start marker either.
+        /// an invisible empty marker, as in generated layouts) - then the synthetic runs show no start marker either.
         /// </summary>
         public static void FindSceneMarkerTemplates(out MarkerTemplate start, out MarkerTemplate poi, out MarkerTemplate end)
         {
@@ -161,17 +161,15 @@ namespace Assets.Scripts.DataRecording
 
         /// <summary>
         /// Stops every ParticipantRecorder already in the scene (e.g. a layout scene's human FPSController, which has
-        /// AutoStartForTesting on) from recording or launching the training pipeline during a harness run. Call from Awake,
-        /// which runs before any recorder's Start.
+        /// AutoStartForTesting on) from recording during a harness run. Call from Awake, which runs before any recorder's Start.
         /// </summary>
         public static void DisableSceneRecorders(string harnessName)
         {
             foreach (ParticipantRecorder recorder in Object.FindObjectsOfType<ParticipantRecorder>(true))
             {
-                if (!recorder.AutoStartForTesting && recorder.suppressPythonPipeline) continue;
+                if (!recorder.AutoStartForTesting) continue;
                 recorder.AutoStartForTesting = false;
-                recorder.suppressPythonPipeline = true;
-                Debug.Log($"[{harnessName}] Disabled auto-recording/training on the scene's ParticipantRecorder '{recorder.name}' for this run.");
+                Debug.Log($"[{harnessName}] Disabled auto-recording on the scene's ParticipantRecorder '{recorder.name}' for this run.");
             }
         }
     }

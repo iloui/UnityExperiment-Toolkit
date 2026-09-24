@@ -302,7 +302,9 @@ namespace Assets.Scripts.DataRecording
                 yield return null;
             }
             // ImitationAgent.Start() has just spawned it facing its first target - randomise that before the first action.
-            currentAgent.transform.Rotate(0f, UniformRange(-startHeadingJitterDegrees, startHeadingJitterDegrees), 0f, Space.World);
+            float headingJitter = UniformRange(-startHeadingJitterDegrees, startHeadingJitterDegrees);
+            currentAgent.transform.Rotate(0f, headingJitter, 0f, Space.World);
+            currentRecorder.startJitterHeadingDeg = headingJitter;
 
             try
             {
@@ -390,7 +392,6 @@ namespace Assets.Scripts.DataRecording
             currentRecorder.OutputFormat = RecordingOutputFormat.Binary;
             currentRecorder.EnableDebugRays = false;
             currentRecorder.AutoStartForTesting = false;
-            currentRecorder.suppressPythonPipeline = true;
             currentRecorder.recordingCameraOverride = view;
             currentRecorder.actionLabelSource = this;
             currentRecorder.source = ZarrDataContract.EpisodeSources.Synthetic;
@@ -398,6 +399,7 @@ namespace Assets.Scripts.DataRecording
             if (string.IsNullOrEmpty(runSessionId)) runSessionId = $"dagger_{DateTime.Now:yyyyMMdd_HHmmss}";
             currentRecorder.sessionId = runSessionId; // one session per harness run
             currentRecorder.repetitionIndex = episodesRecorded;
+            currentRecorder.inputMode = ZarrDataContract.InputModeDesktop;
             return agentGO;
         }
 

@@ -31,7 +31,8 @@ namespace Assets.Scripts.DataRecording
     /// task's single POI (exactly the human 1-POI format); otherwise start -> end directly. Episodes are written to
     /// imitationagent_training/zarr_recordings with source = "synthetic", participant_id = participantId (default "synthetic_rrw_v3"; the v2
     /// bot without the stop behaviours recorded as "synthetic_rrw"), session_id = "rrw_" + run start time and
-    /// repetition_index = index of the kept episode within the run.
+    /// repetition_index = index of the kept episode within the run, start_jitter_heading_deg = the episode's random start
+    /// heading offset; every other manifest field is filled exactly as for a human.
     ///
     /// An episode is discarded and re-sampled when: no path exists, the route is longer than maxPathLengthFactor x the
     /// shortest path, the end is not reached before the timeout, or it lasted less than minEpisodeSeconds. After
@@ -371,10 +372,10 @@ namespace Assets.Scripts.DataRecording
             recorder.OutputFormat = RecordingOutputFormat.Binary;
             recorder.EnableDebugRays = false;
             recorder.AutoStartForTesting = false;
-            recorder.suppressPythonPipeline = true;
             recorder.source = ZarrDataContract.EpisodeSources.Synthetic;
             recorder.participantId = participantId;
             recorder.sessionId = $"rrw_{DateTime.Now:yyyyMMdd_HHmmss}"; // one session per harness run
+            recorder.inputMode = ZarrDataContract.InputModeDesktop;
 
             agent = rig.gameObject.GetComponent<RecordRandomWalksAgent>();
             if (agent == null) agent = rig.gameObject.AddComponent<RecordRandomWalksAgent>();
@@ -471,7 +472,8 @@ namespace Assets.Scripts.DataRecording
             agent.Stop();
             Vector3 toFirst = (useWaypoint ? waypoint : end) - start;
             float yaw = (toFirst.x * toFirst.x + toFirst.z * toFirst.z) > 1e-6f ? Mathf.Atan2(toFirst.x, toFirst.z) * Mathf.Rad2Deg : 0f;
-            yaw += (float)(rng.NextDouble() * 2.0 - 1.0) * bot.startHeadingJitterDegrees;
+            float headingJitter = (float)(rng.NextDouble() * 2.0 - 1.0) * bot.startHeadingJitterDegrees;
+            yaw += headingJitter;
             Vector3 spawn = start + Vector3.up;
             if (RecordingRig.TryGroundedPivotY(rigController, spawn, out float pivotY)) spawn.y = pivotY;
             rig.gameObject.PlaceObject(spawn, Quaternion.Euler(0f, yaw, 0f));
@@ -493,6 +495,7 @@ namespace Assets.Scripts.DataRecording
 
             // --- record ---
             recorder.repetitionIndex = episodesRecorded; // index among this run's kept episodes (discarded ones don't count)
+            recorder.startJitterHeadingDeg = headingJitter;
             if (!TryStartRecording()) yield break;
             agent.Begin(rng);
             string episodeDir = recorder.CurrentEpisodeDirectory;

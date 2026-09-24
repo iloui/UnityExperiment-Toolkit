@@ -46,10 +46,6 @@ namespace Assets.Scripts.DataRecording
         public string SaveDirectoryName = "VR_Recordings";
         public bool EnableDebugRays = true; // Enabled by default for edge testing
         public bool AutoStartForTesting = false;
-        [Tooltip("If true, StopRecording() never launches the Python bootstrap/training pipeline. Used by " +
-                 "RecordRandomWalksHarness, which records many synthetic episodes back-to-back and must not " +
-                 "trigger a training run per episode. Default false = unchanged behaviour for human recording.")]
-        public bool suppressPythonPipeline = false;
 
         [Header("Episode Metadata (manifest.json)")]
         [Tooltip("'human' for participants. The synthetic harnesses set 'synthetic'.")]
@@ -65,6 +61,8 @@ namespace Assets.Scripts.DataRecording
         public int repetitionIndex = 0;
         [Tooltip("How the mover was controlled. Only 'desktop' (keyboard + mouse) is in use.")]
         public string inputMode = ZarrDataContract.InputModeDesktop;
+        /// <summary>start_jitter_heading_deg written to the NEXT episode. Set per episode by the synthetic harnesses; humans keep 0.</summary>
+        [HideInInspector] public float startJitterHeadingDeg;
 
         /// <summary>Record from this camera instead of the scene's CanonicalRecordingCamera (DaggerHarness: the policy agent's head). null = unchanged behaviour.</summary>
         [HideInInspector] public Camera recordingCameraOverride;
@@ -241,7 +239,6 @@ namespace Assets.Scripts.DataRecording
                     csvWriter.Flush();
                     csvWriter.Close();
                     csvWriter = null;
-                    if (!suppressPythonPipeline) TriggerPythonPipeline(currentCsvPath);
                 }
             }
             else
@@ -251,7 +248,6 @@ namespace Assets.Scripts.DataRecording
                 if (!string.IsNullOrEmpty(currentEpisodeDir))
                 {
                     WriteEpisodeManifest();
-                    if (!suppressPythonPipeline) TriggerPythonPipeline(currentEpisodeDir);
                 }
             }
 
@@ -261,91 +257,6 @@ namespace Assets.Scripts.DataRecording
             if (hiddenCaptureCamera != null) Destroy(hiddenCaptureCamera.gameObject);
             if (colorRenderTexture != null) colorRenderTexture.Release();
             if (colorReadbackTex != null) Destroy(colorReadbackTex);
-        }
-
-        /// <summary>
-        /// Spawns an asynchronous background worker thread to execute the Python script.
-        /// This prevents your VR scene or active agent simulation from freezing during training.
-        /// </summary>
-        private void TriggerPythonPipeline(string savedEpisodeDir)
-        {
-            // Traverses up from 'unity-files/Assets/' to 'simulation_and_vr/'
-            string rootDir = Path.GetFullPath(Path.Combine(Application.dataPath, "../../"));
-            string trainingDir = Path.Combine(rootDir, "imitationagent_training");
-
-            string pipelineDir = Path.Combine(trainingDir, "training_pipeline");
-            string localEnvPackages = Path.Combine(trainingDir, "python_embedded");
-
-            string bootstrapScript = Path.Combine(pipelineDir, "bootstrap_env.py");
-            string pythonScript = Path.Combine(pipelineDir, "incremental_train.py");
-            string targetOnnxOutput = Path.Combine(rootDir, "unity_files", "Assets", "ImitationModel", "ImitationAgentModel.onnx");
-
-            // --------------------------------------------------------------------------
-            // CROSS-PLATFORM PYTHON RESOLUTION ENGINE
-            // --------------------------------------------------------------------------
-            string nativePythonCmd = "python3";
-            if (Application.platform == RuntimePlatform.WindowsEditor || Application.platform == RuntimePlatform.WindowsPlayer)
-            {
-                nativePythonCmd = "python";
-            }
-
-            Debug.Log($"[Lifecycle Engine] Activating background pipeline on platform: {Application.platform}");
-
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                try
-                {
-                    // Step A: Silently trigger the bootstrap script to guarantee packages exist
-                    System.Diagnostics.ProcessStartInfo bootstrapInfo = new System.Diagnostics.ProcessStartInfo();
-                    bootstrapInfo.FileName = nativePythonCmd;
-                    bootstrapInfo.Arguments = $"\"{bootstrapScript}\"";
-                    bootstrapInfo.UseShellExecute = false;
-                    bootstrapInfo.CreateNoWindow = true;
-
-                    using (System.Diagnostics.Process bootstrapProcess = System.Diagnostics.Process.Start(bootstrapInfo))
-                    {
-                        bootstrapProcess.WaitForExit();
-                        if (bootstrapProcess.ExitCode != 0)
-                        {
-                            Debug.LogError("[Lifecycle Engine] Critical Error: Environment Bootstrapping verification failed.");
-                            return;
-                        }
-                    }
-
-                    // Step B: Trigger the training pipeline with the recorded episode directory.
-                    System.Diagnostics.ProcessStartInfo startInfo = new System.Diagnostics.ProcessStartInfo();
-                    startInfo.FileName = nativePythonCmd;
-                    startInfo.Arguments = $"\"{pythonScript}\" --episode_dir \"{savedEpisodeDir}\" --model_output \"{targetOnnxOutput}\"";
-                    startInfo.UseShellExecute = false;
-                    startInfo.RedirectStandardOutput = true;
-                    startInfo.RedirectStandardError = true;
-                    startInfo.CreateNoWindow = true;
-
-                    // Injecting python_embedded directory directly into the Python import path environment variable
-                    startInfo.EnvironmentVariables["PYTHONPATH"] = localEnvPackages;
-
-                    using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(startInfo))
-                    {
-                        string output = process.StandardOutput.ReadToEnd();
-                        string error = process.StandardError.ReadToEnd();
-                        process.WaitForExit();
-
-                        if (process.ExitCode == 0)
-                        {
-                            Debug.Log($"[Lifecycle Engine] PYTHON PIPELINE SUCCESS:\n{output}");
-                            Agent_Based_Modelling.ImitationAgent.NotifyRecordingCompleted(targetOnnxOutput);
-                        }
-                        else
-                        {
-                            Debug.LogError($"[Lifecycle Engine] Python Pipeline Error (Exit Code {process.ExitCode}): {error}");
-                        }
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    Debug.LogError($"[Lifecycle Engine] Cross-Platform Execution Exception: {ex.Message}");
-                }
-            });
         }
 
         private void InitializeHardwareReplication()
@@ -529,6 +440,7 @@ namespace Assets.Scripts.DataRecording
                 repetition_index = repetitionIndex,
                 input_mode = inputMode,
                 task = episodeTask,
+                start_jitter_heading_deg = startJitterHeadingDeg,
                 camera_height_m = float.IsNaN(measuredCameraHeight) ? -1f : measuredCameraHeight,
                 camera_fov_deg = hiddenCaptureCamera != null ? hiddenCaptureCamera.fieldOfView : -1f,
                 frame_count = episodeFrameCount,

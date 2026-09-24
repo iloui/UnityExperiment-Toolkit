@@ -194,7 +194,10 @@ namespace Assets.Scripts.Editor
 
         private static bool RunInternal(string tempDir, out string failureReason)
         {
-            const int frameCount = ZarrDataContract.TemporalWindowSize;
+            // One frame beyond the window: SingleEpisodeDataset labels the window ending at frame w-1 with the action recorded
+            // at frame w, so an episode needs TemporalWindowSize + 1 frames to yield its first window. Only the first
+            // TemporalWindowSize frames go into the compared sensory tensor.
+            const int frameCount = ZarrDataContract.TemporalWindowSize + 1;
             const int totalPixels = ZarrDataContract.TotalPixels;
 
             // --- 1. Generate deterministic synthetic episode data --------------------------------
@@ -226,7 +229,7 @@ namespace Assets.Scripts.Editor
             }
 
             // --- 2. Build the C# (inference-side) tensor via the exact production method ---------
-            float[] csharpTensor = ImitationAgent.BuildSensoryTensor(goal, goalDistanceMeters, frames);
+            float[] csharpTensor = ImitationAgent.BuildSensoryTensor(goal, goalDistanceMeters, frames.GetRange(0, ZarrDataContract.TemporalWindowSize));
 
             // --- 3. Write the same data through the recording pipeline's binary format -----------
             string episodeDir = Path.Combine(tempDir, "episode_parity_test");
@@ -238,19 +241,13 @@ namespace Assets.Scripts.Editor
             string rootDir = Path.GetFullPath(Path.Combine(Application.dataPath, "../../"));
             string trainingDir = Path.Combine(rootDir, "imitationagent_training");
             string pipelineDir = Path.Combine(trainingDir, "training_pipeline");
-            string pythonEmbedded = Path.Combine(trainingDir, "python_embedded");
             string datasetZarr = Path.Combine(episodeDir, "dataset.zarr");
             string tensorOutPath = Path.Combine(tempDir, "python_tensor.txt");
 
-            string pythonCmd = (Application.platform == RuntimePlatform.WindowsEditor) ? "python" : "python3";
-
-            // Mirror ParticipantRecorder.TriggerPythonPipeline: make sure python_embedded
-            // actually has zarr/numpy/torch/onnx before relying on them.
-            if (!RunPython(pythonCmd, pipelineDir, pythonEmbedded,
-                    $"\"{Path.Combine(pipelineDir, "bootstrap_env.py")}\"",
-                    out string bootstrapOutput, out string bootstrapError))
+            // Same interpreter + packages as the retrain (python_embedded, set up by bootstrap_env.py).
+            if (!RetrainPipeline.TryGetPythonEnvironment(out string pythonCmd, out string pythonEmbedded, out string envError))
             {
-                failureReason = $"bootstrap_env.py failed.\nstdout:\n{bootstrapOutput}\nstderr:\n{bootstrapError}";
+                failureReason = envError;
                 return false;
             }
 

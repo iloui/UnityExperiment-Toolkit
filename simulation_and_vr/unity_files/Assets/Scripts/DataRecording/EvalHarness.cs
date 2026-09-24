@@ -11,10 +11,11 @@ using Agent_Based_Modelling;
 namespace Assets.Scripts.DataRecording
 {
     /// <summary>
-    /// Closed-loop evaluation harness for ImitationAgent. Runs configurationCount scene
+    /// Closed-loop evaluation harness for ImitationAgent and for the NavMesh shortest-path baseline (ShortestPathAgent),
+    /// picked by agentKind; one run evaluates one kind. Runs configurationCount scene
     /// configurations back-to-back in a single Editor Play session (no manual replay, no
-    /// headless/batchmode). By default (enforceCanonicalTask) every layout gets the same fixed
-    /// start -> end task with no POIs. Otherwise, for each configuration: if
+    /// headless/batchmode). Every layout is evaluated on its own TaskScript (start -> POI(s) -> end, as
+    /// placed in the scene). For each configuration: if
     /// randomizeMarkersPerConfiguration is true, randomizes the scene's start/POI/end marker positions (NavMesh-valid,
     /// mutually spaced) - if false, leaves them exactly where they already are in the scene, so
     /// every configuration reuses the same start/POI/end (useful for isolating a layout's own
@@ -28,17 +29,35 @@ namespace Assets.Scripts.DataRecording
     /// top-down trajectory PNG is appended per agent, immediately on that agent's completion,
     /// so an unattended multi-hour run survives a mid-run Editor stop.
     ///
-    /// Does not touch AgentScript/EngineScript at all - this only drives ImitationAgent.
+    /// Both kinds get the same configurations, start jitter, timeout, metrics, episodes.csv columns and ticks CSV (the
+    /// harness samples every agent on a 0.1 s sim-time grid itself); columns that only exist for the imitation model
+    /// (model identity, raw outputs, wall-blocked, collisions, nudges) are left empty for ShortestPath. AgentScript/
+    /// EngineScript are not used - see ShortestPathAgent for why.
     /// Aggregating these rows into Goal Completion Rate / Collision Frequency / MTTC / SPL is a
     /// deliberately separate downstream (pandas) step, not this harness's job.
     /// </summary>
     public class EvalHarness : MonoBehaviour
     {
-        [Header("Task & Model")]
+        public enum AgentKind { Imitation, ShortestPath }
+
+        [Header("Task & Agent")]
         [Tooltip("The TaskScript whose start/end/pointsOfInterest marker GameObjects get repositioned each configuration. Must be the same TaskScript ImitationAgent/ParticipantRecorder use for this scene.")]
         public TaskScript task;
-        [Tooltip("The .onnx model every spawned agent runs.")]
+        [Tooltip("Imitation = ImitationAgent running modelAsset. ShortestPath = ShortestPathAgent (NavMeshAgent following the NavMesh " +
+                 "shortest path through the same start -> POI -> end task). Written to every row (agent_kind) and to run_config.json.")]
+        public AgentKind agentKind = AgentKind.Imitation;
+        [Tooltip("The .onnx model every spawned agent runs. Only used with agentKind = Imitation.")]
         public ModelAsset modelAsset;
+
+        [Header("Shortest-Path Baseline (agentKind = ShortestPath)")]
+        [Tooltip("m/s. Default = the recording body's walk speed (humans, bot and ImitationAgent all walk at 1.3 m/s).")]
+        public float shortestPathSpeedMps = ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond;
+        [Tooltip("Meters. Default = the recording body's radius. Wall clearance comes from the NavMesh bake radius (logged as navmesh_bake_agent_radius), not from this.")]
+        public float shortestPathRadiusM = ZarrDataContract.RecordingBody.Radius;
+        [Tooltip("m/s^2. High, so the baseline is at full speed almost immediately and its time is the path length / speed.")]
+        public float shortestPathAccelerationMps2 = 50f;
+        [Tooltip("deg/s. 120 = the largest discrete yaw bin (12 deg per 0.1 s sample).")]
+        public float shortestPathAngularSpeedDegPerS = 120f;
 
         [Header("Run Configuration")]
         [Tooltip("How many distinct randomized start/POI/end layouts to test.")]
@@ -47,7 +66,7 @@ namespace Assets.Scripts.DataRecording
         [Min(1)] public int agentsPerConfiguration = 1;
         [Tooltip("If true, a fresh random start/POI/end placement is generated every configuration. " +
                  "If false (default), start/POI/end are left exactly where they are in the scene - unchanged - for every configuration, " +
-                 "so all configurationCount runs reuse the same task. Forced to false while enforceCanonicalTask is on.")]
+                 "so all configurationCount runs reuse the same task.")]
         public bool randomizeMarkersPerConfiguration = false;
         [Tooltip("Sets UnityEngine.Time.timeScale for this run to shrink wall-clock time. The harness also caps Time.maximumDeltaTime " +
                  "at ZarrDataContract.SamplingIntervalSeconds (0.1s) so ImitationAgent's observation gate never skips ticks. The " +
@@ -70,15 +89,6 @@ namespace Assets.Scripts.DataRecording
         public float episodeTimeoutSeconds = 90f;
         [Tooltip("Sim seconds. Only written to run_config.json as a reference: the human-comparable cutoff the summary script uses by default.")]
         public float humanReferenceSeconds = 45f;
-
-        [Header("Canonical Task (identical across every layout)")]
-        [Tooltip("If true (default), at Start() every task.start marker is moved to canonicalStart, every task.end marker to " +
-                 "canonicalEnd and task.numberOfNeeds is set to 0 (no POIs), IN MEMORY ONLY - nothing is saved to the scene. " +
-                 "This guarantees every layout is evaluated on exactly the same task. Also forces randomizeMarkersPerConfiguration=false. " +
-                 "Refuses to run if the start isn't on the NavMesh or no complete path exists.")]
-        public bool enforceCanonicalTask = true;
-        public Vector3 canonicalStart = new Vector3(-11.25f, 0.08333334f, 0f);
-        public Vector3 canonicalEnd = new Vector3(11.25f, 1f, 0f);
 
         [Header("Episode Validity")]
         [Tooltip("m/s. If an episode's mean speed OR its fastest 1-simulated-second window exceeds this, the episode is flagged " +
@@ -128,9 +138,9 @@ namespace Assets.Scripts.DataRecording
                  "episode at 60fps accumulates thousands of points (trajectory.Add() runs every Update(), not just " +
                  "every sampling tick), which is the main cause of the per-episode stall/lag.")]
         public int maxHeatmapTrajectoryPoints = 300;
-        [Tooltip("If true, writes ticks_config<C>_agent<A>.csv per agent into the run folder: one row per model call with raw " +
-                 "(unclamped) and applied forward/yaw/pitch, pose, goal vector/distance and wall-blocked flag. Use " +
-                 "analyze_stall.py to inspect where and why an agent stalls.")]
+        [Tooltip("If true, writes ticks_config<C>_agent<A>.csv per agent into the run folder: one row every 0.1 s of episode sim time " +
+                 "with pose, heading, pitch, measured forward speed and yaw rate, goal vector/distance, and (Imitation only) the " +
+                 "latest raw and commanded model outputs and the wall-blocked flag. Use analyze_stall.py to inspect where and why an agent stalls.")]
         public bool logPerTickOutputs = true;
 
         [Header("Visualization")]
@@ -156,8 +166,10 @@ namespace Assets.Scripts.DataRecording
         private int consecutivePlacementFailures = 0;
         private const int MaxConsecutivePlacementFailures = 10;
 
-        private const string HarnessVersion = "3";
-        private string modelSha256 = "unknown";
+        private const string HarnessVersion = "5";
+        private const string TickCsvHeader = "t;x;z;heading_deg;pitch_deg;fwd_speed_mps;yaw_rate_deg_per_s;goal_x;goal_y;goal_z;goal_dist_m;" +
+            "pois_reached;blocked;raw_fwd;raw_yaw_deg_per_sample;raw_pitch;applied_fwd_mps;applied_yaw_deg_per_s";
+        private string modelSha256 = "";
         private string diskModelPath;
         private string diskModelMtimeAtStart = "";
         private bool warnedDiskModelChanged = false;
@@ -181,7 +193,8 @@ namespace Assets.Scripts.DataRecording
         private class ActiveEpisode
         {
             public GameObject agentGO;
-            public ImitationAgent agent;
+            public IEvalAgent agent;
+            public ImitationAgent imitation; // null for ShortestPath
             public float startRealtime;
             public int configId;
             public int agentId;
@@ -220,6 +233,12 @@ namespace Assets.Scripts.DataRecording
             public Vector3 longestStallPos;
             public float startOffsetM;
             public float headingJitterDeg;
+
+            // Per-tick CSV sampling (sim time).
+            public float nextTickSim;
+            public float prevTickSim;
+            public Vector3 prevTickPos;
+            public float prevTickHeading;
         }
         private readonly List<ActiveEpisode> activeEpisodes = new List<ActiveEpisode>();
 
@@ -238,9 +257,9 @@ namespace Assets.Scripts.DataRecording
                 enabled = false;
                 return;
             }
-            if (modelAsset == null)
+            if (agentKind == AgentKind.Imitation && modelAsset == null)
             {
-                Debug.LogError("[EvalHarness] 'modelAsset' is not assigned. Refusing to start.");
+                Debug.LogError("[EvalHarness] agentKind is Imitation but 'modelAsset' is not assigned. Refusing to start.");
                 enabled = false;
                 return;
             }
@@ -254,19 +273,19 @@ namespace Assets.Scripts.DataRecording
                 return;
             }
 
-            if (!ApplyCanonicalTask())
+            if (!ValidateSceneTask())
             {
                 enabled = false;
                 return;
             }
-            if (!disableDeadlockNudge)
+            if (agentKind == AgentKind.Imitation && !disableDeadlockNudge)
             {
                 Debug.LogWarning("[EvalHarness] disableDeadlockNudge is OFF - the deadlock nudge will move stuck agents. " +
                     "Rows with stuck_count > 0 are excluded from success_no_rescue, but the run is not a clean baseline.");
             }
 
             CaptureBaseStartPositions();
-            ComputeModelIdentity();
+            if (agentKind == AgentKind.Imitation) ComputeModelIdentity();
 
             previousMaximumDeltaTime = Time.maximumDeltaTime;
             // Caps one frame's scaled deltaTime at the sampling interval so ImitationAgent's single-`if` capture gate
@@ -282,52 +301,64 @@ namespace Assets.Scripts.DataRecording
         }
 
         // ------------------------------------------------------------------
-        // Canonical task, model identity, run config
+        // Scene task validation, model identity, run config
         // ------------------------------------------------------------------
 
         /// <summary>
-        /// Forces the identical start -> end task (no POIs) onto whatever scene this harness is in, in memory
-        /// only. Returns false (harness refuses to run) if the task can't be made valid on this layout.
+        /// Checks the scene's own TaskScript before the run starts: start/end markers exist, there are enough POI
+        /// markers for numberOfNeeds, and (with fixed markers) every POI and end marker is reachable over the NavMesh
+        /// from every start marker. Returns false (harness refuses to run) otherwise. Nothing is moved.
         /// </summary>
-        private bool ApplyCanonicalTask()
+        private bool ValidateSceneTask()
         {
-            if (!enforceCanonicalTask) return true;
-
-            if (randomizeMarkersPerConfiguration)
-            {
-                Debug.LogWarning("[EvalHarness] enforceCanonicalTask is on - forcing randomizeMarkersPerConfiguration=false.");
-                randomizeMarkersPerConfiguration = false;
-            }
-
             if (!HasMarkers(task.start) || !HasMarkers(task.end))
             {
-                Debug.LogError("[EvalHarness] enforceCanonicalTask: task.start / task.end are empty or contain null markers. Refusing to start.");
+                Debug.LogError("[EvalHarness] task.start / task.end are empty or contain null markers. Refusing to start.");
                 return false;
             }
-            if (task.pointsOfInterest == null) task.pointsOfInterest = new GameObject[0];
-
-            foreach (var m in task.start) m.transform.position = canonicalStart;
-            foreach (var m in task.end) m.transform.position = canonicalEnd;
-            task.numberOfNeeds = 0;
-
-            if (!NavMesh.SamplePosition(canonicalStart, out NavMeshHit startHit, navMeshSampleRadius, NavMesh.AllAreas))
+            if (task.numberOfNeeds > 0)
             {
-                Debug.LogError($"[EvalHarness] Canonical start {canonicalStart} is not within {navMeshSampleRadius}m of the NavMesh on this layout. Refusing to start.");
-                return false;
+                if (!HasMarkers(task.pointsOfInterest))
+                {
+                    Debug.LogError($"[EvalHarness] task.numberOfNeeds={task.numberOfNeeds} but task.pointsOfInterest is empty or contains null markers. Refusing to start.");
+                    return false;
+                }
+                if (!task.revisit && task.numberOfNeeds > task.pointsOfInterest.Length)
+                {
+                    Debug.LogError($"[EvalHarness] task.numberOfNeeds={task.numberOfNeeds} exceeds the {task.pointsOfInterest.Length} POI marker(s) and revisit is off. Refusing to start.");
+                    return false;
+                }
             }
-            if (!NavMesh.SamplePosition(canonicalEnd, out NavMeshHit endHit, navMeshSampleRadius, NavMesh.AllAreas))
+            else
             {
-                Debug.LogError($"[EvalHarness] Canonical end {canonicalEnd} is not within {navMeshSampleRadius}m of the NavMesh on this layout. Refusing to start.");
-                return false;
-            }
-            var path = new NavMeshPath();
-            if (!NavMesh.CalculatePath(startHit.position, endHit.position, NavMesh.AllAreas, path) || path.status != NavMeshPathStatus.PathComplete)
-            {
-                Debug.LogError("[EvalHarness] No complete NavMesh path from canonical start to canonical end on this layout. Refusing to start.");
-                return false;
+                Debug.LogWarning("[EvalHarness] task.numberOfNeeds is 0 - this scene's task has no POI (start -> end only).");
             }
 
-            Debug.Log($"[EvalHarness] Canonical task enforced (in memory): start={canonicalStart}, end={canonicalEnd}, numberOfNeeds=0.");
+            // Randomized markers are re-placed (NavMesh-valid) every configuration, so only fixed markers are checked here.
+            if (randomizeMarkersPerConfiguration) return true;
+
+            var targets = new List<GameObject>();
+            if (task.numberOfNeeds > 0) targets.AddRange(task.pointsOfInterest);
+            targets.AddRange(task.end);
+            foreach (var startMarker in task.start)
+            {
+                if (!NavMesh.SamplePosition(startMarker.transform.position, out NavMeshHit startHit, navMeshSampleRadius, NavMesh.AllAreas))
+                {
+                    Debug.LogError($"[EvalHarness] Start marker '{startMarker.name}' at {startMarker.transform.position} is not within {navMeshSampleRadius}m of the NavMesh. Refusing to start.");
+                    return false;
+                }
+                foreach (var target in targets)
+                {
+                    if (!HasCompletePath(startHit.position, target.transform.position))
+                    {
+                        Debug.LogError($"[EvalHarness] No complete NavMesh path from start marker '{startMarker.name}' to '{target.name}' at {target.transform.position}. Refusing to start.");
+                        return false;
+                    }
+                }
+            }
+
+            Debug.Log($"[EvalHarness] Scene task: {task.start.Length} start(s), {task.numberOfNeeds} need(s) over " +
+                $"{(task.pointsOfInterest != null ? task.pointsOfInterest.Length : 0)} POI marker(s), {task.end.Length} end(s).");
             return true;
         }
 
@@ -414,6 +445,7 @@ namespace Assets.Scripts.DataRecording
 
         private string ReadDiskModelMtime()
         {
+            if (string.IsNullOrEmpty(diskModelPath)) return "";
             try
             {
                 return File.Exists(diskModelPath) ? File.GetLastWriteTimeUtc(diskModelPath).ToString("o", CultureInfo.InvariantCulture) : "";
@@ -425,6 +457,7 @@ namespace Assets.Scripts.DataRecording
         private class RunConfigDump
         {
             public string harness_version;
+            public string agent_kind;
             public string scene;
             public string started_at;
             public string unity_version;
@@ -434,9 +467,6 @@ namespace Assets.Scripts.DataRecording
             public int configuration_count;
             public int agents_per_configuration;
             public bool randomize_markers;
-            public bool enforce_canonical_task;
-            public Vector3 canonical_start;
-            public Vector3 canonical_end;
             public float simulation_speed;
             public float episode_timeout_sim_s;
             public bool nudge_enabled;
@@ -452,10 +482,25 @@ namespace Assets.Scripts.DataRecording
             public int task_start_markers;
             public int task_poi_markers;
             public int task_end_markers;
-            public float agent_speed;
-            public float agent_size;
-            public float agent_radius;
+            public bool task_revisit;
+            public bool task_choose_non_deterministically;
+            // Marker positions at run start, in the TaskScript's array order. With randomize_markers they are
+            // re-placed every configuration - the per-episode route is in episodes.csv.
+            public List<Vector3> task_start_positions;
+            public List<Vector3> task_poi_positions;
+            public List<Vector3> task_end_positions;
+            // TaskScript's agent fields; neither agent kind moves at task_agent_speed - see body_*.
+            public float task_agent_speed;
+            public float task_agent_size;
+            public float task_agent_radius;
+            // What actually walks: the recording body (Imitation) or the NavMeshAgent (ShortestPath).
+            public float body_speed_mps;
+            public float body_radius_m;
+            public float shortest_path_acceleration_mps2;
+            public float shortest_path_angular_speed_deg_per_s;
+            public float navmesh_bake_agent_radius;
             public float arrival_radius_m;
+            public float tick_interval_s;
         }
 
         private void WriteRunConfig()
@@ -465,21 +510,19 @@ namespace Assets.Scripts.DataRecording
                 var dump = new RunConfigDump
                 {
                     harness_version = HarnessVersion,
+                    agent_kind = agentKind.ToString(),
                     scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name,
                     started_at = DateTime.Now.ToString("o", CultureInfo.InvariantCulture),
                     unity_version = Application.unityVersion,
-                    model_asset = modelAsset != null ? modelAsset.name : "",
+                    model_asset = ModelName(),
                     model_sha256 = modelSha256,
                     model_disk_mtime_utc = diskModelMtimeAtStart,
                     configuration_count = configurationCount,
                     agents_per_configuration = agentsPerConfiguration,
                     randomize_markers = randomizeMarkersPerConfiguration,
-                    enforce_canonical_task = enforceCanonicalTask,
-                    canonical_start = canonicalStart,
-                    canonical_end = canonicalEnd,
                     simulation_speed = simulationSpeed,
                     episode_timeout_sim_s = episodeTimeoutSeconds,
-                    nudge_enabled = !disableDeadlockNudge,
+                    nudge_enabled = agentKind == AgentKind.Imitation && !disableDeadlockNudge,
                     human_reference_s = humanReferenceSeconds,
                     start_jitter_position_m = startJitterPositionMeters,
                     start_jitter_heading_deg = startJitterHeadingDegrees,
@@ -492,10 +535,21 @@ namespace Assets.Scripts.DataRecording
                     task_start_markers = task.start != null ? task.start.Length : 0,
                     task_poi_markers = task.pointsOfInterest != null ? task.pointsOfInterest.Length : 0,
                     task_end_markers = task.end != null ? task.end.Length : 0,
-                    agent_speed = task.agentSpeed,
-                    agent_size = task.agentSize,
-                    agent_radius = task.agentRadius,
-                    arrival_radius_m = ZarrDataContract.ArrivalRadiusMeters
+                    task_revisit = task.revisit,
+                    task_choose_non_deterministically = task.chooseNonDeterministically,
+                    task_start_positions = MarkerPositions(task.start),
+                    task_poi_positions = MarkerPositions(task.pointsOfInterest),
+                    task_end_positions = MarkerPositions(task.end),
+                    task_agent_speed = task.agentSpeed,
+                    task_agent_size = task.agentSize,
+                    task_agent_radius = task.agentRadius,
+                    body_speed_mps = agentKind == AgentKind.Imitation ? ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond : shortestPathSpeedMps,
+                    body_radius_m = agentKind == AgentKind.Imitation ? ZarrDataContract.RecordingBody.Radius : shortestPathRadiusM,
+                    shortest_path_acceleration_mps2 = agentKind == AgentKind.ShortestPath ? shortestPathAccelerationMps2 : 0f,
+                    shortest_path_angular_speed_deg_per_s = agentKind == AgentKind.ShortestPath ? shortestPathAngularSpeedDegPerS : 0f,
+                    navmesh_bake_agent_radius = NavMesh.GetSettingsByID(0).agentRadius,
+                    arrival_radius_m = ZarrDataContract.ArrivalRadiusMeters,
+                    tick_interval_s = ZarrDataContract.SamplingIntervalSeconds
                 };
                 File.WriteAllText(Path.Combine(runFolderPath, "run_config.json"), JsonUtility.ToJson(dump, true));
             }
@@ -503,6 +557,16 @@ namespace Assets.Scripts.DataRecording
             {
                 Debug.LogWarning($"[EvalHarness] Could not write run_config.json: {ex.Message}");
             }
+        }
+
+        private string ModelName() => agentKind == AgentKind.Imitation && modelAsset != null ? modelAsset.name : "";
+
+        private static List<Vector3> MarkerPositions(GameObject[] markers)
+        {
+            var list = new List<Vector3>();
+            if (markers == null) return list;
+            foreach (var m in markers) if (m != null) list.Add(m.transform.position);
+            return list;
         }
 
         void Update()
@@ -514,7 +578,7 @@ namespace Assets.Scripts.DataRecording
             {
                 ActiveEpisode ep = activeEpisodes[i];
 
-                if (ep.agent == null)
+                if (ep.agentGO == null)
                 {
                     // Destroyed some other way than FinishEpisode() - drop it without a row rather than crash.
                     CloseTickWriter(ep);
@@ -537,7 +601,7 @@ namespace Assets.Scripts.DataRecording
                     continue;
                 }
 
-                if (ep.agent.destroyRequest)
+                if (ep.agent.DestroyRequest)
                 {
                     FinishEpisode(ep, "success", null);
                     activeEpisodes.RemoveAt(i);
@@ -626,7 +690,7 @@ namespace Assets.Scripts.DataRecording
         private void SpawnAgentForEpisode()
         {
             GameObject agentGO = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-            agentGO.name = $"EvalHarness_Config{currentConfigId}_Agent{currentConfigAgentsSpawned}";
+            agentGO.name = $"EvalHarness_{agentKind}_Config{currentConfigId}_Agent{currentConfigAgentsSpawned}";
 
             Collider capCollider = agentGO.GetComponent<Collider>();
             if (capCollider != null) Destroy(capCollider);
@@ -639,20 +703,35 @@ namespace Assets.Scripts.DataRecording
                 agentRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             }
 
-            ImitationAgent agent = agentGO.AddComponent<ImitationAgent>();
-            agent.task = task;
-            agent.ArchitectureLayerMask = LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName);
-            agent.BaselineModelAsset = modelAsset;
-            agent.enableDeadlockNudge = !disableDeadlockNudge;
+            IEvalAgent agent;
+            ImitationAgent imitation = null;
+            if (agentKind == AgentKind.Imitation)
+            {
+                imitation = agentGO.AddComponent<ImitationAgent>();
+                imitation.task = task;
+                imitation.ArchitectureLayerMask = LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName);
+                imitation.BaselineModelAsset = modelAsset;
+                imitation.enableDeadlockNudge = !disableDeadlockNudge;
+                imitation.hotReloadModel = false; // the run evaluates exactly modelAsset (its sha256 is logged)
+                agent = imitation;
+            }
+            else
+            {
+                ShortestPathAgent shortestPath = agentGO.AddComponent<ShortestPathAgent>();
+                shortestPath.task = task;
+                shortestPath.speedMetersPerSecond = shortestPathSpeedMps;
+                shortestPath.radiusMeters = shortestPathRadiusM;
+                shortestPath.accelerationMetersPerSecond2 = shortestPathAccelerationMps2;
+                shortestPath.angularSpeedDegreesPerSecond = shortestPathAngularSpeedDegPerS;
+                agent = shortestPath;
+            }
 
             StreamWriter tickWriter = null;
             if (logPerTickOutputs)
             {
                 string tickPath = Path.Combine(runFolderPath, $"ticks_config{currentConfigId}_agent{currentConfigAgentsSpawned}.csv");
                 tickWriter = new StreamWriter(tickPath, false) { AutoFlush = true }; // survives stopping Play mid-episode
-                tickWriter.WriteLine("t;x;z;heading_deg;goal_x;goal_y;goal_z;goal_dist_m;raw_fwd;raw_yaw_deg_per_sample;raw_pitch;applied_fwd_mps;applied_yaw_deg_per_s;blocked;pois_reached");
-                StreamWriter w = tickWriter;
-                agent.TickLogSink = row => w.WriteLine(row);
+                tickWriter.WriteLine(TickCsvHeader);
             }
 
             activeEpisodes.Add(new ActiveEpisode
@@ -660,6 +739,7 @@ namespace Assets.Scripts.DataRecording
                 tickWriter = tickWriter,
                 agentGO = agentGO,
                 agent = agent,
+                imitation = imitation,
                 startRealtime = Time.realtimeSinceStartup,
                 configId = currentConfigId,
                 agentId = currentConfigAgentsSpawned,
@@ -677,7 +757,7 @@ namespace Assets.Scripts.DataRecording
         /// </summary>
         private void TickEpisodeClock(ActiveEpisode ep)
         {
-            List<Vector3> traj = ep.agent.trajectory;
+            List<Vector3> traj = ep.agent.Trajectory;
             if (traj == null || traj.Count == 0) return;
 
             if (!ep.started)
@@ -686,27 +766,34 @@ namespace Assets.Scripts.DataRecording
                 ep.startFrame = Time.frameCount;
                 ep.processedPoints = 1;
                 ep.windowStartPos = traj[0];
-                // ImitationAgent.Start() has just spawned the agent facing its goal; apply the (seeded) heading jitter now,
+                // The agent's Start() has just spawned it facing its goal; apply the (seeded) heading jitter now,
                 // before the model's temporal window has filled and produced its first action.
-                if (Mathf.Abs(ep.headingJitterDeg) > 0.001f) ep.agent.transform.Rotate(0f, ep.headingJitterDeg, 0f, Space.World);
+                if (Mathf.Abs(ep.headingJitterDeg) > 0.001f) ep.agentGO.transform.Rotate(0f, ep.headingJitterDeg, 0f, Space.World);
+                ep.prevTickPos = ep.agentGO.transform.position;
+                ep.prevTickHeading = ep.agentGO.transform.eulerAngles.y;
+                WriteTick(ep);
                 return;
             }
 
             ep.simElapsed += Time.deltaTime;
             ProcessNewTrajectoryPoints(ep);
+            if (ep.simElapsed >= ep.nextTickSim - 1e-4f) WriteTick(ep);
 
-            if (!ep.firstCollisionLogged && ep.agent.HasCollided)
+            if (ep.imitation != null)
             {
-                ep.firstCollisionLogged = true;
-                ep.simAtFirstCollision = ep.simElapsed;
-            }
+                if (!ep.firstCollisionLogged && ep.imitation.HasCollided)
+                {
+                    ep.firstCollisionLogged = true;
+                    ep.simAtFirstCollision = ep.simElapsed;
+                }
 
-            int rawCollisions = ep.agent.CollisionCount;
-            if (rawCollisions > ep.lastRawCollisions)
-            {
-                if (ep.collisionEvents == 0 || ep.simElapsed - ep.lastCollisionSim > collisionDebounceSeconds) ep.collisionEvents++;
-                ep.lastCollisionSim = ep.simElapsed;
-                ep.lastRawCollisions = rawCollisions;
+                int rawCollisions = ep.imitation.CollisionCount;
+                if (rawCollisions > ep.lastRawCollisions)
+                {
+                    if (ep.collisionEvents == 0 || ep.simElapsed - ep.lastCollisionSim > collisionDebounceSeconds) ep.collisionEvents++;
+                    ep.lastCollisionSim = ep.simElapsed;
+                    ep.lastRawCollisions = rawCollisions;
+                }
             }
 
             int fulfilled = ep.agent.NeedsFulfilledCount;
@@ -738,9 +825,60 @@ namespace Assets.Scripts.DataRecording
             }
         }
 
+        /// <summary>
+        /// One ticks-CSV row at the current episode sim time. Called on a ZarrDataContract.SamplingIntervalSeconds grid
+        /// (t = 0 on the agent's first Update); t is the actual sim time of the frame that crossed the grid point. Forward
+        /// speed and yaw rate are measured from the pose change since the previous row, so they mean the same thing for
+        /// both agent kinds. Pitch is the eye's local x rotation (Unity convention: positive = looking down; always 0 for
+        /// ShortestPath). The goal vector is in the eye's frame, as in the model input. Imitation-only columns are empty
+        /// for ShortestPath, and the model columns are empty until the model's first call.
+        /// </summary>
+        private void WriteTick(ActiveEpisode ep)
+        {
+            float interval = ZarrDataContract.SamplingIntervalSeconds;
+            while (ep.nextTickSim <= ep.simElapsed + 1e-4f) ep.nextTickSim += interval;
+            if (ep.tickWriter == null) return;
+
+            Transform tr = ep.agentGO.transform;
+            Vector3 pos = tr.position;
+            float heading = tr.eulerAngles.y;
+
+            float dt = ep.simElapsed - ep.prevTickSim;
+            float fwdSpeed = 0f, yawRate = 0f;
+            if (dt > 1e-5f)
+            {
+                Vector3 moved = pos - ep.prevTickPos;
+                moved.y = 0f;
+                Vector3 midForward = Quaternion.Euler(0f, Mathf.LerpAngle(ep.prevTickHeading, heading, 0.5f), 0f) * Vector3.forward;
+                fwdSpeed = Vector3.Dot(moved, midForward) / dt;
+                yawRate = Mathf.DeltaAngle(ep.prevTickHeading, heading) / dt;
+            }
+            ep.prevTickSim = ep.simElapsed;
+            ep.prevTickPos = pos;
+            ep.prevTickHeading = heading;
+
+            Transform eye = ep.agent.EyeAnchor != null ? ep.agent.EyeAnchor : tr;
+            float pitch = eye.localEulerAngles.x;
+            if (pitch > 180f) pitch -= 360f;
+            Vector3 goalOffset = ep.agent.CurrentGoalPosition - eye.position;
+            Vector3 goalLocal = eye.InverseTransformDirection(goalOffset.normalized);
+
+            ImitationAgent im = ep.imitation;
+            ep.tickWriter.WriteLine(string.Join(";",
+                F(ep.simElapsed), F(pos.x), F(pos.z), F(heading), F(pitch), F(fwdSpeed), F(yawRate),
+                F(goalLocal.x), F(goalLocal.y), F(goalLocal.z), F(goalOffset.magnitude),
+                I(ep.agent.NeedsFulfilledCount),
+                im != null ? B(im.IsWallBlocked) : "",
+                im != null ? FOrEmpty(im.LastRawForward) : "",
+                im != null ? FOrEmpty(im.LastRawYawPerSample) : "",
+                im != null ? FOrEmpty(im.LastRawPitch) : "",
+                im != null ? FOrEmpty(im.LastCommandedForwardMps) : "",
+                im != null ? FOrEmpty(im.LastCommandedYawDegPerSecond) : ""));
+        }
+
         private static void ProcessNewTrajectoryPoints(ActiveEpisode ep)
         {
-            List<Vector3> traj = ep.agent.trajectory;
+            List<Vector3> traj = ep.agent.Trajectory;
             if (traj == null) return;
             for (; ep.processedPoints < traj.Count; ep.processedPoints++)
             {
@@ -754,9 +892,9 @@ namespace Assets.Scripts.DataRecording
         {
             ProcessNewTrajectoryPoints(ep);
 
-            List<Vector3> trajectory = (ep.agent.trajectory != null) ? ep.agent.trajectory : new List<Vector3>();
-            Vector3 spawnPos = trajectory.Count > 0 ? trajectory[0] : ep.agent.transform.position;
-            Vector3 finalPos = trajectory.Count > 0 ? trajectory[trajectory.Count - 1] : ep.agent.transform.position;
+            List<Vector3> trajectory = (ep.agent.Trajectory != null) ? ep.agent.Trajectory : new List<Vector3>();
+            Vector3 spawnPos = trajectory.Count > 0 ? trajectory[0] : ep.agentGO.transform.position;
+            Vector3 finalPos = trajectory.Count > 0 ? trajectory[trajectory.Count - 1] : ep.agentGO.transform.position;
             Vector3 finalGoalPos = ep.agent.CurrentGoalPosition;
 
             float simSeconds = ep.simElapsed;
@@ -766,16 +904,36 @@ namespace Assets.Scripts.DataRecording
 
             float pathLengthM = ep.pathLengthM;
 
-            // Simplification: optimal path is the NavMesh-shortest route from spawn straight to the episode's end
-            // target. With the canonical task (0 POIs) that is exactly the whole task.
-            float optimalPathLengthM = ComputeNavMeshPathLength(spawnPos, ep.endPos);
+            // Optimal path: sum of NavMesh-shortest segments spawn -> POI_0 -> ... -> end, in the order this agent's
+            // PoiProgressTracker planned (and therefore had to visit) them.
+            List<Vector3> routePois = ep.poiPositions;
+            Vector3 routeEnd = ep.endPos;
+            if (ep.agent.PlannedPois != null && ep.agent.PlannedEnd != null)
+            {
+                routePois = new List<Vector3>();
+                foreach (Transform poi in ep.agent.PlannedPois) routePois.Add(poi.position);
+                routeEnd = ep.agent.PlannedEnd.position;
+            }
+            var optimalSegmentsM = new List<float>();
+            float optimalPathLengthM = 0f;
+            Vector3 segmentFrom = spawnPos;
+            foreach (Vector3 waypoint in routePois)
+            {
+                float segment = ComputeNavMeshPathLength(segmentFrom, waypoint);
+                optimalSegmentsM.Add(segment);
+                optimalPathLengthM += segment;
+                segmentFrom = waypoint;
+            }
+            float lastSegment = ComputeNavMeshPathLength(segmentFrom, routeEnd);
+            optimalSegmentsM.Add(lastSegment);
+            optimalPathLengthM += lastSegment;
 
             float meanSpeed = pathLengthM / Mathf.Max(simSeconds, 0.1f);
             bool speedViolation = meanSpeed > maxPlausibleSpeedMps || ep.maxWindowSpeedMps > maxPlausibleSpeedMps;
             string rawOutcome = outcome;
             if (speedViolation) outcome = "invalid_speed";
 
-            int stuckCount = ep.agent.StuckCount;
+            int stuckCount = ep.imitation != null ? ep.imitation.StuckCount : 0;
             bool successNoRescue = outcome == "success" && stuckCount == 0;
             float spl = successNoRescue ? Mathf.Clamp01(optimalPathLengthM / Mathf.Max(pathLengthM, optimalPathLengthM)) : 0f;
 
@@ -783,7 +941,7 @@ namespace Assets.Scripts.DataRecording
             float finalDistToGoal = Vector2.Distance(new Vector2(finalPos.x, finalPos.z), goalXZ);
 
             string note = errorMessage;
-            if (!warnedDiskModelChanged && ReadDiskModelMtime() != diskModelMtimeAtStart)
+            if (agentKind == AgentKind.Imitation && !warnedDiskModelChanged && ReadDiskModelMtime() != diskModelMtimeAtStart)
             {
                 warnedDiskModelChanged = true;
                 Debug.LogWarning("[EvalHarness] The model file on disk changed during this run - ImitationAgent may have hot-swapped it. Rows from here on are tagged disk_model_changed.");
@@ -805,8 +963,8 @@ namespace Assets.Scripts.DataRecording
                 startPos = spawnPos,
                 startOffsetM = ep.startOffsetM,
                 startHeadingJitterDeg = ep.headingJitterDeg,
-                poiPositions = ep.poiPositions,
-                endPos = ep.endPos,
+                poiPositions = routePois,
+                endPos = routeEnd,
                 outcome = outcome,
                 rawOutcome = rawOutcome,
                 successNoRescue = successNoRescue,
@@ -820,12 +978,13 @@ namespace Assets.Scripts.DataRecording
                 frames = frames,
                 pathLengthM = pathLengthM,
                 optimalPathLengthM = optimalPathLengthM,
+                optimalSegmentsM = optimalSegmentsM,
                 spl = spl,
                 meanSpeedMps = meanSpeed,
                 maxWindowSpeedMps = ep.maxWindowSpeedMps,
                 maxStepM = ep.maxStepM,
                 finalDistToGoalM = finalDistToGoal,
-                collisions = ep.agent.CollisionCount,
+                collisions = ep.imitation != null ? ep.imitation.CollisionCount : 0,
                 collisionEvents = ep.collisionEvents,
                 secondsToFirstCollision = ep.firstCollisionLogged ? ep.simAtFirstCollision : -1f,
                 stallSeconds = ep.stallSeconds,
@@ -845,7 +1004,6 @@ namespace Assets.Scripts.DataRecording
         private static void CloseTickWriter(ActiveEpisode ep)
         {
             if (ep.tickWriter == null) return;
-            if (ep.agent != null) ep.agent.TickLogSink = null;
             ep.tickWriter.Flush();
             ep.tickWriter.Close();
             ep.tickWriter = null;
@@ -1048,7 +1206,7 @@ namespace Assets.Scripts.DataRecording
                 : outputRootFolder;
 
             string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
-            string baseName = $"EvalRun_{sceneName}_{DateTime.Now:yyyyMMdd_HHmmss}";
+            string baseName = $"EvalRun_{sceneName}_{agentKind}_{DateTime.Now:yyyyMMdd_HHmmss}";
             string candidate = Path.Combine(root, baseName);
 
             int suffix = 0;
@@ -1066,7 +1224,7 @@ namespace Assets.Scripts.DataRecording
             csvWriter.WriteLine(string.Join(";", CsvColumns));
             csvWriter.Flush();
 
-            Debug.Log($"[EvalHarness] Run folder created at '{runFolderPath}'. Testing {configurationCount} configuration(s) x {agentsPerConfiguration} agent(s) each.");
+            Debug.Log($"[EvalHarness] Run folder created at '{runFolderPath}'. Testing {agentKind} on {configurationCount} configuration(s) x {agentsPerConfiguration} agent(s) each.");
         }
 
         private void SaveEpisodeHeatmap(List<Vector3> trajectory, string pngFilename)
@@ -1127,7 +1285,7 @@ namespace Assets.Scripts.DataRecording
 
         private static readonly string[] CsvColumns =
         {
-            "episode_id", "config_id", "agent_id", "timestamp", "harness_version", "scene",
+            "episode_id", "config_id", "agent_id", "timestamp", "harness_version", "agent_kind", "scene",
             "model_checkpoint", "model_sha256", "model_disk_mtime_utc", "random_seed",
             "layout_mode", "sim_speed", "timeout_s", "nudge_enabled",
             "start_pos", "start_offset_m", "start_heading_jitter_deg", "poi_positions", "end_pos",
@@ -1135,7 +1293,7 @@ namespace Assets.Scripts.DataRecording
             "num_pois_total", "num_pois_reached",
             "episode_length_steps", "episode_length_seconds", "success_time_s", "time_to_first_poi_s", "poi_times_s",
             "real_seconds", "frames",
-            "path_length_m", "optimal_path_length_m", "spl",
+            "path_length_m", "optimal_path_length_m", "optimal_segments_m", "spl",
             "mean_speed_mps", "max_window_speed_mps", "max_step_m", "final_dist_to_goal_m",
             "collision_count", "collision_events", "steps_to_first_collision", "seconds_to_first_collision",
             "stall_seconds", "stall_events", "longest_stall_s", "longest_stall_pos",
@@ -1169,6 +1327,7 @@ namespace Assets.Scripts.DataRecording
             public int frames;
             public float pathLengthM;
             public float optimalPathLengthM;
+            public List<float> optimalSegmentsM;
             public float spl;
             public float meanSpeedMps;
             public float maxWindowSpeedMps;
@@ -1185,6 +1344,7 @@ namespace Assets.Scripts.DataRecording
         private static string F(float v) => v.ToString("F3", CultureInfo.InvariantCulture);
         private static string I(int v) => v.ToString(CultureInfo.InvariantCulture);
         private static string B(bool v) => v ? "1" : "0";
+        private static string FOrEmpty(float v) => float.IsNaN(v) ? "" : F(v);
 
         private void WriteEpisodeRow(EpisodeRecord r)
         {
@@ -1200,6 +1360,17 @@ namespace Assets.Scripts.DataRecording
                 poiTimesJoined = string.Join("|", parts);
             }
 
+            // One NavMesh length per route leg (start -> POI_0, ..., POI_last -> end); they sum to optimal_path_length_m.
+            string optimalSegmentsJoined = "";
+            if (r.optimalSegmentsM != null && r.optimalSegmentsM.Count > 0)
+            {
+                var parts = new string[r.optimalSegmentsM.Count];
+                for (int i = 0; i < parts.Length; i++) parts[i] = F(r.optimalSegmentsM[i]);
+                optimalSegmentsJoined = string.Join("|", parts);
+            }
+
+            // Model identity, nudge and collision columns only exist for ImitationAgent (a NavMeshAgent cannot touch a wall).
+            bool imitation = agentKind == AgentKind.Imitation;
             string[] cells =
             {
                 I(episodeIndex),
@@ -1207,15 +1378,16 @@ namespace Assets.Scripts.DataRecording
                 I(r.agentId),
                 DateTime.Now.ToString("o", CultureInfo.InvariantCulture),
                 HarnessVersion,
+                agentKind.ToString(),
                 UnityEngine.SceneManagement.SceneManager.GetActiveScene().name,
-                modelAsset != null ? modelAsset.name : "",
+                ModelName(),
                 modelSha256,
                 ReadDiskModelMtime(),
                 I(r.seed),
                 randomizeMarkersPerConfiguration ? "randomized" : "fixed",
                 F(simulationSpeed),
                 F(episodeTimeoutSeconds),
-                B(!disableDeadlockNudge),
+                imitation ? B(!disableDeadlockNudge) : "",
                 FormatVector(r.startPos),
                 F(r.startOffsetM),
                 F(r.startHeadingJitterDeg),
@@ -1236,20 +1408,21 @@ namespace Assets.Scripts.DataRecording
                 I(r.frames),
                 F(r.pathLengthM),
                 F(r.optimalPathLengthM),
+                optimalSegmentsJoined,
                 F(r.spl),
                 F(r.meanSpeedMps),
                 F(r.maxWindowSpeedMps),
                 F(r.maxStepM),
                 F(r.finalDistToGoalM),
-                I(r.collisions),
-                I(r.collisionEvents),
+                imitation ? I(r.collisions) : "",
+                imitation ? I(r.collisionEvents) : "",
                 stepsToFirstCollision >= 0 ? I(stepsToFirstCollision) : "",
                 r.secondsToFirstCollision >= 0f ? F(r.secondsToFirstCollision) : "",
                 F(r.stallSeconds),
                 I(r.stallEvents),
                 F(r.longestStallS),
                 r.longestStallPos.HasValue ? FormatVector(r.longestStallPos.Value) : "",
-                I(r.nudgeCount),
+                imitation ? I(r.nudgeCount) : "",
                 r.png ?? "",
                 r.error ?? ""
             };
