@@ -1,6 +1,6 @@
 """
 Parity-test helper: prints the exact `sensory_inputs` tensor
-train_onAllRecordings_2DCNNModel.SingleEpisodeDataset builds for the first temporal
+dataset.SingleEpisodeDataset builds for the first temporal
 window of one recorded episode, so it can be diffed against ImitationAgent.BuildSensoryTensor's
 output on the same synthetic input from Unity (see Editor/SensoryTensorParityTest.cs).
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from train_onAllRecordings_2DCNNModel import SingleEpisodeDataset  # noqa: E402
+from dataset import SingleEpisodeDataset  # noqa: E402
 
 
 def parse_args():

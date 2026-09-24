@@ -1,242 +1,18 @@
+"""Legacy M4 trainer (continuous MSE head). Superseded by train_2DCNN_discrete.py; model and dataset live in
+model.py / dataset.py."""
 import copy
-import os
 import random
 import argparse
 from pathlib import Path
-import zarr
 import numpy as np
-import onnx
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, ConcatDataset, DataLoader
 
-from data_contract import TEMPORAL_WINDOW_SIZE, ACTION_HORIZON_SAMPLES, IMAGE_WIDTH, IMAGE_HEIGHT, CAMERA_FOV_DEG, read_manifest
-import ingest_to_zarr
+from dataset import SingleEpisodeDataset, load_episodes
+from model import SimpleImitation2DCNNModel, export_onnx
 
-# --- 1. Streamlined 2D CNN Model (Sentis Contract Preserved) ---
-class SimpleImitation2DCNNModel(nn.Module):
-    def __init__(self, img_res: int = 64):
-        super().__init__()
-        self.H = self.W = img_res
-
-        # Lightweight 2D CNN over a single 4-channel frame (RGB + Depth)
-        self.conv2d_encoder = nn.Sequential(
-            nn.Conv2d(4, 16, kernel_size=3, stride=2, padding=1),  # Output: (16, 32, 32)
-            nn.BatchNorm2d(16),
-            nn.ReLU(), # TODO: Try LeakyReLU()
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),  # Output: (32, 16, 16)
-            nn.BatchNorm2d(32),
-            nn.ReLU(), # TODO: Try LeakyReLU()
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),  # Output: (64, 8, 8)
-            nn.BatchNorm2d(64),
-            nn.ReLU(), # TODO: Try LeakyReLU()
-        )
-
-        # FiLM conditioning (Perez et al. 2017): the goal vector produces a per-channel
-        # scale/shift applied directly to the conv feature maps, instead of only being
-        # concatenated after flattening where it's just 4 of 4100 inputs to the head and easy
-        # for the network to learn to give near-zero weight - which is what previously produced
-        # a purely reactive wall-following policy that ignored where it was supposed to go.
-        # FiLM ties every visual channel's contribution to the goal instead of leaving that
-        # coupling to a single late, easily-bypassed linear layer.
-        #
-        # 4th component is a bounded goal-proximity signal (1/(1+distance_m), see
-        # SingleEpisodeDataset), not just direction - open-loop eval showed the model had zero
-        # way to distinguish "goal 50m away" from "goal 0.5m away" and so never learned to slow
-        # down/commit to a turn on final approach, instead orbiting the target.
-        self.goal_encoder = nn.Sequential(
-            nn.Linear(4, 32),
-            nn.ReLU(),
-        )
-        self.film_gamma = nn.Linear(32, 64)
-        self.film_beta = nn.Linear(32, 64)
-
-        self.flatten = nn.Flatten()
-
-        # +4 for the goal vector (direction + proximity), concatenated back in below on top of
-        # the FiLM modulation above, so the head still gets a direct, unfiltered look at it too.
-        self.network = nn.Sequential(
-            nn.Linear(64 * 8 * 8 + 4, 64),
-            nn.ReLU(), # TODO: Try LeakyReLU()
-            nn.Linear(64, 3)    # Motor Outputs: [Forward, Yaw, Pitch] (Unbounded)
-        )
-
-    def forward(self, sensory_inputs: torch.Tensor) -> torch.Tensor:
-        # 1. Split off the goal vector (direction xyz + proximity, first 4 floats) from the visual payload
-        goal_vec = sensory_inputs[:, :4]  # Shape: (Batch, 4)
-        vis_flat = sensory_inputs[:, 4:]  # Shape: (Batch, 16384)
-
-        # 2. Reshape the single most-recent RGBD frame -> (Batch, 64, 64, 4). There is no
-        #    temporal stacking anymore (TEMPORAL_WINDOW_SIZE == 1) - a 3-frame window used to be
-        #    carried all the way through capture/storage/transport only for this forward() to
-        #    immediately slice it back down to the latest frame, so the window was pure dead
-        #    weight; the whole pipeline now only ever produces/consumes a single frame.
-        x_latest = vis_flat.view(-1, self.H, self.W, 4)
-
-        # 3. Permute to PyTorch CNN layout -> (Batch, C=4, H=64, W=64)
-        x_latest = x_latest.permute(0, 3, 1, 2).contiguous()  # contiguous(): MPS conv rejects the strided permuted view
-
-        # 4. Pass through the 2D CNN, then use the goal vector to modulate the resulting
-        #    feature maps (FiLM) before flattening, then feed the goal vector into the MLP
-        #    head again alongside the modulated visual features.
-        vis_map = self.conv2d_encoder(x_latest)  # (Batch, 64, 8, 8)
-
-        goal_hidden = self.goal_encoder(goal_vec)
-        gamma = self.film_gamma(goal_hidden).unsqueeze(-1).unsqueeze(-1)  # (Batch, 64, 1, 1)
-        beta = self.film_beta(goal_hidden).unsqueeze(-1).unsqueeze(-1)   # (Batch, 64, 1, 1)
-        vis_map = vis_map * (1.0 + gamma) + beta
-
-        vis_features = self.flatten(vis_map)
-        combined = torch.cat([vis_features, goal_vec], dim=1)
-        return self.network(combined)
-
-def yaw_remap_indices(delta_deg: float, height: int = IMAGE_HEIGHT, width: int = IMAGE_WIDTH,
-                      fov_deg: float = CAMERA_FOV_DEG):
-    """Source (row, col) for every output pixel of the view after the camera yaws delta_deg to the right.
-
-    Under the pinhole projection a yaw is not a column shift: the ray through output pixel (u, v) (normalised image
-    coords in [-1, 1], tan(fov/2) at the border) is rotated about the vertical axis and re-projected, which moves
-    columns non-linearly (more at the edges) and scales rows by 1/z'. This does that exactly for pixel centres and
-    samples the nearest source pixel. What it cannot do is invent the strip that rotates into view: those pixels are
-    clamped to the nearest edge pixel (replicating it), which is the only approximation. At 60 deg FOV and |delta| <=
-    15 deg that strip is at most 17 of 64 columns. Depth is the distance along each pixel's ray, which a pure
-    rotation leaves unchanged, so the same remap is exact for depth as well (it would not be for z-depth)."""
-    t = np.tan(np.radians(fov_deg) / 2.0)
-    u = ((np.arange(width) + 0.5) / width * 2.0 - 1.0) * t
-    v = ((np.arange(height) + 0.5) / height * 2.0 - 1.0) * t
-    x, y = np.meshgrid(u, v)  # (H, W) ray directions (x, y, 1) in the new camera frame
-    c, sn = np.cos(np.radians(delta_deg)), np.sin(np.radians(delta_deg))
-    xs, zs = x * c + sn, -x * sn + c  # same ray in the old camera frame (x = right, z = forward)
-    zs = np.maximum(zs, 1e-6)
-    col = (xs / zs / t + 1.0) / 2.0 * width - 0.5
-    row = (y / zs / t + 1.0) / 2.0 * height - 0.5
-    return (np.clip(np.rint(row), 0, height - 1).astype(np.intp),
-            np.clip(np.rint(col), 0, width - 1).astype(np.intp))
-
-
-def rotate_view(a: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
-    """Apply yaw_remap_indices to a (T, H, W, C) array."""
-    return a[:, rows, cols]
-
-# Converts a raw goal distance (meters) into a bounded [0,1] proximity signal, with resolution
-# concentrated near the goal (where distinguishing 0.5m from 2m matters far more than 40m from
-# 45m) rather than an arbitrary linear /max_distance normalization. Must byte-for-byte match
-# ImitationAgent.GoalDistanceToProximity in Unity. Distance is stored raw in zarr specifically so
-# this transform can be changed later without re-recording.
-def goal_distance_to_proximity(distance_m: float) -> float:
-    return 1.0 / (1.0 + max(0.0, distance_m))
-
-# --- 2. Zarr Dataset Loader ---
-class SingleEpisodeDataset(Dataset):
-    def __init__(self, ep_path: Path, window_size: int = TEMPORAL_WINDOW_SIZE, augment: bool = False,
-                 action_horizon: int = ACTION_HORIZON_SAMPLES,
-                 rot_aug_deg: float = 0.0, rot_aug_prob: float = 0.7, rot_correction: float = 0.15):
-        zarr_root = zarr.open(str(ep_path / "dataset.zarr"), mode='r')
-        self.rgb = zarr_root['rgb']
-        self.depth = zarr_root['depth']
-        self.goal = zarr_root['goal']
-        if 'goal_distance' not in zarr_root:
-            raise ValueError(f"{ep_path}: dataset.zarr has no goal_distance array. Re-record the episode.")
-        self.goal_distance = zarr_root['goal_distance']
-        self.rot_aug_deg = rot_aug_deg
-        self.rot_aug_prob = rot_aug_prob
-        self.rot_correction = rot_correction
-        self.action_vel = zarr_root['action_vel']
-        self.action_rot = zarr_root['action_rot']
-
-        self.window_size = window_size
-        self.augment = augment
-        self.action_horizon = max(1, action_horizon)
-        # action_vel[i]/action_rot[i] (see ParticipantRecorder.LockedSamplingLoop) is the motion
-        # that occurred BETWEEN sample i-1 and sample i - i.e. the action that produced
-        # observation i, not the action to take from it. The label for the window ending at
-        # idx+w-1 is therefore the action recorded one sample later, at idx+w, which requires
-        # one fewer window than before (idx+w must stay in bounds).
-        self.num_frames = self.rgb.shape[0] - window_size
-
-    def __len__(self):
-        return max(0, self.num_frames)
-
-    def __getitem__(self, idx: int):
-        w = self.window_size
-
-        # Goal vector placeholder to meet Sentis memory layout
-        goal_vec = np.array(self.goal[idx + w - 1], dtype=np.float32)
-
-        # Proximity signal (see goal_distance_to_proximity) - gives the network the "how close
-        # am I" information the direction-only goal_vec above cannot provide on its own.
-        goal_proximity = goal_distance_to_proximity(float(self.goal_distance[idx + w - 1]))
-
-        # Interleaved (RGBD) frame sequence over window
-        rgb_win = np.array(self.rgb[idx:idx+w], dtype=np.float32) / 255.0  # (T, 64, 64, 3)
-        depth_win = np.array(self.depth[idx:idx+w], dtype=np.float32)[..., np.newaxis]  # (T, 64, 64, 1)
-
-        # Target Motor Actions: the action to take FROM this observation, i.e. the one recorded
-        # one sample after the window (see num_frames comment above).
-        forward = np.array(self.action_vel[idx + w][2], dtype=np.float32)   # z = forward/back
-        # Yaw/pitch are averaged over the next action_horizon samples (fewer at the very end of an
-        # episode) - see ACTION_HORIZON_SAMPLES in data_contract.py for why. Wrap each yaw sample
-        # BEFORE averaging so a 357.6 -> -2.4 wraparound can't corrupt the mean.
-        rot = np.array(self.action_rot[idx + w: min(idx + w + self.action_horizon, self.rgb.shape[0])], dtype=np.float32)
-        yaw = np.float32(((rot[:, 0] + 180.0) % 360.0 - 180.0).mean())      # index 0 = azimuth delta = yaw
-        pitch = np.float32(rot[:, 1].mean())                                # index 1 = elevation delta = pitch
-
-        if self.augment:
-            # Random horizontal (left/right) flip. goal_vec is in the agent's local frame
-            # (x=right, y=up, z=forward - see ParticipantRecorder.LockedSamplingLoop's
-            # InverseTransformDirection), so mirroring the image left/right requires negating
-            # goal_vec's x component and the yaw action; forward, pitch, and the goal's
-            # up/forward components are unaffected by a left/right mirror. On a single fixed
-            # layout this is close to free extra data: it stops the CNN from memorizing which
-            # specific walls/textures mean "turn left" vs "turn right".
-            if random.random() < 0.5:
-                rgb_win = rgb_win[:, :, ::-1, :].copy()
-                depth_win = depth_win[:, :, ::-1, :].copy()
-                goal_vec[0] = -goal_vec[0]
-                yaw = -yaw
-
-            # Simulated heading error with corrective relabelling (the PilotNet "shifted camera + steering
-            # correction" idea). Humans never drive into a wall or arrive at a doorway with a bad
-            # heading, so the recordings contain no examples of RECOVERING from one - and BC has no way
-            # to learn recovery from demonstrations that never needed it. Here the view is rotated by a
-            # random delta (positive = the agent turned right): both images are re-projected for that
-            # yaw (yaw_remap_indices; RGB and depth share one camera, so one remap), the goal direction is rotated the opposite way in the local
-            # frame, and the yaw label gets a proportional correction back towards the demonstrated
-            # heading. rot_correction is deg/sample of yaw per degree of error (0.15 -> a 15 deg error
-            # asks for 2.25 deg/sample = 22 deg/s, i.e. ~1 s to recover).
-            if self.rot_aug_deg > 0.0 and random.random() < self.rot_aug_prob:
-                delta = random.uniform(-self.rot_aug_deg, self.rot_aug_deg)
-                rows, cols = yaw_remap_indices(delta)
-                rgb_win = rotate_view(rgb_win, rows, cols)
-                depth_win = rotate_view(depth_win, rows, cols)
-                c, sn = np.cos(np.radians(delta)), np.sin(np.radians(delta))
-                gx, gz = goal_vec[0], goal_vec[2]
-                goal_vec[0] = gx * c - gz * sn
-                goal_vec[2] = gx * sn + gz * c
-                yaw = np.float32(yaw - self.rot_correction * delta)
-
-            # Photometric jitter on RGB only, to fight overfitting to this layout's specific
-            # lighting/texture rather than the underlying navigation cue.
-            contrast = random.uniform(0.8, 1.2)
-            brightness = random.uniform(0.8, 1.2)
-            rgb_win = np.clip((rgb_win - 0.5) * contrast + 0.5, 0.0, 1.0)
-            rgb_win = np.clip(rgb_win * brightness, 0.0, 1.0)
-
-            # Small additive noise on depth only, to simulate raycast/sensor jitter instead of
-            # letting the CNN treat exact depth readings on this one fixed layout as a
-            # memorizable fingerprint. Depth is already normalized to [0,1] by MaxRayDistance
-            # (ParticipantRecorder.LockedSamplingLoop), so a small fixed std stays proportionate
-            # across the whole range; this never touches Unity's BuildSensoryTensor or the
-            # parity test since it's train-time-only, applied after that shared feature layout.
-            depth_win = np.clip(depth_win + np.random.normal(0.0, 0.02, depth_win.shape).astype(np.float32), 0.0, 1.0)
-
-        rgbd = np.concatenate([rgb_win, depth_win], axis=-1).flatten()
-        sensory_inputs = np.concatenate([goal_vec, np.array([goal_proximity], dtype=np.float32), rgbd])
-        motor_actions = np.array([forward, yaw, pitch], dtype=np.float32)
-
-        return torch.from_numpy(sensory_inputs), torch.from_numpy(motor_actions)
-
-# --- 3. Per-channel label scale (forward is m/s, yaw/pitch are degrees - very different natural scales) ---
+# --- 1. Per-channel label scale (forward is m/s, yaw/pitch are degrees - very different natural scales) ---
 def compute_label_stats(dataset: Dataset) -> tuple[torch.Tensor, torch.Tensor]:
     loader = DataLoader(dataset, batch_size=256, shuffle=False, num_workers=0)
     all_actions = torch.cat([actions for _, actions in loader], dim=0)
@@ -244,7 +20,7 @@ def compute_label_stats(dataset: Dataset) -> tuple[torch.Tensor, torch.Tensor]:
     std = all_actions.std(dim=0).clamp_min(1e-6)
     return mean, std
 
-# --- 4. Open-loop diagnostics on held-out episodes ---
+# --- 2. Open-loop diagnostics on held-out episodes ---
 @torch.no_grad()
 def report_turn_response(model: nn.Module, dataset: Dataset, device: torch.device, tag: str) -> None:
     """Does the model actually turn towards an off-axis goal? Plain val MSE can't tell: with bursty human
@@ -280,83 +56,8 @@ def report_turn_response(model: nn.Module, dataset: Dataset, device: torch.devic
         print(f"  turning frames (|demo yaw| > 3): n={int(turning.sum())}, slope of predicted vs demonstrated yaw = {slope:.2f} (1.0 = full response)")
     print(f"  forward: demo mean {tgt[:, 0].mean():.2f} | pred mean {pred[:, 0].mean():.2f} m/s")
 
-# --- 5. ONNX Exporter ---
-def export_onnx(model: nn.Module, output_path: str):
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    model.eval()
-    sensory_input_dim = TEMPORAL_WINDOW_SIZE * IMAGE_WIDTH * IMAGE_HEIGHT * 4 + 4
-    dummy_input = torch.randn(1, sensory_input_dim, dtype=torch.float32)
 
-    torch.onnx.export(
-        model,
-        dummy_input,
-        output_path,
-        export_params=True,
-        opset_version=17,
-        do_constant_folding=True,
-        input_names=['sensory_inputs'],
-        output_names=['motor_actions'],
-        dynamic_axes={
-            'sensory_inputs': {0: 'batch_size'},
-            'motor_actions': {0: 'batch_size'}
-        }
-    )
-
-    # Recent torch versions transparently split the export into a small .onnx header plus a
-    # separate .onnx.data file once the weights are large enough. Unity Sentis only understands
-    # a single self-contained .onnx file, so re-save with everything embedded in one file.
-    onnx_model = onnx.load(output_path, load_external_data=True)
-    onnx.save(onnx_model, output_path, save_as_external_data=False)
-    data_path = output_path + ".data"
-    if os.path.exists(data_path):
-        os.remove(data_path)
-
-    print(f"\n[EXPORT SUCCESS] ONNX model exported to: {output_path}")
-
-# --- 5b. Auto-ingest raw recordings into Zarr before training sees them ---
-def ensure_all_episodes_ingested(recordings_dir: Path) -> None:
-    """Scan recordings_dir for raw episode folders (manifest.json present) that haven't been
-    converted to dataset.zarr yet, and convert them in place. Runs every time before training so
-    freshly recorded episodes (e.g. new synthetic batches) are picked up automatically instead of
-    silently being skipped by the episode discovery below."""
-    if not recordings_dir.is_dir():
-        return
-    raw_episode_dirs = sorted(
-        p for p in recordings_dir.iterdir()
-        if p.is_dir() and (p / "manifest.json").exists() and not (p / "dataset.zarr").exists()
-    )
-    if not raw_episode_dirs:
-        print("[INGEST] All episodes already converted to dataset.zarr - nothing to do.")
-        return
-    print(f"[INGEST] {len(raw_episode_dirs)} episode(s) missing dataset.zarr - converting now...")
-    for ep in raw_episode_dirs:
-        print(f"[INGEST] Converting {ep.name}...")
-        ingest_to_zarr.convert_episode(str(ep), str(ep / "dataset.zarr"))
-    print(f"[INGEST] Done - converted {len(raw_episode_dirs)} episode(s).")
-
-
-def load_episodes(recordings_dir: Path) -> list:
-    """Ingest what is new, then return [(episode_dir, manifest)] for every episode folder in recordings_dir.
-    Every manifest is checked (data_contract.check_manifest): one episode without layout, participant, task or
-    camera metadata, or without goal_distance, stops training instead of being silently mixed in."""
-    ensure_all_episodes_ingested(recordings_dir)
-    episodes = []
-    bad = []
-    for ep in sorted(p for p in recordings_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
-        try:
-            manifest = read_manifest(ep)
-            if not (ep / "dataset.zarr").exists():
-                raise FileNotFoundError(f"{ep}: no dataset.zarr")
-        except (OSError, ValueError) as ex:
-            bad.append(str(ex))
-            continue
-        episodes.append((ep, manifest))
-    if bad:
-        raise ValueError(f"{len(bad)} episode(s) in {recordings_dir} violate the data contract - delete or re-record them:\n  "
-                         + "\n  ".join(bad))
-    return episodes
-
-# --- 6. Training Loop ---
+# --- 3. Training Loop ---
 def main():
     parser = argparse.ArgumentParser(description="Simplified 2D Behavior Cloning Pipeline")
     parser.add_argument("--recordings_dir", type=str, default="./recordings")

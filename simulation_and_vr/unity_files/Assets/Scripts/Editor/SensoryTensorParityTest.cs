@@ -14,7 +14,7 @@ namespace Assets.Scripts.Editor
     /// <summary>
     /// Automated parity test: proves the recording -> training pipeline
     /// (ParticipantRecorder's binary write format -> ingest_to_zarr.py ->
-    /// train_onAllRecordings_2DCNNModel.SingleEpisodeDataset) and the live-inference pipeline
+    /// dataset.SingleEpisodeDataset) and the live-inference pipeline
     /// (ImitationAgent.BuildSensoryTensor) produce the byte-for-byte-equivalent "sensory_inputs"
     /// tensor from the same synthetic input.
     ///

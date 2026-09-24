@@ -1137,7 +1137,7 @@ namespace Agent_Based_Modelling
         /// <summary>
         /// Converts a raw goal distance (meters) into the same bounded, resolution-favoring-close-range
         /// proximity signal fed to the network on both sides - see SingleEpisodeDataset.__getitem__'s
-        /// identical transform in train_onAllRecordings_2DCNNModel.py. Raw distance is recorded/passed
+        /// identical transform in dataset.py. Raw distance is recorded/passed
         /// around unconverted so this transform can change later without re-recording.
         /// </summary>
         public static float GoalDistanceToProximity(float goalDistanceMeters)
@@ -1150,7 +1150,7 @@ namespace Agent_Based_Modelling
         /// "sensory_inputs" layout the ONNX model was trained on: [goal.x, goal.y, goal.z,
         /// proximity(goal_distance), then per frame (oldest to newest) per pixel (row-major)
         /// R/255, G/255, B/255, depth]. This must byte-for-byte match
-        /// SingleEpisodeDataset.__getitem__ in train_onAllRecordings_2DCNNModel.py - extracted as
+        /// SingleEpisodeDataset.__getitem__ in dataset.py - extracted as
         /// its own static, side-effect-free method (rather than being inlined in
         /// ExecuteNeuralNetworkInference) specifically so SensoryTensorParityTest can call it
         /// directly with synthetic frame data and compare it against the Python training

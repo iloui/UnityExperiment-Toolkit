@@ -16,7 +16,7 @@ using UnityEditor;
 namespace Assets.Scripts.DataRecording
 {
     /// <summary>
-    /// One full retrain of the discrete model (train_2DCNN_discrete.py, from scratch, on everything in zarr_recordings) in a
+    /// One full retrain of the discrete model (train_2DCNN_discrete.py, from scratch, condition C of splits.json) in a
     /// background process. ParticipantSession requests it once a session is finished; Tools > Thesis > Retrain Discrete Model
     /// Now starts it by hand. Never two at once: imitationagent_training/retrain.lock holds the running process.
     ///
@@ -106,6 +106,14 @@ namespace Assets.Scripts.DataRecording
                 Debug.LogError($"{LogTag} Not started ('{reason}'): {envError}");
                 return false;
             }
+            if (!File.Exists(SplitsPath))
+            {
+                // Without participant splits every human would be trained on, including the held-out baseline.
+                Debug.LogError($"{LogTag} Not started ('{reason}'): {SplitsPath} is missing. Write it once all participants " +
+                               "are recorded: cd imitationagent_training/training_pipeline && python make_splits.py " +
+                               "--n_heldout <k> --n_subset_B <m> --seed 1");
+                return false;
+            }
 
             string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
             Directory.CreateDirectory(LogDirectory);
@@ -123,14 +131,12 @@ namespace Assets.Scripts.DataRecording
             {
                 "train_2DCNN_discrete.py",
                 "--recordings_dir", "../zarr_recordings",
-                "--sources", "all",
+                "--synthetic_sources", "all",
+                "--splits", "../splits.json",
+                "--condition", "C",
                 "--output_onnx", $"../imitation_agent_model/{ModelPrefix}{stamp}.onnx",
                 "--reason", SafeArgument(reason),
             };
-            if (File.Exists(SplitsPath))
-            {
-                args.AddRange(new[] { "--splits", "../splits.json", "--condition", "C" });
-            }
 
             try
             {
@@ -166,8 +172,7 @@ namespace Assets.Scripts.DataRecording
             Follow(info, 0);
             EnsurePump();
             Debug.Log($"{LogTag} Started full retrain (pid {info.pid}) - '{reason}'.\n" +
-                      $"python: {python}\nargs: {string.Join(" ", args)}\nlog: {info.log_path}" +
-                      (File.Exists(SplitsPath) ? "" : "\n(no splits.json - training on every human participant)"));
+                      $"python: {python}\nargs: {string.Join(" ", args)}\nlog: {info.log_path}");
             return true;
         }
 
