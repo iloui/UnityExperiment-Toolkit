@@ -88,17 +88,38 @@ class SimpleImitation2DCNNModel(nn.Module):
 
 
 class DiscreteImitation2DCNNModel(SimpleImitation2DCNNModel):
-    """M4 trunk, discrete head: motor_actions = [walk_logit, yaw_logit_0..6, pitch_deg_per_sample]."""
+    """M4 trunk, discrete head: motor_actions = [walk_logit, yaw_logit_0..6, pitch_deg_per_sample].
+    proprio_size > 0: sensory_inputs ends with that many own-motion values (data_contract.PROPRIO_*). They join the goal
+    vector everywhere it is used (FiLM conditioning and the head), so "already turning left" can modulate the same
+    visual features the goal does."""
 
-    def __init__(self, img_res: int = 64):
+    def __init__(self, img_res: int = 64, proprio_size: int = 0):
         super().__init__(img_res=img_res)
+        self.proprio_size = proprio_size
+        cond = 4 + proprio_size
+        if proprio_size:
+            self.goal_encoder[0] = nn.Linear(cond, self.goal_encoder[0].out_features)
+            self.network[0] = nn.Linear(64 * 8 * 8 + cond, self.network[0].out_features)
         self.network[-1] = nn.Linear(self.network[-1].in_features, DISCRETE_OUTPUT_SIZE)
+
+    def forward(self, sensory_inputs: torch.Tensor) -> torch.Tensor:
+        if not self.proprio_size:
+            return super().forward(sensory_inputs)
+        pixels = self.H * self.W * 4
+        cond = torch.cat([sensory_inputs[:, :4], sensory_inputs[:, 4 + pixels:]], dim=1)
+        x = sensory_inputs[:, 4:4 + pixels].reshape(-1, self.H, self.W, 4).permute(0, 3, 1, 2).contiguous()
+        vis_map = self.conv2d_encoder(x)
+        hidden = self.goal_encoder(cond)
+        gamma = self.film_gamma(hidden).unsqueeze(-1).unsqueeze(-1)
+        beta = self.film_beta(hidden).unsqueeze(-1).unsqueeze(-1)
+        vis_map = vis_map * (1.0 + gamma) + beta
+        return self.network(torch.cat([self.flatten(vis_map), cond], dim=1))
 
 
 def export_onnx(model: nn.Module, output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     model.eval()
-    sensory_input_dim = TEMPORAL_WINDOW_SIZE * IMAGE_WIDTH * IMAGE_HEIGHT * 4 + 4
+    sensory_input_dim = TEMPORAL_WINDOW_SIZE * IMAGE_WIDTH * IMAGE_HEIGHT * 4 + 4 + getattr(model, "proprio_size", 0)
     dummy_input = torch.randn(1, sensory_input_dim, dtype=torch.float32)
 
     torch.onnx.export(

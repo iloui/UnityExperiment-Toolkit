@@ -10,7 +10,9 @@ import zarr
 from torch.utils.data import Dataset
 
 import ingest_to_zarr
-from data_contract import (ACTION_HORIZON_SAMPLES, CAMERA_FOV_DEG, IMAGE_HEIGHT, IMAGE_WIDTH, TEMPORAL_WINDOW_SIZE,
+from data_contract import (ACTION_HORIZON_SAMPLES, CAMERA_FOV_DEG, IMAGE_HEIGHT, IMAGE_WIDTH, PROPRIO_SIZE,
+                           PROPRIO_SPEED_SCALE_MPS, PROPRIO_TURN, PROPRIO_TURN_CLIP, PROPRIO_TURN_SCALE_DEG, PROPRIO_YAW,
+                           PROPRIO_YAW_SCALE_DEG, PROPRIO_YAW_WINDOW_SAMPLES, TEMPORAL_WINDOW_SIZE, WALK_THRESHOLD_MPS,
                            read_manifest)
 
 
@@ -52,11 +54,38 @@ def goal_distance_to_proximity(distance_m: float) -> float:
     return 1.0 / (1.0 + max(0.0, distance_m))
 
 
+def proprio_table(action_vel: np.ndarray, action_rot: np.ndarray) -> np.ndarray:
+    """(T, PROPRIO_SIZE) own-motion input for every observation of one episode (data_contract.PROPRIO_*), mirrored by
+    ImitationAgent.UpdateProprio. action_vel[i]/action_rot[i] are the motion between samples i-1 and i. Sample 0 has no
+    predecessor (its action_rot is the absolute azimuth, not a delta), so it counts as no motion."""
+    T = len(action_vel)
+    speed = np.asarray(action_vel[:, 2], dtype=np.float64).copy()
+    yaw = ((np.asarray(action_rot[:, 0], dtype=np.float64) + 180.0) % 360.0) - 180.0
+    speed[0] = 0.0
+    yaw[0] = 0.0
+    out = np.zeros((T, PROPRIO_SIZE), dtype=np.float32)
+    turn = 0.0
+    for i in range(T):
+        turn = 0.0 if speed[i] > WALK_THRESHOLD_MPS else turn + yaw[i]
+        recent = yaw[max(1, i - PROPRIO_YAW_WINDOW_SAMPLES + 1): i + 1]
+        out[i] = [speed[i] / PROPRIO_SPEED_SCALE_MPS,
+                  (speed[i - 1] if i > 0 else 0.0) / PROPRIO_SPEED_SCALE_MPS,
+                  (recent.mean() if len(recent) else 0.0) / PROPRIO_YAW_SCALE_DEG,
+                  np.clip(turn / PROPRIO_TURN_SCALE_DEG, -PROPRIO_TURN_CLIP, PROPRIO_TURN_CLIP),
+                  1.0]
+    return out
+
+
 class SingleEpisodeDataset(Dataset):
     def __init__(self, ep_path: Path, window_size: int = TEMPORAL_WINDOW_SIZE, augment: bool = False,
                  action_horizon: int = ACTION_HORIZON_SAMPLES,
-                 rot_aug_deg: float = 0.0, rot_aug_prob: float = 0.7, rot_correction: float = 0.15):
+                 rot_aug_deg: float = 0.0, rot_aug_prob: float = 0.7, rot_correction: float = 0.15,
+                 proprio: bool = False, proprio_dropout: float = 0.0):
+        """proprio: append proprio_table's PROPRIO_SIZE values after the pixels. proprio_dropout (augment only): probability of
+        replacing them with (0, 0, 0) = "not available", so the model can't lean on its own motion alone."""
         zarr_root = zarr.open(str(ep_path / "dataset.zarr"), mode='r')
+        self.proprio = proprio
+        self.proprio_dropout = proprio_dropout
         self.rgb = zarr_root['rgb']
         self.depth = zarr_root['depth']
         self.goal = zarr_root['goal']
@@ -66,8 +95,10 @@ class SingleEpisodeDataset(Dataset):
         self.rot_aug_deg = rot_aug_deg
         self.rot_aug_prob = rot_aug_prob
         self.rot_correction = rot_correction
-        self.action_vel = zarr_root['action_vel']
-        self.action_rot = zarr_root['action_rot']
+        # Small (T x 3); read once so the per-sample label and proprio lookups don't hit zarr.
+        self.action_vel = np.array(zarr_root['action_vel'], dtype=np.float32)
+        self.action_rot = np.array(zarr_root['action_rot'], dtype=np.float32)
+        self.proprio_rows = proprio_table(self.action_vel, self.action_rot) if proprio else None
 
         self.window_size = window_size
         self.augment = augment
@@ -105,8 +136,11 @@ class SingleEpisodeDataset(Dataset):
         rot = np.array(self.action_rot[idx + w: min(idx + w + self.action_horizon, self.rgb.shape[0])], dtype=np.float32)
         yaw = np.float32(((rot[:, 0] + 180.0) % 360.0 - 180.0).mean())      # index 0 = azimuth delta = yaw
         pitch = np.float32(rot[:, 1].mean())                                # index 1 = elevation delta = pitch
+        proprio = self.proprio_rows[idx + w - 1].copy() if self.proprio else None
 
         if self.augment:
+            if proprio is not None and random.random() < self.proprio_dropout:
+                proprio = np.zeros_like(proprio)
             # Random horizontal (left/right) flip. goal_vec is in the agent's local frame
             # (x=right, y=up, z=forward - see ParticipantRecorder.LockedSamplingLoop's
             # InverseTransformDirection), so mirroring the image left/right requires negating
@@ -119,6 +153,9 @@ class SingleEpisodeDataset(Dataset):
                 depth_win = depth_win[:, :, ::-1, :].copy()
                 goal_vec[0] = -goal_vec[0]
                 yaw = -yaw
+                if proprio is not None:
+                    proprio[PROPRIO_YAW] = -proprio[PROPRIO_YAW]
+                    proprio[PROPRIO_TURN] = -proprio[PROPRIO_TURN]
 
             # Simulated heading error with corrective relabelling (the PilotNet "shifted camera + steering
             # correction" idea). Humans never drive into a wall or arrive at a doorway with a bad
@@ -156,7 +193,10 @@ class SingleEpisodeDataset(Dataset):
             depth_win = np.clip(depth_win + np.random.normal(0.0, 0.02, depth_win.shape).astype(np.float32), 0.0, 1.0)
 
         rgbd = np.concatenate([rgb_win, depth_win], axis=-1).flatten()
-        sensory_inputs = np.concatenate([goal_vec, np.array([goal_proximity], dtype=np.float32), rgbd])
+        parts = [goal_vec, np.array([goal_proximity], dtype=np.float32), rgbd]
+        if proprio is not None:
+            parts.append(proprio)
+        sensory_inputs = np.concatenate(parts)
         motor_actions = np.array([forward, yaw, pitch], dtype=np.float32)
 
         return torch.from_numpy(sensory_inputs), torch.from_numpy(motor_actions)

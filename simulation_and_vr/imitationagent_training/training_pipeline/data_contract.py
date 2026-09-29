@@ -45,6 +45,31 @@ WALK_THRESHOLD_MPS = 0.65
 # ONNX 'motor_actions' layout of the discrete model: [walk_logit, yaw_logit_0..6, pitch_deg_per_sample].
 DISCRETE_OUTPUT_SIZE = 1 + YAW_CLASS_COUNT + 1
 
+# --- Own-motion (proprioceptive) input of the discrete model (train_2DCNN_discrete.py --proprio) ---
+# A single frame does not show whether the walker is standing or already turning, but the demonstrations depend on it:
+# a standing bot stays standing in 95.6% of the next samples and a turning bot reverses side in only ~10%. Without it
+# the policy re-decides every 0.1 s and flips side whenever the goal crosses the view centre. These values are measured
+# motion, not the policy's own previous output, so they mean the same in the recordings and in Unity. Appended AFTER the
+# pixels in 'sensory_inputs', so goal and pixel offsets are unchanged. Must match ZarrDataContract.Proprio and
+# ImitationAgent.UpdateProprio. Layout (v2, 2026-09-28 evening):
+#   speed       forward speed of the sample that led to this observation / PROPRIO_SPEED_SCALE_MPS
+#   prev_speed  the same for the sample before. Speed alone can't tell starting from stopping: at 0.02-0.65 m/s the bot
+#               walks next in 78% of samples when speed is rising and in 1% when it is falling.
+#   yaw         wrapped mean yaw of the last PROPRIO_YAW_WINDOW_SAMPLES samples (deg/sample) / PROPRIO_YAW_SCALE_DEG
+#   turn        signed heading change since the walker last walked (0 while walking) / PROPRIO_TURN_SCALE_DEG, clipped to
+#               +-PROPRIO_TURN_CLIP. The bot turns a median 42 deg per stop and >180 deg in only 3%; without this the
+#               v1 models turned in place through 180-360 deg without ever walking off.
+#   available   1; 0 (all five values 0) only for the training-time dropout that keeps vision predictive on its own
+# The first sample of an episode has no motion (0, 0, 0, 0, 1). v1 (2026-09-28 afternoon, ImitationAgent_A_proprio_s*)
+# was [speed, yaw, available]; Unity still runs those models, training only writes v2.
+PROPRIO_SIZE = 5
+PROPRIO_SPEED, PROPRIO_PREV_SPEED, PROPRIO_YAW, PROPRIO_TURN, PROPRIO_AVAILABLE = range(PROPRIO_SIZE)
+PROPRIO_YAW_WINDOW_SAMPLES = 5
+PROPRIO_SPEED_SCALE_MPS = 1.3
+PROPRIO_YAW_SCALE_DEG = 10.0
+PROPRIO_TURN_SCALE_DEG = 180.0
+PROPRIO_TURN_CLIP = 2.0
+
 # Field of view (degrees) of the single capture camera; the image is square, so horizontal = vertical.
 # RGB and depth come from the same pinhole camera: depth pixel (x, y) is the distance along the ray
 # through the centre of RGB pixel (x, y), divided by MAX_RAY_DISTANCE (Unity ContractCamera). Row 0 is

@@ -23,6 +23,27 @@ often). The B/C comparison measures human diversity, not how much the model is p
 
 Same trunk, inputs, augmentations and ONNX input/output names as M4; only the output size changes
 (data_contract.DISCRETE_OUTPUT_SIZE), which ImitationAgent detects at load time.
+
+Own motion (--proprio, default on; data_contract.PROPRIO_*): the 2026-09-28 fixed-task evals of the single-frame model
+(ImitationAgent_A_s1) froze in all three layouts. Spawned 3.6 m in front of a wall with the goal straight behind it, the
+agent stood still and swung +-6 deg around the goal bearing for 88 s: it turned one way, the goal left the view centre,
+and the next frame said "turn back". The demonstrations don't do that. A standing bot keeps standing in 95.6% of the
+next samples and a turning bot reverses side in only ~10%, but a single frame can't tell standing from walking or
+turning left from turning right. The model therefore also gets its measured speed and recent yaw, the same values
+Unity measures on the agent's body. Two standard counters to the "copycat" failure (the model just continues its own
+motion and ignores the camera):
+  - --proprio_dropout hides the motion input in a share of training frames (flag = 0), so vision alone stays predictive;
+  - --walk_keyframe_weight / --yaw_keyframe_weight up-weight the frames where the demonstrated action differs from the
+    current motion (start or stop walking; start, end or reverse a turn), the only frames where vision has to overrule
+    motion.
+Walk/stop then becomes a per-tick hazard (P(walk | standing) is small), so ImitationAgent samples the walk decision
+instead of thresholding it at 0.5 (stochasticWalk), or the agent could never start walking again.
+
+v2 (same evening), after the v1 models (3 motion values, dropout 0.3, one keyframe weight 3) got out of the start area
+but then stood and turned in place through 180-360 deg without walking off. Held-out frames showed the walk head was
+copying motion: 0.98 walk/stop accuracy with the motion input vs 0.85 without, but only 28-53% of "start walking" and
+5-21% of "stop" frames right. Changes: previous speed and turn-since-last-walk added to the motion input
+(data_contract.PROPRIO_*), dropout 0.5, start/stop frames weighted 6x (turn keyframes stay at 3x).
 """
 import argparse
 import copy
@@ -38,8 +59,9 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, WeightedRandomSampler
 
-from data_contract import (SOURCE_HUMAN, WALK_THRESHOLD_MPS, YAW_BIN_CENTERS_DEG, YAW_BIN_EDGES_DEG, YAW_CLASS_COUNT,
-                           YAW_STRAIGHT_CLASS)
+from data_contract import (PROPRIO_AVAILABLE, PROPRIO_SIZE, PROPRIO_SPEED, PROPRIO_SPEED_SCALE_MPS, PROPRIO_YAW,
+                           PROPRIO_YAW_SCALE_DEG, SOURCE_HUMAN,
+                           WALK_THRESHOLD_MPS, YAW_BIN_CENTERS_DEG, YAW_BIN_EDGES_DEG, YAW_CLASS_COUNT, YAW_STRAIGHT_CLASS)
 from dataset import SingleEpisodeDataset, load_episodes
 from make_splits import CONDITIONS, DRY_RUN_PREFIX, condition_humans, load_splits
 from model import DiscreteImitation2DCNNModel, export_onnx
@@ -156,9 +178,10 @@ def assert_no_heldout(episode_lists, heldout) -> None:
 def build_dataset(episodes, augment: bool, args):
     parts, sources = [], []
     for ep, src, _ in episodes:
-        kwargs = {}
+        kwargs = {"proprio": args.proprio}
         if augment:
-            kwargs.update(rot_aug_deg=args.rot_aug_deg, rot_aug_prob=args.rot_aug_prob, rot_correction=args.rot_correction)
+            kwargs.update(rot_aug_deg=args.rot_aug_deg, rot_aug_prob=args.rot_aug_prob, rot_correction=args.rot_correction,
+                          proprio_dropout=args.proprio_dropout)
         ds = SingleEpisodeDataset(ep, augment=augment, **kwargs)
         if len(ds) > 0:
             parts.append(ds)
@@ -231,35 +254,67 @@ def label_weights_from(dataset: DiscreteLabelDataset, sources, human_share: floa
     return torch.tensor(w / w.mean(), dtype=torch.float32), stop_weight
 
 
-def compute_losses(out, target, yaw_class_weights, pitch_std, args):
+def motion_state(sensory: torch.Tensor):
+    """From the proprio block at the end of sensory_inputs -> (available, walking now 0/1, turn side now -1/0/+1).
+    Walking = speed above WALK_THRESHOLD_MPS, turning = |recent yaw| at least the straight bin edge."""
+    motion = sensory[:, -PROPRIO_SIZE:]
+    speed = motion[:, PROPRIO_SPEED] * PROPRIO_SPEED_SCALE_MPS
+    yaw = motion[:, PROPRIO_YAW] * PROPRIO_YAW_SCALE_DEG
+    side = torch.where(yaw.abs() >= YAW_BIN_EDGES_DEG[0], torch.sign(yaw), torch.zeros_like(yaw))
+    return motion[:, PROPRIO_AVAILABLE] > 0.5, (speed > WALK_THRESHOLD_MPS).float(), side
+
+
+def keyframes(sensory: torch.Tensor, target: torch.Tensor):
+    """(walk keyframe, yaw keyframe) masks: the demonstrated action differs from the current motion. False where the
+    motion input is hidden (dropout)."""
+    available, walking, side = motion_state(sensory)
+    label_side = torch.sign(target[:, 1] - YAW_STRAIGHT_CLASS)
+    return available & (target[:, 0] != walking), available & (label_side != side)
+
+
+def compute_losses(out, target, sensory, yaw_class_weights, pitch_std, args):
     walk_loss = F.binary_cross_entropy_with_logits(out[:, 0], target[:, 0], reduction="none")
     walk_loss = walk_loss * torch.where(target[:, 0] < 0.5, args.stop_weight, 1.0)
     yaw_loss = F.cross_entropy(out[:, 1:1 + YAW_CLASS_COUNT], target[:, 1].long(), weight=yaw_class_weights,
                                label_smoothing=args.label_smoothing, reduction="none")
+    if args.proprio:
+        walk_key, yaw_key = keyframes(sensory, target)
+        walk_loss = walk_loss * torch.where(walk_key, args.walk_keyframe_weight, 1.0)
+        yaw_loss = yaw_loss * torch.where(yaw_key, args.yaw_keyframe_weight, 1.0)
     pitch_loss = ((out[:, -1] - target[:, 2]) / pitch_std) ** 2
     return walk_loss, yaw_loss, pitch_loss
 
 
 # --- 5. Held-out diagnostics ---
 @torch.no_grad()
-def evaluate(model, loader, device, yaw_class_weights, pitch_std, args):
+def evaluate(model, loader, device, yaw_class_weights, pitch_std, args, hide_proprio=False):
+    """hide_proprio: feed every frame with the motion input marked unavailable (the dropout state), to measure how much
+    the policy still gets from the camera and goal alone."""
     model.eval()
     sums = dict(walk=0.0, yaw=0.0, pitch=0.0, n=0)
     rows = []
+    pixels = 64 * 64 * 4
     for sensory, target in loader:
         sensory, target = sensory.to(device), target.to(device)
+        if hide_proprio:
+            sensory = sensory.clone()
+            sensory[:, 4 + pixels:] = 0.0
         out = model(sensory)
-        wl, yl, pl = compute_losses(out, target, yaw_class_weights, pitch_std, args)
+        wl, yl, pl = compute_losses(out, target, sensory, yaw_class_weights, pitch_std, args)
         sums["walk"] += wl.sum().item(); sums["yaw"] += yl.sum().item(); sums["pitch"] += pl.sum().item()
         sums["n"] += len(target)
         # Depth straight ahead (metres) and goal bearing, to isolate the "wall ahead, goal behind it" frames.
-        vis = sensory[:, 4:].view(-1, 64, 64, 4)
+        vis = sensory[:, 4:4 + pixels].view(-1, 64, 64, 4)
         front_m = vis[:, 24:40, 28:36, 3].mean(dim=(1, 2)) * 50.0
         bearing = torch.rad2deg(torch.atan2(sensory[:, 0], sensory[:, 2]))
+        if args.proprio:
+            walk_key, yaw_key = keyframes(sensory, target)
+        else:
+            walk_key = yaw_key = torch.zeros_like(target[:, 0], dtype=torch.bool)
         rows.append(torch.stack([
             target[:, 0], target[:, 1], target[:, 3],
             (out[:, 0] > 0).float(), out[:, 1:1 + YAW_CLASS_COUNT].argmax(1).float(), decode_yaw(out[:, 1:1 + YAW_CLASS_COUNT]),
-            front_m, bearing], dim=1).cpu())
+            front_m, bearing, walk_key.float(), yaw_key.float()], dim=1).cpu())
     n = max(1, sums["n"])
     losses = {k: sums[k] / n for k in ("walk", "yaw", "pitch")}
     losses["total"] = losses["walk"] * args.walk_loss_weight + losses["yaw"] + losses["pitch"] * args.pitch_loss_weight
@@ -267,7 +322,7 @@ def evaluate(model, loader, device, yaw_class_weights, pitch_std, args):
 
 
 def report(rows: np.ndarray, tag: str) -> None:
-    walk, cls, yaw, walk_hat, cls_hat, yaw_hat, front_m, bearing = rows.T
+    walk, cls, yaw, walk_hat, cls_hat, yaw_hat, front_m, bearing, walk_key, yaw_key = rows.T
     s = YAW_STRAIGHT_CLASS
     print(f"\n[DIAGNOSTIC {tag}] held-out frames: n={len(rows)}")
     print(f"  walk/stop accuracy {np.mean(walk == walk_hat):.3f} | demo stop share {1 - walk.mean():.3f} | predicted stop share {1 - walk_hat.mean():.3f}")
@@ -282,6 +337,17 @@ def report(rows: np.ndarray, tag: str) -> None:
     if wall.sum() > 0:
         print(f"  wall-ahead / goal-behind turning frames: n={int(wall.sum())}, decoded |yaw| >= {YAW_BIN_EDGES_DEG[0]}: "
               f"{np.mean(np.abs(yaw_hat[wall]) >= YAW_BIN_EDGES_DEG[0]):.3f} (M4 regression averaged these to ~0)")
+    # Keyframes (--proprio): the demonstration changes what the walker is currently doing. Continuing the current motion
+    # gets every other frame right, so these are where a copycat policy shows up.
+    if walk_key.sum() > 0:
+        starts, stops = (walk_key > 0) & (walk > 0.5), (walk_key > 0) & (walk < 0.5)
+        print(f"  walk keyframes: start walking n={int(starts.sum())} predicted walk {np.mean(walk_hat[starts] > 0.5) if starts.any() else float('nan'):.3f} | "
+              f"stop n={int(stops.sum())} predicted stop {np.mean(walk_hat[stops] < 0.5) if stops.any() else float('nan'):.3f}")
+    if yaw_key.sum() > 0:
+        k = yaw_key > 0
+        demo_side = np.sign(cls[k] - s)
+        print(f"  yaw keyframes (turn starts/ends/reversals): n={int(k.sum())}, predicted side = demo side "
+              f"{np.mean(np.sign(yaw_hat[k]) == demo_side):.3f}")
     confusion = np.zeros((YAW_CLASS_COUNT, YAW_CLASS_COUNT), dtype=int)
     for a, b in zip(cls.astype(int), cls_hat.astype(int)):
         confusion[a, b] += 1
@@ -328,6 +394,17 @@ def main():
     parser.add_argument("--rot_aug_deg", type=float, default=15.0)
     parser.add_argument("--rot_aug_prob", type=float, default=0.7)
     parser.add_argument("--rot_correction", type=float, default=0.15)
+    parser.add_argument("--proprio", action=argparse.BooleanOptionalAction, default=True,
+                        help="Append own motion to the input (data_contract.PROPRIO_*). --no-proprio = the "
+                             "single-frame model evaluated on 2026-09-28.")
+    parser.add_argument("--proprio_dropout", type=float, default=0.5,
+                        help="Training frames whose motion input is hidden (marked unavailable). v1 used 0.3.")
+    parser.add_argument("--walk_keyframe_weight", type=float, default=6.0,
+                        help="Walk/stop loss weight of frames where the demonstration starts or stops walking. 1 disables. "
+                             "v1 used 3.")
+    parser.add_argument("--yaw_keyframe_weight", type=float, default=3.0,
+                        help="Yaw loss weight of frames where the demonstrated turn side differs from the current turn. "
+                             "1 disables.")
     parser.add_argument("--num_workers", type=int, default=2)
     args = parser.parse_args()
 
@@ -395,7 +472,11 @@ def main():
                                                      np.random.choice(len(train_ds), min(4000, len(train_ds)), replace=False)]))),
                              device=device)
 
-    model = DiscreteImitation2DCNNModel().to(device)
+    proprio_size = PROPRIO_SIZE if args.proprio else 0
+    print(f"[MODEL] own-motion input: {'on' if proprio_size else 'off'}"
+          + (f" ({proprio_size} values, dropout {args.proprio_dropout:.2f}, keyframe weight walk {args.walk_keyframe_weight:.1f} "
+             f"/ yaw {args.yaw_keyframe_weight:.1f})" if proprio_size else ""))
+    model = DiscreteImitation2DCNNModel(proprio_size=proprio_size).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     min_best_epoch = max(1, args.epochs // 4)
     best = (float("inf"), -1, None)
@@ -406,7 +487,7 @@ def main():
         for sensory, target in train_loader:
             sensory, target = sensory.to(device), target.to(device)
             optimizer.zero_grad()
-            wl, yl, pl = compute_losses(model(sensory), target, yaw_class_weights, pitch_std, args)
+            wl, yl, pl = compute_losses(model(sensory), target, sensory, yaw_class_weights, pitch_std, args)
             loss = (args.walk_loss_weight * wl + yl + args.pitch_loss_weight * pl).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm)
@@ -425,12 +506,17 @@ def main():
     model.load_state_dict(best[2])
     _, rows = evaluate(model, val_loader, device, yaw_class_weights, pitch_std, args)
     report(rows, "best checkpoint")
+    if proprio_size:
+        _, rows = evaluate(model, val_loader, device, yaw_class_weights, pitch_std, args, hide_proprio=True)
+        report(rows, "best checkpoint, motion input hidden (camera + goal only)")
     model.cpu()
     export_onnx(model, args.output_onnx)
 
     sidecar = os.path.splitext(args.output_onnx)[0] + ".json"
     with open(sidecar, "w") as f:
         json.dump({"head": "discrete", "output_layout": "walk_logit, yaw_logit_0..6, pitch_deg_per_sample",
+                   "input_layout": "goal_xyz, proximity, rgbd_64x64x4" + (", speed, prev_speed, recent_yaw, turn_since_walk, available" if proprio_size else ""),
+                   "proprio_size": proprio_size,
                    "yaw_bin_edges_deg": YAW_BIN_EDGES_DEG, "yaw_bin_centers_deg": YAW_BIN_CENTERS_DEG,
                    "walk_threshold_mps": WALK_THRESHOLD_MPS,
                    "condition": args.condition, "seed": args.seed, "git_revision": git_revision(), "reason": args.reason,

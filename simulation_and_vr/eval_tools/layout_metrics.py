@@ -57,6 +57,7 @@ class Layout:
     end: np.ndarray              # (3,)
     segment_lengths: np.ndarray  # (P+1,)
     shortest_path: np.ndarray    # (K, 3)
+    arrival_radius: float        # ZarrDataContract.ArrivalRadiusMeters, body centre to marker (3D)
     wall_distance_grid: np.ndarray  # (H, W) metres to the nearest occupied cell edge, 0 inside obstacles
 
     @property
@@ -103,6 +104,7 @@ def load_layout(path_or_scene: str | Path) -> Layout:
             end=f["end"],
             segment_lengths=f["segment_lengths"],
             shortest_path=f["shortest_path"].reshape(-1, 3),
+            arrival_radius=float(np.asarray(f["arrival_radius"]).reshape(-1)[0]),
             wall_distance_grid=dist,
         )
 

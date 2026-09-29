@@ -148,6 +148,12 @@ namespace Assets.Scripts.DataRecording
                  "vector/distance the model sees, the wall-blocked flag and the latest raw and commanded model outputs. The " +
                  "trajectory file (traj_*.csv) is always written. Use analyze_stall.py to inspect where and why an agent stalls.")]
         public bool logModelDebugTicks = true;
+        [Tooltip("Imitation only: ImitationAgent.stochasticWalk. On = the walk key is drawn with probability P(walk) each tick " +
+                 "(UnityEngine.Random, seeded per configuration); off = pressed while P(walk) >= 0.5. Logged as imitation_stochastic_walk.")]
+        public bool imitationStochasticWalk = true;
+        [Tooltip("Imitation only: ImitationAgent.minWalkHoldSeconds, the shortest walk-key press (sim s; 0 = decide every tick). " +
+                 "Logged as imitation_min_walk_hold_s.")]
+        [Min(0f)] public float imitationMinWalkHoldSeconds = 1.5f;
 
         [Header("Visualization")]
         [Tooltip("Color applied to every spawned agent's capsule.")]
@@ -177,7 +183,8 @@ namespace Assets.Scripts.DataRecording
         private static readonly string ModelDebugCsvHeader = string.Join(ZarrDataContract.Trajectory.CsvDelimiter, new[]
         {
             "t", "goal_x", "goal_y", "goal_z", "goal_dist_m", "blocked",
-            "raw_fwd", "raw_yaw_deg_per_sample", "raw_pitch", "applied_fwd_mps", "applied_yaw_deg_per_s"
+            "raw_fwd", "raw_yaw_deg_per_sample", "raw_pitch", "applied_fwd_mps", "applied_yaw_deg_per_s",
+            "proprio_speed", "proprio_prev_speed", "proprio_yaw", "proprio_turn", "proprio_available"
         });
         private string modelSha256 = "";
         private string diskModelPath;
@@ -520,6 +527,8 @@ namespace Assets.Scripts.DataRecording
             public float navmesh_bake_agent_radius;
             public float arrival_radius_m;
             public float tick_interval_s;
+            public bool imitation_stochastic_walk;
+            public float imitation_min_walk_hold_s;
         }
 
         private void WriteRunConfig()
@@ -569,7 +578,9 @@ namespace Assets.Scripts.DataRecording
                     shortest_path_angular_speed_deg_per_s = agentKind == AgentKind.ShortestPath ? shortestPathAngularSpeedDegPerS : 0f,
                     navmesh_bake_agent_radius = NavMesh.GetSettingsByID(0).agentRadius,
                     arrival_radius_m = ZarrDataContract.ArrivalRadiusMeters,
-                    tick_interval_s = ZarrDataContract.SamplingIntervalSeconds
+                    tick_interval_s = ZarrDataContract.SamplingIntervalSeconds,
+                    imitation_stochastic_walk = agentKind == AgentKind.Imitation && imitationStochasticWalk,
+                    imitation_min_walk_hold_s = agentKind == AgentKind.Imitation ? imitationMinWalkHoldSeconds : 0f
                 };
                 File.WriteAllText(Path.Combine(runFolderPath, "run_config.json"), JsonUtility.ToJson(dump, true));
             }
@@ -734,6 +745,8 @@ namespace Assets.Scripts.DataRecording
                 imitation.BaselineModelAsset = modelAsset;
                 imitation.enableDeadlockNudge = !disableDeadlockNudge;
                 imitation.hotReloadModel = false; // the run evaluates exactly modelAsset (its sha256 is logged)
+                imitation.stochasticWalk = imitationStochasticWalk;
+                imitation.minWalkHoldSeconds = imitationMinWalkHoldSeconds;
                 agent = imitation;
             }
             else
@@ -901,7 +914,8 @@ namespace Assets.Scripts.DataRecording
                 F(ep.simElapsed), F(goalLocal.x), F(goalLocal.y), F(goalLocal.z), F(goalOffset.magnitude),
                 B(im.IsWallBlocked),
                 FOrEmpty(im.LastRawForward), FOrEmpty(im.LastRawYawPerSample), FOrEmpty(im.LastRawPitch),
-                FOrEmpty(im.LastCommandedForwardMps), FOrEmpty(im.LastCommandedYawDegPerSecond)));
+                FOrEmpty(im.LastCommandedForwardMps), FOrEmpty(im.LastCommandedYawDegPerSecond),
+                string.Join(d, Array.ConvertAll(im.LastProprioV2(), FOrEmpty))));
         }
 
         private static void ProcessNewTrajectoryPoints(ActiveEpisode ep)

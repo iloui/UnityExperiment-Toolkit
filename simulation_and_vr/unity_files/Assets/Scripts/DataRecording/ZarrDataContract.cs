@@ -88,6 +88,27 @@ namespace Assets.Scripts.DataRecording
         }
 
         /// <summary>
+        /// Optional own-motion input appended after the pixels in 'sensory_inputs' (data_contract.PROPRIO_*), measured on the
+        /// body the way ParticipantRecorder labels action_vel.z and action_rot.x. ImitationAgent detects the layout from the
+        /// model's input size. v2 (Size): [speed / SpeedScaleMps, previous sample's speed / SpeedScaleMps, wrapped mean yaw of
+        /// the last YawWindowSamples samples (deg/sample) / YawScaleDeg, signed heading change since the body last walked
+        /// (speed above WalkThresholdMps) / TurnScaleDeg clipped to +-TurnClip, available = 1].
+        /// v1 (LegacySize, the ImitationAgent_A_proprio_s* models of 2026-09-28): [speed, yaw, available].
+        /// </summary>
+        public static class Proprio
+        {
+            public const int Size = 5;
+            public const int LegacySize = 3;
+            public const int YawWindowSamples = 5;
+            public const float SpeedScaleMps = 1.3f;
+            public const float YawScaleDeg = 10f;
+            public const float TurnScaleDeg = 180f;
+            public const float TurnClip = 2f;
+            /// <summary>data_contract.WALK_THRESHOLD_MPS: a sample faster than this counts as walking.</summary>
+            public const float WalkThresholdMps = 0.65f;
+        }
+
+        /// <summary>
         /// Columns of the 'pose' array (data_contract.POSE_COLUMNS): camera world position, heading (eulerAngles.y, degrees in
         /// [0, 360), clockwise from above, 0 = +z) and pitch (eulerAngles.x wrapped to (-180, 180], + = looking down).
         /// </summary>

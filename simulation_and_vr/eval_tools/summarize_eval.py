@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Summarise EvalHarness runs (SimulationLogs/EvalRun_*/episodes.csv) into one comparable table.
+"""Quick sanity check: EvalHarness runs (SimulationLogs/EvalRun_*/episodes.csv) as one table, straight from Unity's own
+episodes.csv columns. The thesis results (metrics against held-out humans, Wasserstein distances, figures) come from
+compare_conditions.py, which recomputes every metric from the trajectories so agents and humans are measured alike.
 
 Usage:
   python3 summarize_eval.py                       # every EvalRun_* under the default SimulationLogs folder

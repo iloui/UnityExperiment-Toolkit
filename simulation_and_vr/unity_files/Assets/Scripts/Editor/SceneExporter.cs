@@ -5,6 +5,7 @@ using Unity.AI.Navigation;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.AI;
 using UnityEngine.SceneManagement;
 
 namespace Assets.Scripts.Editor
@@ -54,6 +55,18 @@ namespace Assets.Scripts.Editor
             surface.layerMask = (1 << walkableLayer) | (1 << obstacleLayer);
             surface.overrideTileSize = false;
             surface.overrideVoxelSize = false;
+
+            // Obstacles still carve the floor, but their own tops are Not Walkable - otherwise anything wider than
+            // twice the agent radius (e.g. DoorwayCenterIsland) keeps a NavMesh patch on its roof.
+            int notWalkableArea = NavMesh.GetAreaFromName("Not Walkable");
+            foreach (var t in root.GetComponentsInChildren<Transform>(true))
+            {
+                if (t.gameObject.layer != obstacleLayer) continue;
+                var modifier = t.GetComponent<NavMeshModifier>() ?? t.gameObject.AddComponent<NavMeshModifier>();
+                modifier.overrideArea = true;
+                modifier.area = notWalkableArea;
+            }
+
             surface.Bake();
         }
 

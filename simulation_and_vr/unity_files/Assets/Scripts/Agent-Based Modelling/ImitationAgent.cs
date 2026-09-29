@@ -698,6 +698,14 @@ namespace Agent_Based_Modelling
         /// <summary>Commanded forward speed (m/s) from the latest model call; for the discrete head, the walk key's target speed.</summary>
         public float LastCommandedForwardMps { get; private set; } = float.NaN;
         public float LastCommandedYawDegPerSecond { get; private set; } = float.NaN;
+        /// <summary>Own-motion values in the v2 order (speed, prev_speed, yaw, turn, available), NaN where the model's layout lacks them.</summary>
+        public float[] LastProprioV2()
+        {
+            float nan = float.NaN;
+            if (proprioSize == ZarrDataContract.Proprio.Size) return (float[])proprio.Clone();
+            if (proprioSize == ZarrDataContract.Proprio.LegacySize) return new[] { proprio[0], nan, proprio[1], nan, proprio[2] };
+            return new[] { nan, nan, nan, nan, nan };
+        }
         /// <summary>The body pushed sideways into a wall in the last FixedUpdate.</summary>
         public bool IsWallBlocked => wasCollidingLastFrame;
         /// <summary>
@@ -795,10 +803,32 @@ namespace Agent_Based_Modelling
         [Tooltip("The side (left/straight/right) chosen last tick is kept unless another side's probability beats it by more " +
                  "than this, so a near-tie at a junction can't flip the turn direction every 0.1 s.")]
         [Range(0f, 0.5f)] public float yawSideHysteresis = 0.1f;
+        [Tooltip("On: each tick the walk key is pressed with probability P(walk) (drawn from UnityEngine.Random, which EvalHarness " +
+                 "seeds per configuration). Off: pressed while P(walk) >= walkProbabilityThreshold. A model with own-motion input " +
+                 "predicts P(walk | standing) as a small per-tick chance of starting (the bot's stops last ~2 s), so thresholding " +
+                 "it at 0.5 would keep a standing agent standing forever.")]
+        public bool stochasticWalk = true;
+        [Tooltip("Seconds a walk-key press is held at least (sim time); 0 = decide every tick. The bot and humans never tap the key: " +
+                 "95% of the bot's walking bouts last >= 1.7 s. Without a hold, 82% of the v1 own-motion models' presses from " +
+                 "standing lasted one 0.1 s tick (~2 cm), and the agent stood and turned in place. The hold ends early when the body " +
+                 "is pushing into a wall. Part of the decoder, identical for every condition.")]
+        [Min(0f)] public float minWalkHoldSeconds = 1.5f;
+        private float walkHoldUntil = float.NegativeInfinity;
         private bool discreteHead = false;
         private int lastYawSide = 0;
         private bool walkKeyDown = false;
         private float walkAxis = 0f;
+
+        // Own-motion input (ZarrDataContract.Proprio), used when the model's input is that much longer than goal + pixels.
+        // Measured on the head at every capture tick like ParticipantRecorder's action_vel.z / action_rot.x labels.
+        private int proprioSize = 0;
+        private float[] proprio = new float[0];
+        private readonly Queue<float> recentYawDeltas = new Queue<float>();
+        private Vector3 lastCaptureHeadPosition;
+        private float lastCaptureHeadingDeg;
+        private bool hasLastCapture = false;
+        private float lastCaptureSpeed = 0f;
+        private float turnSinceWalkDeg = 0f;
 
         private Model runtimeModel;
         private Worker inferenceEngine;
@@ -1022,7 +1052,8 @@ namespace Agent_Based_Modelling
                 }
 
                 runtimeModel = ModelLoader.Load(BaselineModelAsset);
-                inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute); 
+                inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute);
+                DetectInputLayout();
                 isModelLoaded = true;
                 Debug.Log($"[Neural Inference Core] SUCCESS: Sentis engine loaded '{BaselineModelAsset.name}'. Input/Output nodes mapped.");
             }
@@ -1030,6 +1061,74 @@ namespace Agent_Based_Modelling
             {
                 isModelLoaded = false;
                 Debug.LogError($"[Neural Inference Core] Sentis loading exception: {e.Message}\n{e.StackTrace}");
+            }
+        }
+
+        /// <summary>
+        /// Own-motion input on or off, from the model's input width: goal + pixels, or that plus ZarrDataContract.Proprio.Size.
+        /// Anything else is refused (the agent falls back to the heuristic) instead of feeding a misaligned tensor.
+        /// </summary>
+        private void DetectInputLayout()
+        {
+            int baseSize = TemporalWindowSize * TotalPixels * 4 + 4;
+            int width = runtimeModel.inputs[0].shape.Get(runtimeModel.inputs[0].shape.rank - 1);
+            int extra = width - baseSize;
+            if (extra != 0 && extra != ZarrDataContract.Proprio.Size && extra != ZarrDataContract.Proprio.LegacySize)
+            {
+                throw new InvalidOperationException($"Model input width {width} is not {baseSize} (goal + pixels) plus 0, " +
+                    $"{ZarrDataContract.Proprio.LegacySize} or {ZarrDataContract.Proprio.Size} own-motion values.");
+            }
+            proprioSize = extra;
+            proprio = new float[proprioSize];
+            Debug.Log($"[Neural Inference Core] Own-motion input: {proprioSize} values (input width {width}).");
+        }
+
+        /// <summary>
+        /// Own motion since the previous capture tick, as ParticipantRecorder labels it and dataset.proprio_table computes it:
+        /// speed = head displacement / SamplingIntervalSeconds along the head's forward axis, plus the previous tick's speed;
+        /// yaw = wrapped heading change, averaged over the last YawWindowSamples ticks; turn = heading change summed since the
+        /// last tick faster than WalkThresholdMps. The first tick has no predecessor and counts as no motion.
+        /// </summary>
+        private void UpdateProprio()
+        {
+            Vector3 position = AgentHeadAnchor.position;
+            Vector3 forward = AgentHeadAnchor.forward;
+            float heading = Mathf.Atan2(forward.x, forward.z) * Mathf.Rad2Deg;
+            float previousSpeed = lastCaptureSpeed;
+            float speed = 0f;
+            float yawDelta = 0f;
+            if (hasLastCapture)
+            {
+                Vector3 velocity = (position - lastCaptureHeadPosition) / ZarrDataContract.SamplingIntervalSeconds;
+                speed = AgentHeadAnchor.InverseTransformDirection(velocity).z;
+                yawDelta = Mathf.DeltaAngle(lastCaptureHeadingDeg, heading);
+                recentYawDeltas.Enqueue(yawDelta);
+                while (recentYawDeltas.Count > ZarrDataContract.Proprio.YawWindowSamples) recentYawDeltas.Dequeue();
+            }
+            lastCaptureHeadPosition = position;
+            lastCaptureHeadingDeg = heading;
+            lastCaptureSpeed = speed;
+            hasLastCapture = true;
+            turnSinceWalkDeg = speed > ZarrDataContract.Proprio.WalkThresholdMps ? 0f : turnSinceWalkDeg + yawDelta;
+
+            float yawSum = 0f;
+            foreach (float d in recentYawDeltas) yawSum += d;
+            float meanYaw = recentYawDeltas.Count > 0 ? yawSum / recentYawDeltas.Count : 0f;
+            float s = ZarrDataContract.Proprio.SpeedScaleMps;
+            if (proprioSize == ZarrDataContract.Proprio.Size)
+            {
+                proprio[0] = speed / s;
+                proprio[1] = previousSpeed / s;
+                proprio[2] = meanYaw / ZarrDataContract.Proprio.YawScaleDeg;
+                proprio[3] = Mathf.Clamp(turnSinceWalkDeg / ZarrDataContract.Proprio.TurnScaleDeg,
+                    -ZarrDataContract.Proprio.TurnClip, ZarrDataContract.Proprio.TurnClip);
+                proprio[4] = 1f;
+            }
+            else if (proprioSize == ZarrDataContract.Proprio.LegacySize)
+            {
+                proprio[0] = speed / s;
+                proprio[1] = meanYaw / ZarrDataContract.Proprio.YawScaleDeg;
+                proprio[2] = 1f;
             }
         }
 
@@ -1111,6 +1210,7 @@ namespace Agent_Based_Modelling
             Vector3 worldGoalOffset = poiTracker.CurrentTarget.position - AgentHeadAnchor.position;
             localGoalVector3D = AgentHeadAnchor.InverseTransformDirection(worldGoalOffset.normalized);
             localGoalDistanceMeters = worldGoalOffset.magnitude;
+            UpdateProprio();
 
             hiddenCaptureCamera.Render();
             RenderTexture.active = colorRenderTexture;
@@ -1156,9 +1256,11 @@ namespace Agent_Based_Modelling
         /// directly with synthetic frame data and compare it against the Python training
         /// pipeline's output on the same input, without needing a live camera/raycast/Sentis engine.
         /// </summary>
-        public static float[] BuildSensoryTensor(Vector3 goal, float goalDistanceMeters, IEnumerable<SerializableFrameData> frameHistory)
+        public static float[] BuildSensoryTensor(Vector3 goal, float goalDistanceMeters, IEnumerable<SerializableFrameData> frameHistory,
+            float[] proprio = null)
         {
-            int totalSensoryInputs = (TemporalWindowSize * TotalPixels * 4) + 4;
+            // proprio (own-motion models, ZarrDataContract.Proprio) goes after the pixels, as in dataset.SingleEpisodeDataset.
+            int totalSensoryInputs = (TemporalWindowSize * TotalPixels * 4) + 4 + (proprio != null ? proprio.Length : 0);
             float[] flattenedFeatureArray = new float[totalSensoryInputs];
             int ptr = 0;
 
@@ -1176,6 +1278,10 @@ namespace Agent_Based_Modelling
                     flattenedFeatureArray[ptr++] = frame.colorMatrix[i].b / 255f;
                     flattenedFeatureArray[ptr++] = frame.depthMatrix[i];
                 }
+            }
+            if (proprio != null)
+            {
+                foreach (float v in proprio) flattenedFeatureArray[ptr++] = v;
             }
 
             return flattenedFeatureArray;
@@ -1208,7 +1314,8 @@ namespace Agent_Based_Modelling
                     return;
                 }
 
-                float[] flattenedFeatureArray = BuildSensoryTensor(localGoalVector3D, localGoalDistanceMeters, stateHistoryQueue);
+                float[] flattenedFeatureArray = BuildSensoryTensor(localGoalVector3D, localGoalDistanceMeters, stateHistoryQueue,
+                    proprioSize > 0 ? proprio : null);
 
                 // TEMPORARY DIAGNOSTIC: compare against training data's R-channel mean (~0.15) to
                 // check for a live-vs-recorded brightness/exposure mismatch. Safe to remove once resolved.
@@ -1298,7 +1405,10 @@ namespace Agent_Based_Modelling
                 Debug.Log("[Neural Inference Core] Discrete walk/yaw head detected (" + outputData.Length + " outputs).");
             }
             float pWalk = 1f / (1f + Mathf.Exp(-outputData[0]));
-            walkKeyDown = pWalk >= walkProbabilityThreshold;
+            bool press = stochasticWalk ? UnityEngine.Random.value < pWalk : pWalk >= walkProbabilityThreshold;
+            if (walkKeyDown && Time.time < walkHoldUntil && !IsWallBlocked) press = true; // keep holding a fresh press
+            else if (press && !walkKeyDown) walkHoldUntil = Time.time + minWalkHoldSeconds;
+            walkKeyDown = press;
             float yawPerSample = DecodeDiscreteYaw(outputData, 1, ref lastYawSide, yawSideHysteresis, out Vector3 sideProbabilities);
             float rawPitch = Mathf.Clamp(outputData[ZarrDataContract.DiscreteHead.OutputSize - 1], -MaxModelRawPitchDegPerSample, MaxModelRawPitchDegPerSample);
 
@@ -1427,9 +1537,11 @@ namespace Agent_Based_Modelling
                 lock (modelLock)
                 {
                     inferenceEngine?.Dispose();
+                    isModelLoaded = false; // stays false if DetectInputLayout refuses the new model
                     BaselineModelAsset = asset;
                     runtimeModel = ModelLoader.Load(asset);
                     inferenceEngine = new Worker(runtimeModel, BackendType.GPUCompute);
+                    DetectInputLayout();
                     isModelLoaded = true;
                     hasLoggedModelFallbackWarning = false;
                 }
