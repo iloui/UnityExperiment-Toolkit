@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Synthetic test input for compare_conditions.py: 3 layouts, EvalHarness runs for A/B/C/AgentScript and held-out human
-recordings, in exactly the formats Unity writes (layout .npz, run_config.json + episodes.csv + traj_*.csv, episode
-folders with manifest.json + dataset.zarr). Plus manifest.yaml pointing at them.
+"""Synthetic test input for compare_conditions.py in exactly the formats Unity and the recorder write: 3 layouts (.npz +
+route_gates.json), one EvalHarness v7 queue per layout (SimulationLogs/EvalQueue_<layout>_dummy/EvalRun_<entry>/ with
+run_config.json, episodes.csv, traj_*.csv, run_complete.json) for ShortestPath, A s1-3, B and C f1/f2 s1-3, and human
+recordings P01-P08 (fold = odd/even) with one test walk per layout plus a training-task walk that must be ignored.
 
-Each layout is a walled room split by one wall with a gap; the route goes start -> POI through the gap -> end. The
-sources differ only in made-up noise, pausing, speed and a detour: A wanders most, C least, humans pause and cut corners.
+Each layout is a walled room split by one wall with a gap; the route goes start -> POI through the gap -> end. Sources
+differ only in made-up noise, pausing, speed and detours: A wanders most, C least, humans pause and cut corners.
 
 Usage:
   python make_comparison_dummy.py OUT_DIR
-  python compare_conditions.py OUT_DIR/manifest.yaml --out OUT_DIR/results
+  python compare_conditions.py --logs OUT_DIR/SimulationLogs --queue-name dummy --recordings OUT_DIR/recordings \
+      --layouts-dir OUT_DIR/layouts --gates OUT_DIR/layouts/route_gates.json --out OUT_DIR/results --n-boot 200
 """
 from __future__ import annotations
 
@@ -20,7 +22,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "imitationagent_training" / "training_pipeline"))
 from data_contract import (  # noqa: E402
-    CAMERA_HEIGHT_M, SAMPLING_INTERVAL_S, SOURCE_HUMAN, TRAJECTORY_COLUMNS, make_episode_manifest, write_manifest,
+    CAMERA_HEIGHT_M, SAMPLING_INTERVAL_S, SOURCE_HUMAN, SOURCE_SYNTHETIC, TRAJECTORY_COLUMNS, make_episode_manifest, write_manifest,
 )
 
 CELL = 0.05
@@ -34,10 +36,10 @@ LAYOUTS = {
 }
 # source -> (episodes per layout, lateral noise m, detour m, pause prob / s, speed m/s, success prob)
 PROFILES = {
-    "A": (12, 0.9, 2.5, 0.10, 1.1, 0.55),
-    "B": (12, 0.6, 1.5, 0.08, 1.2, 0.7),
-    "C": (12, 0.4, 0.8, 0.06, 1.25, 0.85),
-    "AgentScript": (12, 0.0, 0.0, 0.0, 1.4, 1.0),
+    "A": (20, 0.9, 2.5, 0.10, 1.1, 0.55),
+    "B": (20, 0.6, 1.5, 0.08, 1.2, 0.7),
+    "C": (20, 0.4, 0.8, 0.06, 1.25, 0.85),
+    "ShortestPath": (20, 0.0, 0.0, 0.0, 1.3, 1.0),
     "Human": (8, 0.35, 0.5, 0.05, 1.3, 1.0),
 }
 
@@ -121,44 +123,58 @@ def fmt(v):
     return ",".join(f"{x:g}" for x in v)
 
 
-def write_eval_run(root: Path, name, label, corners, poi, end, start, rng):
-    kind = "ShortestPath" if label == "AgentScript" else "Imitation"
-    run = root / "SimulationLogs" / f"EvalRun_{name}_{label}"
+def write_eval_run(root: Path, name, label, source, fold, seed, heldout, corners, poi, end, start, rng):
+    kind = "ShortestPath" if source == "ShortestPath" else "Imitation"
+    run = root / "SimulationLogs" / f"EvalQueue_{name}_dummy" / f"EvalRun_{label}"
     run.mkdir(parents=True, exist_ok=True)
     xyz = lambda v: {"x": float(v[0]), "y": float(v[1]), "z": float(v[2])}  # noqa: E731
     (run / "run_config.json").write_text(json.dumps({
-        "harness_version": "6", "agent_kind": kind, "condition": "" if kind == "ShortestPath" else label, "scene": name,
+        "harness_version": "7", "agent_kind": kind, "condition": "" if kind == "ShortestPath" else source, "scene": name,
+        "model_asset": "" if kind == "ShortestPath" else label, "model_fold": fold, "model_seed": seed,
+        "heldout_participants": heldout, "queue_name": "dummy",
         "randomize_markers": False, "episode_timeout_sim_s": TIMEOUT_S,
-        "task_start_positions": [xyz(start)], "task_poi_positions": [xyz(poi)], "task_end_positions": [xyz(end)],
+        "task_start_positions": [xyz(start)], "task_poi_positions": [xyz(poi + [0, 1, 0])], "task_end_positions": [xyz(end + [0, 1, 0])],
     }, indent=2))
-    rows = ["config_id;agent_id;outcome;num_pois_total;poi_positions;end_pos;trajectory_file"]
-    for i in range(PROFILES[label][0]):
-        eye, heading, t, pr = walk(corners, poi, end, PROFILES[label], rng)
+    optimal = sum(np.linalg.norm(np.asarray(b) - np.asarray(a)) for a, b in zip(corners, corners[1:]))
+    rows = ["config_id;agent_id;outcome;num_pois_total;optimal_path_length_m;poi_positions;end_pos;trajectory_file"]
+    n_ok = 0
+    for i in range(PROFILES[source][0]):
+        eye, heading, t, pr = walk(corners, poi, end, PROFILES[source], rng)
         t = np.round(t, 4)
         keep = t <= TIMEOUT_S
         eye, heading, t, pr = eye[keep], heading[keep], t[keep], pr[keep]
+        body = eye - [0, CAMERA_HEIGHT_M, 0]
+        ok = bool(pr[-1] >= 1 and np.linalg.norm(body[-1] - end) <= ARRIVAL_RADIUS)
+        n_ok += ok
         fname = f"traj_config{i}_agent0.csv"
         with open(run / fname, "w") as f:
             f.write(";".join(TRAJECTORY_COLUMNS) + "\n")
             for k in range(len(t)):
                 f.write(f"{t[k]};{eye[k,0]};{eye[k,1]};{eye[k,2]};{heading[k]};5;0;0;{int(pr[k] >= 1)};{pr[k]}\n")
-        rows.append(f"{i};0;x;1;{fmt(poi)};{fmt(end)};{fname}")
+        outcome = "success" if ok else "timeout"
+        if source == "A" and i == 0:
+            outcome = "invalid_speed"  # must be left out with a warning
+        rows.append(f"{i};0;{outcome};1;{optimal:.3f};{fmt(poi)};{fmt(end)};{fname}")
     (run / "episodes.csv").write_text("\n".join(rows) + "\n")
+    (run / "run_complete.json").write_text(json.dumps({"episodes": PROFILES[source][0], "successes": n_ok}))
     return run
 
 
-def write_human(root: Path, name, participant, rep, corners, poi, end, start, rng):
+def write_human(root: Path, name, participant, fold, task_id, corners, poi, end, start, rng):
     import zarr
     eye, heading, t, pr = walk(corners, poi, end, PROFILES["Human"], rng, dt_jitter=0.3)
-    target = np.where(pr[:, None] >= 1, end, poi)
+    target = np.where(pr[:, None] >= 1, end + [0, 1, 0], poi + [0, 1, 0])
     goal_distance = np.linalg.norm(eye - target, axis=1)
-    ep_id = f"{participant}_{name}_{rep}"
+    ep_id = f"{participant}_{name}_{task_id}"
     ep_dir = root / "recordings" / ep_id
     xyz = lambda v: {"x": float(v[0]), "y": float(v[1]), "z": float(v[2])}  # noqa: E731
+    # make_episode_manifest refuses a human manifest without trial labels, so build it as synthetic and relabel.
     m = make_episode_manifest(episode_id=ep_id, scene_name=name, layout_typology=name.split("_")[1], layout_seed=0,
-                              source=SOURCE_HUMAN, participant_id=participant, session_id="dummy", repetition_index=rep,
-                              task={"start": xyz(start), "pois": [xyz(poi)], "end": xyz(end)}, frame_count=len(t),
-                              start_time=0.0, end_time=float(t[-1]))
+                              source=SOURCE_SYNTHETIC, participant_id=participant, session_id="dummy", repetition_index=0,
+                              task={"start": xyz(start), "pois": [xyz(poi + [0, 1, 0])], "end": xyz(end + [0, 1, 0])},
+                              frame_count=len(t), start_time=0.0, end_time=float(t[-1]))
+    m["source"] = SOURCE_HUMAN
+    m["trial"] = {"task_id": task_id, "task_role": "test" if task_id == "test" else "train", "fold": fold, "attempt_index": 0}
     write_manifest(ep_dir / "manifest.json", m)
     g = zarr.open_group(str(ep_dir / "dataset.zarr"), mode="w")
     g.attrs["manifest"] = json.dumps(m)
@@ -175,22 +191,26 @@ def main():
     root = Path(sys.argv[1]).resolve()
     (root / "layouts").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(1)
-    runs = {label: [] for label in ("A", "B", "C", "AgentScript")}
-    participants = ["P90", "P91", "P92", "P93"]
+    participants = [f"P0{i}" for i in range(1, 9)]
+    folds = {p: 1 if int(p[1:]) % 2 else 2 for p in participants}
+    heldout = {1: [p for p in participants if folds[p] == 2], 2: [p for p in participants if folds[p] == 1]}
+    entries = [("ShortestPath", "ShortestPath", 0, 0)] + [(f"ImitationAgent_A_proprio2_s{s}", "A", 0, s) for s in (1, 2, 3)]
+    entries += [(f"ImitationAgent_{c}_proprio2_f{f}_s{s}", c, f, s) for c in "BC" for f in (1, 2) for s in (1, 2, 3)]
+    gates = {}
     for name, spec in LAYOUTS.items():
         corners, poi, end = build_layout(name, spec, root / "layouts")
+        w, h, wall_x, gap_z = spec[:4]
+        gates[name] = {"leg": 0 if (spec[4][0] < wall_x) != (spec[5][0] < wall_x) else 1,
+                       "gates": [{"side": "north", "a": [wall_x, gap_z], "b": [wall_x, h]},
+                                 {"side": "south", "a": [wall_x, gap_z], "b": [wall_x, 0.0]}]}
         start = np.array([spec[4][0], 0.0, spec[4][1]])
-        for label in runs:
-            runs[label].append(str(write_eval_run(root, name, label, corners, poi, end, start, rng).relative_to(root)))
-        for k in range(PROFILES["Human"][0]):
-            write_human(root, name, participants[k % len(participants)], k // len(participants), corners, poi, end, start, rng)
-    lines = [f"timeout_s: {TIMEOUT_S:g}", "n_boot: 200", "seed: 0", "layouts_dir: layouts", "conditions:"]
-    for label, rs in runs.items():
-        lines.append(f"  {label}:")
-        lines += [f"    - {r}" for r in rs]
-    lines += ["humans:", "  recordings_dir: recordings", f"  participants: [{', '.join(participants)}]"]
-    (root / "manifest.yaml").write_text("\n".join(lines) + "\n")
-    print(f"wrote {root / 'manifest.yaml'}")
+        for label, source, fold, seed in entries:
+            write_eval_run(root, name, label, source, fold, seed, heldout.get(fold, []), corners, poi, end, start, rng)
+        for p in participants:
+            write_human(root, name, p, folds[p], "test", corners, poi, end, start, rng)
+        write_human(root, name, "P01", 1, "train_0", corners, poi, end, start, rng)
+    (root / "layouts" / "route_gates.json").write_text(json.dumps(gates, indent=2))
+    print(f"wrote dummy queues, recordings and layouts to {root}")
 
 
 if __name__ == "__main__":

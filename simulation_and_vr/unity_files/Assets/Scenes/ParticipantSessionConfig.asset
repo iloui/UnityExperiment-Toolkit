@@ -22,28 +22,31 @@ MonoBehaviour:
   - Assets/Scenes/TestLayouts/CentralPillar_Code_102620.unity
   - Assets/Scenes/TestLayouts/MultiRoomDoorway_Code_551670.unity
   - Assets/Scenes/TestLayouts/TJunction_Code_99835.unity
-  repetitions: 2
+  trainingTasksPerLayout: 3
   participantIdPattern: ^P\d{2,3}$
   allowExistingParticipant: 0
   abortTrialKey: 293
   dryRun: 0
   dryRunTeleportKey: 116
-  instructions: 'In each run you start in a building.
+  instructions: 'You will walk through three buildings, four runs in each (12 runs
+    in total).
 
 
-    1. Walk to the sphere
-    labelled POI.
+    In every run:
 
-    2. Then walk to the sphere labelled EXIT. The run ends when
-    you reach it.
+    1. Walk to the sphere labelled POI.
 
-
-    Walk the way you naturally would. There is no time limit.
+    2.
+    Then walk to the sphere labelled EXIT. The run ends when you reach it.
 
 
-    Controls:
-    W A S D to walk, mouse to look around.
+    The
+    spheres are in different places in every run. Walk the way you naturally would.
+    There is no time limit.
 
 
-    First comes a practice run that
-    is not recorded.'
+    Controls: W A S D to walk, mouse to look around.
+
+
+    First
+    comes a practice run that is not recorded.'

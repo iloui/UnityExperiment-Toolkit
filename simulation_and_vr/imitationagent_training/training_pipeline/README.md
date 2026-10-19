@@ -19,7 +19,7 @@ than the recorded one, set the EditorPrefs key `Thesis.RetrainPythonPath`.
 Running a script by hand with the same environment (from `training_pipeline/`):
 
 ```bash
-PYTHONPATH=../python_embedded /opt/homebrew/bin/python3 train_2DCNN_discrete.py --condition C
+PYTHONPATH=../python_embedded /opt/homebrew/bin/python3 train_2DCNN_discrete.py --condition C --fold 1
 ```
 
 Modules: `model.py` (CNN trunk, discrete head, ONNX export), `dataset.py` (ingest, manifest checks,
@@ -33,7 +33,7 @@ Modules: `model.py` (CNN trunk, discrete head, ONNX export), `dataset.py` (inges
 - `Tools > Thesis > Retrain Discrete Model Now` starts one by hand (e.g. after a bot recording run);
   `Tools > Thesis > Show Retrain Status` shows whether one is running, the last log and the last exported model.
 - Command: `train_2DCNN_discrete.py --recordings_dir ../zarr_recordings --synthetic_sources all --splits ../splits.json
-  --condition C --output_onnx ../imitation_agent_model/ImitationAgent_discrete_<yyyyMMdd_HHmmss>.onnx --reason "<why>"`.
+  --condition C --fold 1 --output_onnx ../imitation_agent_model/ImitationAgent_discrete_<yyyyMMdd_HHmmss>.onnx --reason "<why>"`.
   Not started while `imitationagent_training/splits.json` is missing, so held-out participants are never trained on.
 - Only one at a time: `imitationagent_training/retrain.lock` (pid + start time; ignored when the pid is gone or it is
   older than 6 h). Runs at `nice 10`.
@@ -45,42 +45,43 @@ Modules: `model.py` (CNN trunk, discrete head, ONNX export), `dataset.py` (inges
   `ImitationAgent` hot-reloads (Editor only). EvalHarness turns hot-reload off and should point at a timestamped file.
   On failure the previous model stays and the log tail is printed.
 
-## Experiment: participant splits and conditions A/B/C
+## Experiment: folds x tasks, conditions A/B/C (methodology 3.8)
 
-Once every participant is recorded, write the splits once (from `training_pipeline/`):
+Every human manifest carries its design labels (`trial`: fold, task_id, task_role, c_excluded, attempt_index; written
+by `ParticipantSession`). Once every participant is recorded, collect and check them once (from `training_pipeline/`):
 
 ```bash
-.venv/bin/python make_splits.py --n_heldout 4 --n_subset_B 4 --seed 1
+.venv/bin/python make_splits.py
 ```
 
-`../splits.json` = `{"heldout": [...], "train": [...], "subset_B": [...], "seed": 1, "episodes_per_participant": {...}}`.
-Human participants are sorted, shuffled with `--seed` and cut by the counts, so the file is reproducible; `dryrun_*`
-participants are ignored; an existing file is only overwritten with `--force`. `subset_B` is a subset of `train`;
-`heldout` participants are never loaded for training or validation and are the human baseline in EvalHarness.
+`../splits.json` = `{"design": "folds_x_tasks_v1", "folds": {"1": [odd IDs], "2": [even IDs]}, "c_excluded":
+{scene: task_id}, "test_episodes": {"1": [...], "2": [...]}, "episodes_per_participant": {...}, "repeats": [...]}`.
+It refuses to write if a participant is in the wrong fold, a task was walked 0 or 2+ times, or the episodes disagree
+on (or with `eval_tools/layouts/*_human_tasks.json` about) the C-excluded task (`--allow_incomplete` overrides).
+`dryrun_*` participants are ignored; an existing file is only overwritten with `--force`.
 
-| condition | humans trained on | human share per batch |
-|---|---|---|
-| A | none (synthetic only, plain shuffling) | 0 |
-| B | `subset_B` | `--human_share` (0.5) |
-| C | `train` | `--human_share` (0.5) |
+| condition | humans trained on (fold f) | human tasks per layout | human share per batch |
+|---|---|---|---|
+| A | none (synthetic only, plain shuffling, no fold) | - | 0 |
+| B | fold f | the three training tasks | `--human_share` (0.5) |
+| C | fold f | the test task + the two training tasks not `c_excluded` | `--human_share` (0.5) |
+
+The other fold is never loaded; its test-task walks (`test_episodes`) are the model's human reference. B and C have the
+same participants, the same validation participant (per seed) and the same number of episodes: they differ only in
+whether the agent saw humans walk the evaluated route (A->B transfer, B->C memorisation).
 
 ```bash
-.venv/bin/python train_2DCNN_discrete.py --condition A --seed 1   # -> ../imitation_agent_model/ImitationAgent_A_s1.onnx
-.venv/bin/python train_2DCNN_discrete.py --condition B --seed 1
-.venv/bin/python train_2DCNN_discrete.py --condition C --seed 1
+.venv/bin/python train_2DCNN_discrete.py --condition B --fold 1 --seed 1   # -> ../imitation_agent_model/ImitationAgent_B_proprio2_f1_s1.onnx
+.venv/bin/python train_2DCNN_discrete.py --condition C --fold 1 --seed 1   # -> ..._C_proprio2_f1_s1.onnx
 .venv/bin/python check_splits.py --seed 1 ../imitation_agent_model/ImitationAgent_*_s1.json
 ```
 
 - Synthetic data: `--synthetic_sources` (default `synthetic_rrw_v3`; `all` = every `synthetic*` participant id).
-- Validation: human episodes are split leave-k-participants-out (`--val_participants`, default 1) from the condition's own
-  humans, so B trains on `n_subset_B - 1` participants; synthetic episodes by `--val_ratio` per source. Condition A has
-  no human validation frames, so its checkpoint is selected on synthetic frames only.
-- The sidecar `.json` next to each model records condition, seed, git revision, the held-out / condition / train /
-  validation participants, episode and frame counts, and the exact train and validation episode lists.
-- `check_splits.py` fails (exit 1) if splits.json misses a recorded participant, if any condition's selection contains a
-  held-out participant, or if a given sidecar's episode lists do.
-
-**B vs C.** The human share of every batch is fixed (`--human_share`), whatever the number of human frames. B and C
-therefore give the human data the same total weight in the loss; C spreads it over more participants (more distinct
-frames, each drawn less often). The B/C difference measures human *diversity*, not how strongly the model is pulled
-towards human behaviour. The A vs B/C difference mixes both.
+- Validation: human episodes are split leave-k-participants-out (`--val_participants`, default 1) from the fold's
+  participants, so B and C train on 3 participants x 9 episodes and validate on 1 x 9; synthetic episodes by
+  `--val_ratio` per source. Condition A has no human validation frames; its checkpoint is selected on synthetic frames.
+- The sidecar `.json` next to each model records condition, fold, seed, git revision, held-out / train / validation
+  participants, the C-excluded tasks, human episodes per layout:task, and the exact train and validation episode lists.
+- `check_splits.py` fails (exit 1) if a recorded participant is in no fold, if any fold/condition selection (or a given
+  sidecar's episode lists) contains the other fold, a test-task walk in B or an excluded task in C, or if B and C of a
+  fold differ in participants, validation participant or human episode count.

@@ -560,6 +560,8 @@ public class EngineScript : MonoBehaviour
 
     private void ExportRunData() {
         if (hasExportedRunData) return;
+        // Start() never ran (component disabled, e.g. while a harness drives the scene): there is no run to export.
+        if (agentToPos == null) return;
 
         try
         {

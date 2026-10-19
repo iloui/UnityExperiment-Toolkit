@@ -10,13 +10,13 @@ namespace Assets.Scripts.Editor
     /// </summary>
     internal static class RetrainMenu
     {
-        [MenuItem("Tools/Thesis/Retrain Discrete Model Now")]
+        [MenuItem(ToolsMenu.TrainModel + "Train Model Now", priority = ToolsMenu.TrainModelPriority)]
         private static void RetrainNow()
         {
-            RetrainPipeline.RequestFullRetrain("manual (Tools > Thesis)");
+            RetrainPipeline.RequestFullRetrain("manual (Tools > Imitation Learning Agent > 3 · Train Model)");
         }
 
-        [MenuItem("Tools/Thesis/Show Retrain Status")]
+        [MenuItem(ToolsMenu.TrainModel + "Show Training Status", priority = ToolsMenu.TrainModelPriority + 1)]
         private static void ShowStatus()
         {
             string report = RetrainPipeline.StatusReport();

@@ -136,7 +136,9 @@ namespace Assets.Scripts.DataRecording
         private float policyExecutedSeconds;
         private float expertExecutedSeconds;
 
-        void Awake()
+        // OnEnable, not Awake: Awake also runs on a disabled harness, which would switch off the recorder of a human
+        // session in the same scene. OnEnable still runs before every Start in the scene.
+        void OnEnable()
         {
             RecordingRig.DisableSceneRecorders("DAgger");
         }

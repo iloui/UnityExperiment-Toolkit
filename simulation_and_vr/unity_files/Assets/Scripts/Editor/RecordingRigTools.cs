@@ -18,7 +18,7 @@ namespace Assets.Scripts.Editor
     {
         private const string LayoutScenesFolder = "Assets/Scenes/TestLayouts";
 
-        [MenuItem("Tools/Recording/Apply Contract Camera Height (Open Scene)")]
+        [MenuItem(ToolsMenu.ImitationAdvanced + "Apply Contract Camera Height (Open Scene)", priority = ToolsMenu.ImitationAdvancedPriority + 2)]
         public static void ApplyToOpenScene()
         {
             Scene scene = EditorSceneManager.GetActiveScene();
@@ -29,7 +29,7 @@ namespace Assets.Scripts.Editor
             }
         }
 
-        [MenuItem("Tools/Recording/Apply Contract Camera Height (All Layout Scenes)")]
+        [MenuItem(ToolsMenu.ImitationAdvanced + "Apply Contract Camera Height (All Layout Scenes)", priority = ToolsMenu.ImitationAdvancedPriority + 3)]
         public static void ApplyToAllLayoutScenes()
         {
             if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;

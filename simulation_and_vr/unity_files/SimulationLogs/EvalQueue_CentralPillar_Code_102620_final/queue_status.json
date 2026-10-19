@@ -1,0 +1,33 @@
+{
+    "state": "done",
+    "queue_name": "final",
+    "scene": "CentralPillar_Code_102620",
+    "started_at": "2026-10-05T11:29:58.1997460+02:00",
+    "updated_at": "2026-10-05T12:46:12.2229340+02:00",
+    "entry": 16,
+    "entries": 16,
+    "current": "",
+    "episodes_done_in_current": 0,
+    "episodes_per_entry": 20,
+    "elapsed_min": 76.23320770263672,
+    "estimated_remaining_min": 0.0,
+    "sim_speed_vs_real": 2.998957872390747,
+    "results": [
+        "ShortestPath: 20/20 successful, 0 timeouts, 0 other (3 min)",
+        "ImitationAgent_A_proprio2_s1: 14/20 successful, 6 timeouts, 0 other (7 min)",
+        "ImitationAgent_A_proprio2_s2: 20/20 successful, 0 timeouts, 0 other (5 min)",
+        "ImitationAgent_A_proprio2_s3: 20/20 successful, 0 timeouts, 0 other (6 min)",
+        "ImitationAgent_B_proprio2_f1_s1: 19/20 successful, 1 timeouts, 0 other (5 min)",
+        "ImitationAgent_B_proprio2_f1_s2: 18/20 successful, 2 timeouts, 0 other (6 min)",
+        "ImitationAgent_B_proprio2_f1_s3: 18/20 successful, 2 timeouts, 0 other (6 min)",
+        "ImitationAgent_B_proprio2_f2_s1: 20/20 successful, 0 timeouts, 0 other (4 min)",
+        "ImitationAgent_B_proprio2_f2_s2: 20/20 successful, 0 timeouts, 0 other (4 min)",
+        "ImitationAgent_B_proprio2_f2_s3: 17/20 successful, 3 timeouts, 0 other (6 min)",
+        "ImitationAgent_C_proprio2_f1_s1: 20/20 successful, 0 timeouts, 0 other (4 min)",
+        "ImitationAgent_C_proprio2_f1_s2: 20/20 successful, 0 timeouts, 0 other (5 min)",
+        "ImitationAgent_C_proprio2_f1_s3: 20/20 successful, 0 timeouts, 0 other (5 min)",
+        "ImitationAgent_C_proprio2_f2_s1: 20/20 successful, 0 timeouts, 0 other (4 min)",
+        "ImitationAgent_C_proprio2_f2_s2: 20/20 successful, 0 timeouts, 0 other (4 min)",
+        "ImitationAgent_C_proprio2_f2_s3: 20/20 successful, 0 timeouts, 0 other (4 min)"
+    ]
+}

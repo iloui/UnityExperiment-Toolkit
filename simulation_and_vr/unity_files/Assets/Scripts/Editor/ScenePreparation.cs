@@ -14,12 +14,12 @@ namespace Assets.Scripts.Editor
     /// <summary>
     /// Brings a generated layout scene into the state every pipeline step expects: Architecture_Obstacle layer, baked NavMesh,
     /// one TaskScript with a Start -> POI_0 -> End task, FPSController at the start with the contract eye height, and the
-    /// occupancy grid. LayoutGeneratorWindow runs it after building a layout; Tools > Thesis > Prepare Scene re-runs it on
+    /// occupancy grid. LayoutGeneratorWindow runs it after building a layout; Tools > Scene Preparation > Prepare Scene re-runs it on
     /// the open scene. Idempotent: markers that are still valid are kept, everything else is reset to the values below.
     /// </summary>
     internal static class ScenePreparation
     {
-        private const string EnvironmentRootName = "Environment_Root";
+        internal const string EnvironmentRootName = "Environment_Root";
         private const string TaskObjectName = "Task";
         private const string StartName = "Start";
         private const string PoiName = "POI_0";
@@ -32,18 +32,18 @@ namespace Assets.Scripts.Editor
 
         // Marker placement.
         private const int TaskRngSalt = 0x7A5C0001;          // task RNG = layout seed + salt, independent of LayoutBuilder's draws
-        private const float MinMarkerSpacingMeters = 3f;       // between every pair of Start / POI_0 / End
+        internal const float MinMarkerSpacingMeters = 3f;       // between every pair of Start / POI_0 / End
         private const float MinEdgeClearanceMeters = 0.5f;     // from the NavMesh border (which is already the bake radius off the walls)
-        private const float MaxHeightAboveFloorMeters = 0.3f;  // rejects NavMesh on top of walls / the ceiling
+        internal const float MaxHeightAboveFloorMeters = 0.3f;  // rejects NavMesh on top of walls / the ceiling
         private const float MinStartEndPathMeters = 12f;       // first start/end pair with a path at least this long wins
-        private const float PreferredRouteOffsetMeters = 2f;   // POI at least this far from the direct start -> end path
+        internal const float PreferredRouteOffsetMeters = 2f;   // POI at least this far from the direct start -> end path
         private const int StartEndAttempts = 200;
         private const int PoiAttempts = 300;
-        private const float MarkerHeightAboveNavMesh = 1f;     // centre of the visible POI/End spheres
+        internal const float MarkerHeightAboveNavMesh = 1f;     // centre of the visible POI/End spheres
         private const float MarkerDiameter = 0.4f;
-        private const float ControllerPivotAboveNavMesh = 1.05f;
+        internal const float ControllerPivotAboveNavMesh = 1.05f;
 
-        [MenuItem("Tools/Thesis/Prepare Scene")]
+        [MenuItem(ToolsMenu.PrepareScene, priority = ToolsMenu.ScenePreparationPriority)]
         public static void PrepareActiveSceneMenu()
         {
             Scene scene = EditorSceneManager.GetActiveScene();
@@ -69,10 +69,10 @@ namespace Assets.Scripts.Editor
 
             GameObject root = FindRoot(scene, EnvironmentRootName);
             if (root == null)
-                throw new InvalidOperationException($"'{scene.name}' has no '{EnvironmentRootName}' - generate it with Tools > Generate Layout.");
+                throw new InvalidOperationException($"'{scene.name}' has no '{EnvironmentRootName}' - generate it with Tools > Generative Design > Generate Layout.");
             LayoutInfo layoutInfo = root.GetComponent<LayoutInfo>();
             if (layoutInfo == null)
-                throw new InvalidOperationException($"'{EnvironmentRootName}' has no LayoutInfo - generate the scene with Tools > Generate Layout.");
+                throw new InvalidOperationException($"'{EnvironmentRootName}' has no LayoutInfo - generate the scene with Tools > Generative Design > Generate Layout.");
 
             SceneExporter.ConfigureAndBakeNavMesh(root);
             Physics.SyncTransforms();
@@ -201,7 +201,7 @@ namespace Assets.Scripts.Editor
         // Marker placement
         // ------------------------------------------------------------------
 
-        private sealed class NavMeshSampler
+        internal sealed class NavMeshSampler
         {
             private readonly Vector3[] vertices;
             private readonly int[] indices;
@@ -250,7 +250,7 @@ namespace Assets.Scripts.Editor
             }
         }
 
-        private static bool OnFloorNavMesh(Vector3 position, float searchRadius, float floorY, out Vector3 snapped)
+        internal static bool OnFloorNavMesh(Vector3 position, float searchRadius, float floorY, out Vector3 snapped)
         {
             snapped = position;
             if (!NavMesh.SamplePosition(position, out NavMeshHit hit, searchRadius, NavMesh.AllAreas)) return false;
@@ -333,20 +333,20 @@ namespace Assets.Scripts.Editor
             return true;
         }
 
-        private static bool TryPath(Vector3 from, Vector3 to, out NavMeshPath path)
+        internal static bool TryPath(Vector3 from, Vector3 to, out NavMeshPath path)
         {
             path = new NavMeshPath();
             return NavMesh.CalculatePath(from, to, NavMesh.AllAreas, path) && path.status == NavMeshPathStatus.PathComplete;
         }
 
-        private static float PathLength(NavMeshPath path)
+        internal static float PathLength(NavMeshPath path)
         {
             float length = 0f;
             for (int i = 1; i < path.corners.Length; i++) length += Vector3.Distance(path.corners[i - 1], path.corners[i]);
             return length;
         }
 
-        private static float DistanceToPolyline(Vector3 p, IReadOnlyList<Vector3> polyline)
+        internal static float DistanceToPolyline(Vector3 p, IReadOnlyList<Vector3> polyline)
         {
             if (polyline.Count == 1) return Vector3.Distance(p, polyline[0]);
             float best = float.MaxValue;
@@ -399,7 +399,7 @@ namespace Assets.Scripts.Editor
             return count;
         }
 
-        private static GameObject FindRoot(Scene scene, string name)
+        internal static GameObject FindRoot(Scene scene, string name)
         {
             foreach (GameObject go in scene.GetRootGameObjects())
             {

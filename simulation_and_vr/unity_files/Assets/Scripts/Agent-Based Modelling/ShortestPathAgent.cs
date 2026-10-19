@@ -23,6 +23,8 @@ namespace Agent_Based_Modelling
         public float radiusMeters = ZarrDataContract.RecordingBody.Radius;
         public float accelerationMetersPerSecond2 = 50f;
         public float angularSpeedDegreesPerSecond = 120f;
+        /// <summary>Degrees added to the spawn heading (along the NavMesh path); EvalHarness's seeded start jitter.</summary>
+        public float spawnHeadingOffsetDeg = 0f;
 
         [HideInInspector] public List<Vector3> trajectory = new List<Vector3>();
         [HideInInspector] public bool destroyRequest = false;
@@ -71,12 +73,11 @@ namespace Agent_Based_Modelling
             navAgent.obstacleAvoidanceType = ObstacleAvoidanceType.NoObstacleAvoidance;
             navAgent.Warp(spawn);
 
-            // Face the first goal at spawn, as ImitationAgent does.
+            // Face along the NavMesh path to the first goal plus the harness's heading jitter, as ImitationAgent does.
             if (poiTracker.CurrentTarget != null)
             {
-                Vector3 towardGoal = poiTracker.CurrentTarget.position - spawn;
-                towardGoal.y = 0f;
-                if (towardGoal.sqrMagnitude > 0.0001f) transform.rotation = Quaternion.LookRotation(towardGoal.normalized, Vector3.up);
+                float yaw = PoiProgressTracker.StartYawAlongPath(spawn, poiTracker.CurrentTarget.position) + spawnHeadingOffsetDeg;
+                transform.rotation = Quaternion.Euler(0f, yaw, 0f);
             }
 
             UpdateDestination();
@@ -86,7 +87,8 @@ namespace Agent_Based_Modelling
         {
             trajectory.Add(transform.position);
 
-            poiTracker.Tick(transform.position);
+            // Arrival at the eye, as for ImitationAgent and the recorded humans (ParticipantRecorder sits on the camera).
+            poiTracker.Tick(eye != null ? eye.position : transform.position);
             if (poiTracker.IsFinished)
             {
                 destroyRequest = true;

@@ -813,6 +813,9 @@ namespace Agent_Based_Modelling
                  "standing lasted one 0.1 s tick (~2 cm), and the agent stood and turned in place. The hold ends early when the body " +
                  "is pushing into a wall. Part of the decoder, identical for every condition.")]
         [Min(0f)] public float minWalkHoldSeconds = 1.5f;
+        [Tooltip("Degrees added to the spawn heading (along the NavMesh path to the first goal). EvalHarness sets its seeded " +
+                 "start jitter here before Start() runs; 0 = exactly the heading every participant started with.")]
+        public float spawnHeadingOffsetDeg = 0f;
         private float walkHoldUntil = float.NegativeInfinity;
         private bool discreteHead = false;
         private int lastYawSide = 0;
@@ -920,20 +923,13 @@ namespace Agent_Based_Modelling
                 Debug.LogWarning($"[ImitationAgent Start] Could not find NavMesh near start position! Teleported to {transform.position}");
             }
 
-            // Face the first goal at spawn instead of inheriting an arbitrary world rotation.
-            // In the recorded human data, the "large reorientation from a bad starting heading"
-            // pattern makes up only ~7% of frames (vs. steady walking with small corrections for
-            // the rest), so the trained model's turning response is far weaker than what a human
-            // shows during that phase. Spawning already facing the goal avoids needing that
-            // under-trained large-turn behavior at all.
+            // Face along the NavMesh path to the first goal, as every participant started (PoiProgressTracker.StartYawAlongPath),
+            // plus spawnHeadingOffsetDeg (EvalHarness's seeded start jitter). Set here, before the first capture tick, so the
+            // own-motion input never sees the spawn rotation as a turn.
             if (poiTracker.CurrentTarget != null)
             {
-                Vector3 towardGoal = poiTracker.CurrentTarget.position - transform.position;
-                towardGoal.y = 0f;
-                if (towardGoal.sqrMagnitude > 0.0001f)
-                {
-                    transform.rotation = Quaternion.LookRotation(towardGoal.normalized, Vector3.up);
-                }
+                float yaw = PoiProgressTracker.StartYawAlongPath(transform.position, poiTracker.CurrentTarget.position) + spawnHeadingOffsetDeg;
+                transform.rotation = Quaternion.Euler(0f, yaw, 0f);
             }
 
             transform.localScale = new Vector3(agentSize, agentSize, agentSize);
@@ -1143,7 +1139,9 @@ namespace Agent_Based_Modelling
             trajectory.Add(transform.position);
             if (trajectory.Count > 1) DisplaceDeadlocks();
 
-            poiTracker.Tick(transform.position);
+            // Arrival is measured at the eye, as ParticipantRecorder (on the camera) measures it for humans and the bot; the
+            // body pivot sits 1.5 m lower, which would shrink the horizontal arrival radius around the raised markers.
+            poiTracker.Tick(AgentHeadAnchor != null ? AgentHeadAnchor.position : transform.position);
             if (poiTracker.IsFinished)
             {
                 destroyRequest = true;

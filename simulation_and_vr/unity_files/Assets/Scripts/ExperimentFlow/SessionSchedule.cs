@@ -18,8 +18,14 @@ namespace Assets.Scripts.ExperimentFlow
             public int layoutIndex;
             /// <summary>Position of this layout in the participant's order (0 = walked first).</summary>
             public int orderPosition;
-            /// <summary>0-based repetition of this layout for this participant; written as the manifest's repetition_index.</summary>
-            public int repetitionIndex;
+            /// <summary>Position of the task within the layout: 0..trainingTasks-1 = training tasks, trainingTasks = the test task (last).</summary>
+            public int taskOrderPosition;
+            /// <summary>Index into HumanTaskSet.training, or -1 for the test task.</summary>
+            public int trainingTaskIndex;
+            /// <summary>Latin-square row that ordered this layout's training tasks.</summary>
+            public int taskOrderLatinRow;
+
+            public bool IsTest => trainingTaskIndex < 0;
         }
 
         /// <summary>Null if the ID is usable, else the reason it is refused.</summary>
@@ -84,27 +90,40 @@ namespace Assets.Scripts.ExperimentFlow
             return ((participantNumber - 1) % rowCount + rowCount) % rowCount;
         }
 
-        /// <summary>
-        /// The session's trials: layouts in the participant's Latin-square order, each walked 'repetitions' times in a
-        /// row (blocked), so repetition_index 0..repetitions-1 counts the walks of that layout.
-        /// </summary>
-        public static List<Trial> BuildTrials(int participantNumber, int layoutCount, int repetitions, out int latinRow, out int[] layoutOrder)
+        /// <summary>Participant fold (methodology 3.8.2): odd participant numbers are fold 1, even ones fold 2.</summary>
+        public static int FoldOf(int participantNumber)
         {
-            int[][] square = BalancedLatinSquare(layoutCount);
-            latinRow = LatinSquareRow(participantNumber, square.Length);
-            layoutOrder = square[latinRow];
+            return participantNumber % 2 != 0 ? 1 : 2;
+        }
+
+        /// <summary>
+        /// The session's trials (methodology 3.8.2): layouts in the participant's Latin-square order; within each layout the
+        /// training tasks in the order of Latin-square row (participant number + layout index), then the test task last. The
+        /// layout index offset keeps the task order from being tied to the layout order.
+        /// </summary>
+        public static List<Trial> BuildTrials(int participantNumber, int layoutCount, int trainingTasks, out int latinRow, out int[] layoutOrder)
+        {
+            int[][] layoutSquare = BalancedLatinSquare(layoutCount);
+            latinRow = LatinSquareRow(participantNumber, layoutSquare.Length);
+            layoutOrder = layoutSquare[latinRow];
+            int[][] taskSquare = BalancedLatinSquare(trainingTasks);
 
             var trials = new List<Trial>();
             for (int position = 0; position < layoutOrder.Length; position++)
             {
-                for (int rep = 0; rep < repetitions; rep++)
+                int layout = layoutOrder[position];
+                int taskRow = LatinSquareRow(participantNumber + layout, taskSquare.Length);
+                int[] taskOrder = taskSquare[taskRow];
+                for (int k = 0; k <= trainingTasks; k++)
                 {
                     trials.Add(new Trial
                     {
                         trialIndex = trials.Count,
-                        layoutIndex = layoutOrder[position],
+                        layoutIndex = layout,
                         orderPosition = position,
-                        repetitionIndex = rep
+                        taskOrderPosition = k,
+                        trainingTaskIndex = k < trainingTasks ? taskOrder[k] : -1,
+                        taskOrderLatinRow = taskRow
                     });
                 }
             }

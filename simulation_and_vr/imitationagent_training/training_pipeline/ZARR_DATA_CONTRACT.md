@@ -76,6 +76,12 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
     "end":   { "x": 12.5, "y": 1.0, "z": 0.0 }
   },
   "start_jitter_heading_deg": 0.0,
+  "trial": {
+    "task_id": "train_2", "task_role": "train", "fold": 1, "c_excluded": false,
+    "task_order_position": 1, "layout_order_position": 0, "trial_index": 1, "attempt_index": 0,
+    "latin_square_row": 0, "task_order_latin_row": 1,
+    "task_set_version": "human_tasks_v1", "task_set_seed": 1215663121
+  },
 
   "frame_count": 412,
   "start_time": 3.21,
@@ -111,10 +117,11 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
 | `source` | `"human"` or `"synthetic"`. The recorder's `source` field; `RecordRandomWalksHarness` and `DaggerHarness` set `"synthetic"` |
 | `participant_id` | the recorder's `participantId`. Recording refuses to start while it is empty or `"unknown"`. Synthetic episodes use the bot name (`synthetic_rrw_v3`, `synthetic_dagger`) |
 | `session_id` | one sitting or one harness run. For humans: the recorder's `sessionId`, or the start time of the first episode in Play mode if left empty. For bots: `rrw_<time>` or `dagger_<time>` |
-| `repetition_index` | the recorder's `repetitionIndex`, which increments after every episode. Harnesses set it to the index of the kept episode within the run |
+| `repetition_index` | the recorder's `repetitionIndex`, which increments after every episode. `ParticipantSession` sets it to the task's position within the layout (0-3); harnesses set it to the index of the kept episode within the run |
 | `input_mode` | `"desktop"` (keyboard + mouse), the only mode in use |
 | `task` | world positions, fixed at the start of recording. `start` is the task start marker nearest the mover. `pois` are the POIs in visiting order and `end` is the end marker, both taken from the route `PoiProgressTracker` plans up front, so they are complete even when an episode stops early |
 | `start_jitter_heading_deg` | random offset in degrees added to the start heading, which otherwise faces the first target. Set per episode by `RecordRandomWalksHarness` (`bot.startHeadingJitterDegrees`) and `DaggerHarness`; always 0 for humans |
+| `trial` | design labels of a human session episode, written by `ParticipantSession` (methodology 3.8). `task_id`: `"test"` or `"train_0"`..`"train_2"` (the layout scene's `HumanTaskSet`); `task_role`: `"train"`/`"test"`; `fold`: 1 = odd participant numbers, 2 = even; `c_excluded`: this is the training task condition C leaves out (fixed per layout by the generator); `task_order_position`: 0-2 training tasks, 3 = test task (walked last); `layout_order_position`, `trial_index`: position in the session; `attempt_index`: 0 = first walk, +1 per repeat after an experimenter abort; `latin_square_row`, `task_order_latin_row`: the rows that ordered layouts and training tasks; `task_set_version`, `task_set_seed`: the `HumanTaskSet` generation. Synthetic episodes carry an empty `task_id` |
 | `frame_count` | number of samples written |
 | `start_time`, `end_time` | Unity `Time.time` at start and stop |
 | `camera_height_m` | measured camera height above the NavMesh, taken once at sample 10 (or at stop, for shorter episodes). -1 = could not be measured |
@@ -128,7 +135,7 @@ Sampling is locked to one sample every `sampling_interval_s` = 0.1 s. Every arra
 1. `schema_version` is not `zarr-v3`;
 2. any field in section 3 is missing or has the wrong JSON type;
 3. `recorder_version`, `episode_id`, `scene_name`, `layout_typology`, `participant_id`, `session_id` or `input_mode` is empty, or `participant_id` is `"unknown"`;
-4. `source` is not `"human"` or `"synthetic"`, `repetition_index` < 0, or `frame_count` ≤ 0;
+4. `source` is not `"human"` or `"synthetic"`, `repetition_index` < 0, or `frame_count` ≤ 0; or a `"human"` episode lacks `trial` labels (`task_id`, `task_role` train/test, `fold` 1/2);
 5. `task` is not `{start: {x,y,z}, pois: [{x,y,z}, ...], end: {x,y,z}}`;
 6. `camera_fov_deg` ≠ 60, `camera_height_m` is outside 1.5 ± 0.03 m, `sampling_interval_s` ≠ 0.1, the image is not 64 × 64, or `temporal_window_size` ≠ 1;
 7. `arrays` does not list all eight arrays, or lists one with another shape or dtype than section 2.

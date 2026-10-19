@@ -57,7 +57,7 @@ namespace Assets.Scripts.DataRecording
 
         [Header("Rig")]
         [Tooltip("Instantiated only if the scene has no FirstPersonController. Normally Assets/Scenes/FPSController.prefab " +
-                 "(assigned by Tools > Random Walks > Add RecordRandomWalksHarness).")]
+                 "(assigned by Tools > Imitation Learning Agent > 1 · Generate Synthetic Walks > Add Random Walks Harness).")]
         public GameObject fpsControllerPrefab;
 
         [Header("Frame timing")]
@@ -130,7 +130,9 @@ namespace Assets.Scripts.DataRecording
         private int episodesDiscarded;
         private int pairsSkipped;
 
-        void Awake()
+        // OnEnable, not Awake: Awake also runs on a disabled harness, which would switch off the recorder of a human
+        // session in the same scene. OnEnable still runs before every Start in the scene.
+        void OnEnable()
         {
             // Must run before the scene rig's ParticipantRecorder.Start (AutoStartForTesting is on in the layout scenes).
             RecordingRig.DisableSceneRecorders("RecordRandomWalks");

@@ -1,0 +1,87 @@
+[RUN] condition C, fold 2, seed 1, reason: human data C fold 2
+[INGEST] All episodes already converted to dataset.zarr - nothing to do.
+[SPLITS] ../splits.json: fold 2 trains on ['P02', 'P04', 'P06', 'P08'], held out ['P01', 'P03', 'P05', 'P07'] | C leaves out {'CentralPillar_Code_102620': 'train_1', 'MultiRoomDoorway_Code_551670': 'train_0', 'TJunction_Code_99835': 'train_1'}
+[DATASET] episodes per source: human=36, synthetic_rrw_v3=75
+[DATASET] skipped: P01 (held out)=12, P02 (task train_0 not in condition C)=1, P02 (task train_1 not in condition C)=2, P03 (held out)=12, P04 (task train_0 not in condition C)=1, P04 (task train_1 not in condition C)=2, P05 (held out)=12, P06 (task train_0 not in condition C)=1, P06 (task train_1 not in condition C)=2, P07 (held out)=12, P08 (task train_0 not in condition C)=1, P08 (task train_1 not in condition C)=2
+[DATASET] episodes train=87 val=24 | human train participants ['P02', 'P04', 'P06'], human val participants ['P08']
+[DATASET] human episodes per layout:task: CentralPillar_Code_102620:test=4, CentralPillar_Code_102620:train_0=4, CentralPillar_Code_102620:train_2=4, MultiRoomDoorway_Code_551670:test=4, MultiRoomDoorway_Code_551670:train_1=4, MultiRoomDoorway_Code_551670:train_2=4, TJunction_Code_99835:test=4, TJunction_Code_99835:train_0=4, TJunction_Code_99835:train_2=4
+[DATASET] frames train=27048 val=6542 | human frames in train: 11331
+[SAMPLER] human share per batch 50%
+[HARDWARE] Training on device: mps
+[LABELS] yaw class frequency under the sampling mix: 0.030 0.074 0.257 0.269 0.266 0.073 0.032
+[LABELS] stop frequency under the sampling mix 0.183 -> stop weight 1.12 (target share 0.20)
+[LABELS] yaw class weights: 1.65 1.05 0.56 0.55 0.55 1.05 1.59
+[MODEL] own-motion input: on (5 values, dropout 0.50, keyframe weight walk 6.0 / yaw 3.0)
+Epoch [01/20] train 2.4290 | val total 2.7940 (walk 0.1802, yaw 2.2948, pitch 1.2760)
+Epoch [02/20] train 2.2241 | val total 2.8408 (walk 0.1742, yaw 2.3457, pitch 1.2835)
+Epoch [03/20] train 2.1691 | val total 2.8164 (walk 0.1805, yaw 2.3273, pitch 1.2347)
+Epoch [04/20] train 2.1381 | val total 2.7528 (walk 0.1558, yaw 2.2978, pitch 1.1968)
+Epoch [05/20] train 2.1315 | val total 2.7343 (walk 0.1645, yaw 2.2704, pitch 1.1974) (best)
+Epoch [06/20] train 2.0988 | val total 2.7173 (walk 0.1493, yaw 2.2567, pitch 1.2452) (best)
+Epoch [07/20] train 2.0632 | val total 2.7589 (walk 0.1522, yaw 2.3032, pitch 1.2140)
+Epoch [08/20] train 2.0584 | val total 2.7387 (walk 0.1588, yaw 2.2649, pitch 1.2603)
+Epoch [09/20] train 2.0598 | val total 2.7269 (walk 0.1577, yaw 2.2602, pitch 1.2361)
+Epoch [10/20] train 2.0246 | val total 2.7477 (walk 0.1512, yaw 2.2976, pitch 1.1957)
+Epoch [11/20] train 2.0165 | val total 2.7429 (walk 0.1516, yaw 2.2841, pitch 1.2291)
+Epoch [12/20] train 1.9897 | val total 2.7483 (walk 0.1477, yaw 2.2878, pitch 1.2513)
+Epoch [13/20] train 2.0038 | val total 2.7322 (walk 0.1531, yaw 2.2585, pitch 1.2822)
+Epoch [14/20] train 1.9754 | val total 2.7271 (walk 0.1525, yaw 2.2635, pitch 1.2441)
+Epoch [15/20] train 1.9415 | val total 2.7599 (walk 0.1519, yaw 2.2886, pitch 1.2776)
+Epoch [16/20] train 1.9319 | val total 2.7868 (walk 0.1504, yaw 2.3214, pitch 1.2600)
+Epoch [17/20] train 1.8914 | val total 2.7550 (walk 0.1532, yaw 2.2798, pitch 1.2881)
+Epoch [18/20] train 1.8837 | val total 2.7376 (walk 0.1490, yaw 2.2661, pitch 1.2900)
+Epoch [19/20] train 1.8898 | val total 2.7446 (walk 0.1466, yaw 2.2737, pitch 1.2971)
+Epoch [20/20] train 1.8668 | val total 2.8068 (walk 0.1675, yaw 2.3118, pitch 1.3098)
+
+[CHECKPOINT] Using epoch 6 (val total 2.7173)
+
+[DIAGNOSTIC best checkpoint] held-out frames: n=6542
+  walk/stop accuracy 0.988 | demo stop share 0.127 | predicted stop share 0.127
+  yaw class accuracy 0.442 | within one bin 0.834
+  turning frames (|demo| >= 3.0 deg/sample): n=1442, decoded same side 0.775, decoded straight 0.057, |decoded|/|demo| median 0.75
+  wall-ahead / goal-behind turning frames: n=4, decoded |yaw| >= 0.5: 1.000 (M4 regression averaged these to ~0)
+  walk keyframes: start walking n=46 predicted walk 0.391 | stop n=22 predicted stop 0.045
+  yaw keyframes (turn starts/ends/reversals): n=3094, predicted side = demo side 0.491
+  yaw confusion (rows demo, cols predicted; strong-left .. straight .. strong-right):
+       113     70     17     12     20     15     19
+        68    118    114     55     33      7     25
+        35     39    485    348    103     14     14
+   *   106     21    607   1278    624     22    149
+         8     11    175    343    612     78     28
+         2      6     38     59    111    159     83
+        11     15     18     32     18     75    129
+/Users/ilja/ETHlocal/BACHELORTHESIS-IljaMatthiasBlass/bachelorthesis-iljamatthiasblass/project/UnityExperiment-Toolkit/simulation_and_vr/imitationagent_training/training_pipeline/model.py:125: UserWarning: # 'dynamic_axes' is not recommended when dynamo=True, and may lead to 'torch._dynamo.exc.UserError: Constraints violated.' Supply the 'dynamic_shapes' argument instead if export is unsuccessful.
+  torch.onnx.export(
+W0930 18:18:40.470000 19030 .venv/lib/python3.14/site-packages/torch/onnx/_internal/exporter/_compat.py:133] Setting ONNX exporter to use operator set version 18 because the requested opset_version 17 is a lower version than we have implementations for. Automatic version conversion will be performed, which may not be successful at converting to the requested version. If version conversion is unsuccessful, the opset version of the exported model will be kept at 18. Please consider setting opset_version >=18 to leverage latest ONNX features
+W0930 18:18:40.791000 19030 .venv/lib/python3.14/site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::nms
+W0930 18:18:40.791000 19030 .venv/lib/python3.14/site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::roi_align
+W0930 18:18:40.791000 19030 .venv/lib/python3.14/site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::roi_pool
+W0930 18:18:40.791000 19030 .venv/lib/python3.14/site-packages/torch/onnx/_internal/exporter/_registration.py:107] torchvision is not installed. Skipping torchvision::deform_conv2d
+/opt/homebrew/Cellar/python@3.14/3.14.0/Frameworks/Python.framework/Versions/3.14/lib/python3.14/copyreg.py:104: FutureWarning: `isinstance(treespec, LeafSpec)` is deprecated, use `isinstance(treespec, TreeSpec) and treespec.is_leaf()` instead.
+  return cls.__new__(cls, *args)
+The model version conversion is not supported by the onnxscript version converter and fallback is enabled. The model will be converted using the onnx C API (target version: 17).
+
+[DIAGNOSTIC best checkpoint, motion input hidden (camera + goal only)] held-out frames: n=6542
+  walk/stop accuracy 0.876 | demo stop share 0.127 | predicted stop share 0.088
+  yaw class accuracy 0.451 | within one bin 0.818
+  turning frames (|demo| >= 3.0 deg/sample): n=1442, decoded same side 0.707, decoded straight 0.076, |decoded|/|demo| median 0.75
+  wall-ahead / goal-behind turning frames: n=4, decoded |yaw| >= 0.5: 1.000 (M4 regression averaged these to ~0)
+  yaw confusion (rows demo, cols predicted; strong-left .. straight .. strong-right):
+        99     54     17     30     22     14     30
+        72     88    110     81     32      9     28
+        49     40    361    438    106     17     27
+   *   118     25    408   1630    513     64     49
+        17     16    101    459    552     72     38
+        15     22     27     80    105    107    102
+        34     28     13     51     31     28    113
+[torch.onnx] Obtain model graph for `DiscreteImitation2DCNNModel([...]` with `torch.export.export(..., strict=False)`...
+[torch.onnx] Obtain model graph for `DiscreteImitation2DCNNModel([...]` with `torch.export.export(..., strict=False)`... ✅
+[torch.onnx] Run decompositions...
+[torch.onnx] Run decompositions... ✅
+[torch.onnx] Translate the graph into ONNX...
+[torch.onnx] Translate the graph into ONNX... ✅
+[torch.onnx] Optimize the ONNX graph...
+[torch.onnx] Optimize the ONNX graph... ✅
+
+[EXPORT SUCCESS] ONNX model exported to: ../imitation_agent_model/ImitationAgent_C_proprio2_f2_s1.onnx
+[EXPORT] Contract sidecar written to ../imitation_agent_model/ImitationAgent_C_proprio2_f2_s1.json

@@ -16,7 +16,7 @@ namespace Assets.Scripts.Editor
         private const string ScenePath = "Assets/Scenes/ParticipantSession.unity";
         private const string ConfigPath = "Assets/Scenes/ParticipantSessionConfig.asset";
 
-        [MenuItem("Tools/Recording/Create Participant Session Scene")]
+        [MenuItem(ToolsMenu.HumanWalks + "Create Participant Session Scene", priority = ToolsMenu.HumanWalksPriority + 3)]
         public static void CreateSessionScene()
         {
             if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;

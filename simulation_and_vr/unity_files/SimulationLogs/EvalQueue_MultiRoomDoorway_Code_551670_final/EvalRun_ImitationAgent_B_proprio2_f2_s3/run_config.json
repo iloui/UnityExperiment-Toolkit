@@ -1,0 +1,72 @@
+{
+    "harness_version": "7",
+    "agent_kind": "Imitation",
+    "condition": "B",
+    "scene": "MultiRoomDoorway_Code_551670",
+    "started_at": "2026-10-05T15:09:41.5768610+02:00",
+    "unity_version": "2022.3.62f3",
+    "queue_name": "final",
+    "queue_entry_index": 9,
+    "queue_entries": 16,
+    "base_seed": 20261005,
+    "model_asset": "ImitationAgent_B_proprio2_f2_s3",
+    "model_sha256": "de0dfbd97796",
+    "model_disk_mtime_utc": "2026-10-05T08:44:00.0017902Z",
+    "model_fold": 2,
+    "model_seed": 3,
+    "model_splits_design": "folds_x_tasks_v1",
+    "heldout_participants": [
+        "P01",
+        "P03",
+        "P05",
+        "P07"
+    ],
+    "configuration_count": 20,
+    "agents_per_configuration": 1,
+    "randomize_markers": false,
+    "simulation_speed": 3.0,
+    "episode_timeout_sim_s": 90.0,
+    "nudge_enabled": false,
+    "start_jitter_position_m": 0.5,
+    "start_jitter_heading_deg": 15.0,
+    "spawn_heading_rule": "navmesh_path_first_corner_plus_jitter",
+    "stall_event_min_s": 2.0,
+    "collision_debounce_s": 1.0,
+    "max_plausible_speed_mps": 2.5,
+    "metric_window_s": 1.0,
+    "stall_displacement_m": 0.10000000149011612,
+    "task_number_of_needs": 1,
+    "task_start_markers": 1,
+    "task_poi_markers": 1,
+    "task_end_markers": 1,
+    "task_start_positions": [
+        {
+            "x": 11.5,
+            "y": 0.0833333358168602,
+            "z": -3.0
+        }
+    ],
+    "task_poi_positions": [
+        {
+            "x": -1.5,
+            "y": 1.0833333730697632,
+            "z": -8.5
+        }
+    ],
+    "task_end_positions": [
+        {
+            "x": -11.5,
+            "y": 1.0833333730697632,
+            "z": -10.0
+        }
+    ],
+    "body_speed_mps": 1.2999999523162842,
+    "body_radius_m": 0.25,
+    "shortest_path_acceleration_mps2": 0.0,
+    "shortest_path_angular_speed_deg_per_s": 0.0,
+    "navmesh_bake_agent_radius": 0.5,
+    "arrival_radius_m": 1.5,
+    "tick_interval_s": 0.10000000149011612,
+    "imitation_stochastic_walk": true,
+    "imitation_min_walk_hold_s": 1.5
+}

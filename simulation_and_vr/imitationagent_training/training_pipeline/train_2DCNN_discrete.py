@@ -12,14 +12,16 @@ v2 14 left / 5 right). The flip augmentation makes those frames exactly symmetri
   - human and synthetic frames are drawn 50/50 per batch (--human_share);
   - stop frames are up-weighted to --target_stop_share (the v2 bot stood in 4.3% of samples, humans in 20.5%).
 
-Experiment conditions (--condition, participant lists from splits.json, see make_splits.py):
-  A = synthetic only, B = synthetic + subset_B humans, C = synthetic + every training human.
-Held-out participants are never loaded. Human validation is leave-k-participants-out (--val_participants) from the
-condition's own humans; synthetic validation is per episode.
+Experiment conditions (--condition, --fold; splits.json from make_splits.py, methodology 3.8):
+  A = synthetic only (no splits, no fold);
+  B = synthetic + the --fold participants' walks of the three training tasks per layout;
+  C = synthetic + the same participants' walks of the test task and the two training tasks that are not c_excluded.
+The other fold's participants are never loaded; their test-task walks are the model's human reference. Human validation
+is leave-k-participants-out (--val_participants) from the fold's own participants (the same participant for B and C at
+the same seed); synthetic validation is per episode.
 
-B vs C: --human_share fixes the human share of every batch, whatever the number of human frames. B and C therefore give
-the human data the same total weight; C spreads it over more participants (and more distinct frames, each drawn less
-often). The B/C comparison measures human diversity, not how much the model is pushed towards human behaviour.
+B vs C: same participants, same number of episodes, and --human_share fixes the human share of every batch. They differ
+only in whether the agent has seen humans walk the evaluated (test) route: A->B measures transfer, B->C memorisation.
 
 Same trunk, inputs, augmentations and ONNX input/output names as M4; only the output size changes
 (data_contract.DISCRETE_OUTPUT_SIZE), which ImitationAgent detects at load time.
@@ -63,7 +65,7 @@ from data_contract import (PROPRIO_AVAILABLE, PROPRIO_SIZE, PROPRIO_SPEED, PROPR
                            PROPRIO_YAW_SCALE_DEG, SOURCE_HUMAN,
                            WALK_THRESHOLD_MPS, YAW_BIN_CENTERS_DEG, YAW_BIN_EDGES_DEG, YAW_CLASS_COUNT, YAW_STRAIGHT_CLASS)
 from dataset import SingleEpisodeDataset, load_episodes
-from make_splits import CONDITIONS, DRY_RUN_PREFIX, condition_humans, load_splits
+from make_splits import CONDITIONS, DRY_RUN_PREFIX, HUMAN_CONDITIONS, condition_humans, heldout_humans, in_condition, load_splits
 from model import DiscreteImitation2DCNNModel, export_onnx
 
 HUMAN = SOURCE_HUMAN
@@ -122,9 +124,10 @@ def episode_source(manifest: dict) -> str:
     return HUMAN if manifest["source"] == SOURCE_HUMAN else manifest["participant_id"]
 
 
-def select_episodes(episodes, synthetic_sources, humans, heldout=()):
+def select_episodes(episodes, synthetic_sources, humans, heldout=(), condition=None):
     """-> (selected [(episode_dir, source, participant_id)], skipped {"who (why)": episode count}).
-    Human episodes are kept only for participants in humans (the condition's list, never a held-out one);
+    Human episodes are kept only for participants in humans (the fold's list, never a held-out one) and only for the
+    condition's tasks (make_splits.in_condition: B = training tasks, C = test task + non-excluded training tasks);
     synthetic_sources may contain 'all' = every synthetic* participant id in the manifests."""
     wanted = set(synthetic_sources)
     if "all" in wanted:
@@ -133,10 +136,15 @@ def select_episodes(episodes, synthetic_sources, humans, heldout=()):
     selected, skipped = [], {}
     for ep, manifest in episodes:
         src, pid = episode_source(manifest), manifest["participant_id"]
-        if (src == HUMAN and pid in humans) or (src != HUMAN and src in wanted):
+        task_ok = src != HUMAN or condition is None or in_condition(manifest["trial"], condition)
+        if (src == HUMAN and pid in humans and task_ok) or (src != HUMAN and src in wanted):
             selected.append((ep, src, pid))
         else:
-            why = "held out" if pid in heldout else "not in this condition" if src == HUMAN else "not in --synthetic_sources"
+            if src == HUMAN:
+                why = ("held out" if pid in heldout else "not in this fold" if pid not in humans
+                       else f"task {manifest['trial']['task_id']} not in condition {condition}")
+            else:
+                why = "not in --synthetic_sources"
             key = f"{pid if src == HUMAN else src} ({why})"
             skipped[key] = skipped.get(key, 0) + 1
     return selected, skipped
@@ -361,14 +369,18 @@ def main():
     parser = argparse.ArgumentParser(description="2D CNN behaviour cloning with discrete walk/yaw head")
     parser.add_argument("--recordings_dir", type=str, default="../zarr_recordings")
     parser.add_argument("--condition", type=str, required=True, choices=CONDITIONS,
-                        help="A = synthetic only, B = synthetic + subset_B humans, C = synthetic + every training human.")
+                        help="A = synthetic only; B = synthetic + the fold's training-task walks; C = synthetic + the fold's test-task and non-excluded training-task walks.")
+    parser.add_argument("--fold", type=int, choices=(1, 2), default=None,
+                        help="Training fold for B and C (1 = odd participant numbers, 2 = even). The other fold is held out.")
     parser.add_argument("--splits", type=str, default="../splits.json",
-                        help="Participant splits written by make_splits.py. Held-out participants are never loaded.")
+                        help="Fold x task splits written by make_splits.py (B and C only). Held-out participants are never loaded.")
+    parser.add_argument("--name_tag", type=str, default="proprio2",
+                        help="Model variant in the default output name ImitationAgent_<condition>_<tag>[_f<fold>]_s<seed>.onnx.")
     parser.add_argument("--synthetic_sources", type=str, nargs="+", default=["synthetic_rrw_v3"],
                         help="Synthetic participant ids to train on (synthetic_rrw_v3 = bot, synthetic_dagger = "
                              "DaggerHarness), or 'all' = every synthetic* participant id in the manifests.")
     parser.add_argument("--output_onnx", type=str, default=None,
-                        help="Default ../imitation_agent_model/ImitationAgent_<condition>_s<seed>.onnx.")
+                        help="Default ../imitation_agent_model/ImitationAgent_<condition>_<name_tag>[_f<fold>]_s<seed>.onnx.")
     parser.add_argument("--reason", type=str, default="manual", help="Why this run was started; written to the sidecar.")
     parser.add_argument("--human_share", type=float, default=0.5,
                         help="Expected share of human frames per batch (B, C; A has none). Fixed, so B and C weigh the "
@@ -412,27 +424,41 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    if args.condition in HUMAN_CONDITIONS and args.fold is None:
+        parser.error(f"condition {args.condition} needs --fold 1 or --fold 2")
+    if args.condition == "A" and args.fold is not None:
+        parser.error("condition A uses no humans and has no fold; drop --fold")
     if args.output_onnx is None:
-        args.output_onnx = f"../imitation_agent_model/ImitationAgent_{args.condition}_s{args.seed}.onnx"
-    print(f"[RUN] condition {args.condition}, seed {args.seed}, reason: {args.reason}")
-    splits = load_splits(args.splits)
-    humans = condition_humans(splits, args.condition)
-    print(f"[SPLITS] {args.splits}: held out {splits['heldout']} | condition {args.condition} humans {humans or 'none'}")
+        fold_part = f"_f{args.fold}" if args.fold else ""
+        tag_part = f"_{args.name_tag}" if args.name_tag else ""
+        args.output_onnx = f"../imitation_agent_model/ImitationAgent_{args.condition}{tag_part}{fold_part}_s{args.seed}.onnx"
+    print(f"[RUN] condition {args.condition}, fold {args.fold or '-'}, seed {args.seed}, reason: {args.reason}")
 
     episodes = load_episodes(Path(args.recordings_dir))  # manifests only; raises on any contract violation
-    selected, skipped = select_episodes(episodes, args.synthetic_sources, humans, splits["heldout"])
+    if args.condition in HUMAN_CONDITIONS:
+        splits = load_splits(args.splits)
+        humans = condition_humans(splits, args.condition, args.fold)
+        heldout = heldout_humans(splits, args.condition, args.fold)
+        listed = {p for pids in splits["folds"].values() for p in pids}
+        print(f"[SPLITS] {args.splits}: fold {args.fold} trains on {humans}, held out {heldout} | "
+              f"C leaves out {splits['c_excluded']}")
+    else:  # A: no humans at all, every human is held out
+        splits = None
+        humans = []
+        heldout = sorted({m["participant_id"] for _, m in episodes if m["source"] == SOURCE_HUMAN})
+        listed = set(heldout)
+    selected, skipped = select_episodes(episodes, args.synthetic_sources, humans, heldout, args.condition)
     train_eps, val_eps, val_pids = split_train_val(selected, args.val_ratio, args.val_participants, args.seed)
-    assert_no_heldout([selected, train_eps, val_eps], splits["heldout"])
+    assert_no_heldout([selected, train_eps, val_eps], heldout)
     train_pids = sorted({pid for _, src, pid in train_eps if src == HUMAN})
 
     print("[DATASET] episodes per source: " + ", ".join(f"{k}={v}" for k, v in count_by(selected, lambda e: e[1]).items()))
     if skipped:
         print("[DATASET] skipped: " + ", ".join(f"{k}={v}" for k, v in sorted(skipped.items())))
-    listed = set(splits["heldout"]) | set(splits["train"])
     unknown = sorted({m["participant_id"] for _, m in episodes if m["source"] == SOURCE_HUMAN
                       and m["participant_id"] not in listed and not m["participant_id"].startswith(DRY_RUN_PREFIX)})
     if unknown:
-        print(f"[DATASET] WARNING: human participants not in {args.splits} (never used): {unknown}")
+        print(f"[DATASET] WARNING: human participants in no fold of {args.splits} (never used): {unknown}")
     missing = [s for s in args.synthetic_sources if s != "all" and s not in {e[1] for e in selected}]
     if missing or not any(src != HUMAN for _, src, _ in selected):
         print(f"[ERROR] No synthetic episodes for {missing or args.synthetic_sources} in '{args.recordings_dir}'")
@@ -445,6 +471,11 @@ def main():
         print(f"[DATASET] WARNING: condition {args.condition} participants without episodes: {missing_humans}")
     print(f"[DATASET] episodes train={len(train_eps)} val={len(val_eps)} | human train participants {train_pids or 'none'}, "
           f"human val participants {val_pids or 'none'}")
+    manifest_by_dir = {str(ep): m for ep, m in episodes}
+    human_tasks = count_by([e for e in selected if e[1] == HUMAN],
+                           lambda e: f"{manifest_by_dir[str(e[0])]['scene_name']}:{manifest_by_dir[str(e[0])]['trial']['task_id']}")
+    if human_tasks:
+        print("[DATASET] human episodes per layout:task: " + ", ".join(f"{k}={v}" for k, v in sorted(human_tasks.items())))
 
     train_ds, train_sources = build_dataset(train_eps, True, args)
     val_ds, _ = build_dataset(val_eps, False, args)
@@ -520,7 +551,10 @@ def main():
                    "yaw_bin_edges_deg": YAW_BIN_EDGES_DEG, "yaw_bin_centers_deg": YAW_BIN_CENTERS_DEG,
                    "walk_threshold_mps": WALK_THRESHOLD_MPS,
                    "condition": args.condition, "seed": args.seed, "git_revision": git_revision(), "reason": args.reason,
-                   "splits": os.path.abspath(args.splits), "heldout_participants": splits["heldout"],
+                   "fold": args.fold, "splits": os.path.abspath(args.splits) if splits else None,
+                   "splits_design": splits["design"] if splits else None,
+                   "c_excluded": splits["c_excluded"] if splits else None,
+                   "human_episodes_per_task": human_tasks, "heldout_participants": heldout,
                    "condition_participants": humans, "train_participants": train_pids, "val_participants": val_pids,
                    "human_share": human_share, "synthetic_sources": sorted({e[1] for e in selected if e[1] != HUMAN}),
                    "episode_counts": {"train": count_by(train_eps, lambda e: e[2] if e[1] == HUMAN else e[1]),

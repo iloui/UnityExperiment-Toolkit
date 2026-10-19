@@ -93,7 +93,9 @@ public class POIMarkerScript : MonoBehaviour
             cylinders[i] = cylinder;
         }
 
-        GetComponent<MeshRenderer>().enabled = false;
+        // Markers placed by Prepare Scene can be invisible (no MeshRenderer).
+        MeshRenderer markerRenderer = GetComponent<MeshRenderer>();
+        if (markerRenderer != null) markerRenderer.enabled = false;
     }
 
     // Update is called once per frame

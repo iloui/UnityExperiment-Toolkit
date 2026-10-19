@@ -15,14 +15,15 @@ using UnityEditor.SceneManagement;
 namespace Assets.Scripts.ExperimentFlow
 {
     /// <summary>
-    /// Runs one desktop human recording session from the bootstrap scene (Tools > Recording > Create Participant Session
+    /// Runs one desktop human recording session from the bootstrap scene (Tools > Imitation Learning Agent > 2 · Record Human Walks > Create Participant Session
     /// Scene): participant ID -> instructions -> untracked practice -> the layout scenes in the participant's
-    /// Latin-square order, each ParticipantSessionConfig.repetitions times. Every scene is loaded on its own (Single mode);
+    /// Latin-square order. In each layout the participant walks the scene's HumanTaskSet training tasks in a counterbalanced
+    /// order and then the test task last, each once (methodology 3.8.2). Every trial loads its scene on its own (Single mode)
+    /// and moves the scene's Start/POI_0/End markers and the rig onto the trial's task;
     /// this object survives the loads, configures the scene's ParticipantRecorder in sceneLoaded (after Awake, before
     /// Start, so AutoStartForTesting never fires) and starts/stops recording itself. Each finished or aborted episode is
     /// appended to imitationagent_training/participant_sessions/session_log.csv. Nothing is set in the inspector per participant.
-    /// A finished session requests one full retrain (RetrainPipeline, if config.retrainAfterSession); an aborted one only
-    /// with config.retrainOnAbort.
+    /// The session never retrains the model: training on the human data is a separate step after all sessions.
     /// </summary>
     public class ParticipantSession : MonoBehaviour
     {
@@ -34,7 +35,8 @@ namespace Assets.Scripts.ExperimentFlow
         private const string LogHeader =
             "logged_at,participant_id,status,dry_run,participant_number,session_id,latin_square_row,layout_order," +
             "trial_index,trial_count,order_position,layout_index,scene_name,layout_typology,layout_seed,repetition_index," +
-            "episode_id,frame_count,duration_s,episode_dir";
+            "episode_id,frame_count,duration_s,episode_dir," +
+            "fold,task_id,task_role,task_order_position,task_order_latin_row,attempt_index,c_excluded,task_set_seed";
 
         private Stage stage;
         private float stageShownAt;
@@ -52,7 +54,9 @@ namespace Assets.Scripts.ExperimentFlow
         private List<SessionSchedule.Trial> trials;
         private int currentTrial = -1;  // -1 = practice
         private int completedEpisodes;
-        private bool retrainHandled;    // at most one retrain request per session
+        private int fold;
+        private readonly Dictionary<int, int> abortedAttempts = new Dictionary<int, int>(); // trial index -> aborted walks so far
+        private HumanTaskSet taskSet;   // of the loaded layout scene
 
         // Set while a scene loads; OnSceneLoaded configures that scene.
         private string pendingScenePath;
@@ -82,8 +86,6 @@ namespace Assets.Scripts.ExperimentFlow
         private void OnDestroy()
         {
             SceneManager.sceneLoaded -= OnSceneLoaded;
-            // Play mode stopped mid-session.
-            if (trials != null && stage != Stage.Done) RequestRetrainOnce(aborted: true);
         }
 
         private IEnumerator Start()
@@ -99,9 +101,10 @@ namespace Assets.Scripts.ExperimentFlow
             SessionSchedule.TryParticipantNumber(enteredId, out participantNumber);
             participantId = config.dryRun ? "dryrun_" + enteredId : enteredId;
             sessionId = $"{participantId}_{DateTime.Now:yyyyMMdd_HHmmss}";
-            trials = SessionSchedule.BuildTrials(participantNumber, config.LayoutScenePaths.Length, config.repetitions, out latinRow, out layoutOrder);
-            Debug.Log($"[ParticipantSession] Session '{sessionId}': participant {participantId} (#{participantNumber}), Latin-square row {latinRow}, " +
-                $"layout order {string.Join("-", layoutOrder)}, {trials.Count} trials{(config.dryRun ? " (DRY RUN)" : "")}.");
+            fold = SessionSchedule.FoldOf(participantNumber);
+            trials = SessionSchedule.BuildTrials(participantNumber, config.LayoutScenePaths.Length, config.trainingTasksPerLayout, out latinRow, out layoutOrder);
+            Debug.Log($"[ParticipantSession] Session '{sessionId}': participant {participantId} (#{participantNumber}, fold {fold}), Latin-square row {latinRow}, " +
+                $"layout order {string.Join("-", layoutOrder)}, {trials.Count} trials{(config.dryRun ? " (DRY RUN)" : "")}:\n" + DescribeTrials());
 
             // 2. Instructions.
             SetStage(Stage.Instructions);
@@ -115,7 +118,7 @@ namespace Assets.Scripts.ExperimentFlow
             yield return WaitForConfirm();
             yield return RunPractice();
 
-            // 4. Recorded trials; an aborted trial is repeated with the same repetition index.
+            // 4. Recorded trials; an aborted trial is repeated with the next attempt_index.
             for (currentTrial = 0; currentTrial < trials.Count;)
             {
                 SessionSchedule.Trial trial = trials[currentTrial];
@@ -136,6 +139,10 @@ namespace Assets.Scripts.ExperimentFlow
                     currentTrial++;
                     completedEpisodes++;
                 }
+                else
+                {
+                    abortedAttempts[trial.trialIndex] = AttemptIndex(trial) + 1;
+                }
                 if (currentTrial < trials.Count)
                 {
                     SetStage(Stage.TrialDone);
@@ -145,29 +152,6 @@ namespace Assets.Scripts.ExperimentFlow
 
             Debug.Log($"[ParticipantSession] Session '{sessionId}' complete: {trials.Count} episodes logged to {SessionLogPath}.");
             SetStage(Stage.Done);
-            RequestRetrainOnce(aborted: false); // every episode and manifest is written by now
-        }
-
-        /// <summary>
-        /// The session's one retrain request. Dry-run sessions trigger it too (their dryrun_ participants are never trained on),
-        /// so the dry run also checks this step.
-        /// </summary>
-        private void RequestRetrainOnce(bool aborted)
-        {
-            if (retrainHandled) return;
-            retrainHandled = true;
-            if (aborted && (!config.retrainOnAbort || completedEpisodes == 0))
-            {
-                Debug.Log($"[ParticipantSession] Session '{sessionId}' ended early after {completedEpisodes} completed episodes - no retrain " +
-                          $"(retrainOnAbort is {(config.retrainOnAbort ? "on, but nothing was recorded" : "off")}).");
-                return;
-            }
-            if (!config.retrainAfterSession)
-            {
-                Debug.Log($"[ParticipantSession] retrainAfterSession is off - no retrain after session '{sessionId}'.");
-                return;
-            }
-            RetrainPipeline.RequestFullRetrain($"session {participantId} {(aborted ? "aborted" : "finished")}");
         }
 
         // ------------------------------------------------------------------
@@ -187,7 +171,7 @@ namespace Assets.Scripts.ExperimentFlow
             }
             if (string.IsNullOrEmpty(config.PracticeScenePath)) return "The session config has no practice scene.";
             if (seen.Contains(config.PracticeScenePath)) return "The practice scene must not be one of the recorded layout scenes.";
-            if (config.repetitions < 1) return "repetitions must be at least 1.";
+            if (config.trainingTasksPerLayout < 1) return "trainingTasksPerLayout must be at least 1.";
             return null;
         }
 
@@ -199,6 +183,7 @@ namespace Assets.Scripts.ExperimentFlow
             sceneError = null;
             recorder = null;
             controller = null;
+            taskSet = null;
 
             AsyncOperation op;
 #if UNITY_EDITOR
@@ -241,11 +226,13 @@ namespace Assets.Scripts.ExperimentFlow
             foreach (GameObject root in scene.GetRootGameObjects())
             {
                 recorders.AddRange(root.GetComponentsInChildren<ParticipantRecorder>(true));
-                if (root.GetComponentInChildren<EvalHarness>(true) != null || root.GetComponentInChildren<RecordRandomWalksHarness>(true) != null ||
-                    root.GetComponentInChildren<DaggerHarness>(true) != null)
+                // Disabled harnesses (component unticked or GameObject inactive) are fine: they never run.
+                foreach (MonoBehaviour harness in root.GetComponentsInChildren<MonoBehaviour>(true))
                 {
-                    throw new InvalidOperationException($"Scene '{scene.name}' contains a harness (EvalHarness/RecordRandomWalksHarness/DaggerHarness). " +
-                        "Use the plain layout scene for human sessions.");
+                    if (!(harness is EvalHarness || harness is RecordRandomWalksHarness || harness is DaggerHarness)) continue;
+                    if (!harness.isActiveAndEnabled) continue;
+                    throw new InvalidOperationException($"Scene '{scene.name}' has an enabled {harness.GetType().Name} on '{harness.name}'. " +
+                        "Untick it (or deactivate its GameObject) and save the scene before a human session.");
                 }
             }
             if (recorders.Count != 1)
@@ -261,7 +248,7 @@ namespace Assets.Scripts.ExperimentFlow
             }
             if (recorder.task == null)
             {
-                throw new InvalidOperationException($"The ParticipantRecorder in '{scene.name}' has no TaskScript. Run Tools > Thesis > Prepare Scene on it.");
+                throw new InvalidOperationException($"The ParticipantRecorder in '{scene.name}' has no TaskScript. Run Tools > Scene Preparation > Prepare Scene on it.");
             }
 
             recorder.AutoStartForTesting = false;   // the session starts recording itself
@@ -273,9 +260,80 @@ namespace Assets.Scripts.ExperimentFlow
                 recorder.source = ZarrDataContract.EpisodeSources.Human;
                 recorder.participantId = participantId;
                 recorder.sessionId = sessionId;
-                recorder.repetitionIndex = pendingTrial.Value.repetitionIndex;
                 recorder.inputMode = ZarrDataContract.InputModeDesktop;
+                ApplyTrialTask(scene, pendingTrial.Value);
             }
+        }
+
+        /// <summary>
+        /// Moves the scene's single Start/POI_0/End onto the trial's task and the rig onto its start, and labels the episode.
+        /// Refuses a scene without a HumanTaskSet, with another number of training tasks, or whose test task moved since the
+        /// set was generated.
+        /// </summary>
+        private void ApplyTrialTask(Scene scene, SessionSchedule.Trial trial)
+        {
+            var sets = new List<HumanTaskSet>();
+            foreach (GameObject root in scene.GetRootGameObjects()) sets.AddRange(root.GetComponentsInChildren<HumanTaskSet>(true));
+            if (sets.Count != 1)
+            {
+                throw new InvalidOperationException($"Scene '{scene.name}' must contain exactly one HumanTaskSet, found {sets.Count}. " +
+                    "Run Tools > Imitation Learning Agent > 2 · Record Human Walks > Generate Missing Human Tasks For Session Layouts.");
+            }
+            taskSet = sets[0];
+            if (taskSet.TrainingCount != config.trainingTasksPerLayout)
+            {
+                throw new InvalidOperationException($"Scene '{scene.name}' has {taskSet.TrainingCount} human training tasks, the session expects {config.trainingTasksPerLayout}.");
+            }
+            TaskScript task = recorder.task;
+            string stale = taskSet.CheckTestTaskUnchanged(task);
+            if (stale != null)
+            {
+                throw new InvalidOperationException($"Scene '{scene.name}': {stale}. Regenerate the human tasks only if no participant has walked them yet.");
+            }
+            foreach (GameObject marker in new[] { task.start[0], task.pointsOfInterest[0], task.end[0] })
+            {
+                if (marker.isStatic) throw new InvalidOperationException($"Task marker '{marker.name}' in '{scene.name}' is static and can't be moved. Clear its Static flag.");
+            }
+
+            HumanTaskSet.TaskDef def = trial.IsTest ? taskSet.test : taskSet.training[trial.trainingTaskIndex];
+            HumanTaskSet.ApplyToTask(task, def);
+            taskSet.PlaceRig(recorder.transform, def);
+
+            recorder.repetitionIndex = trial.taskOrderPosition; // walks of this layout before this one
+            recorder.trialInfo = new ZarrDataContract.TrialInfo
+            {
+                task_id = def.id,
+                task_role = trial.IsTest ? HumanTaskSet.RoleTest : HumanTaskSet.RoleTrain,
+                fold = fold,
+                c_excluded = !trial.IsTest && trial.trainingTaskIndex == taskSet.cExcludedIndex,
+                task_order_position = trial.taskOrderPosition,
+                layout_order_position = trial.orderPosition,
+                trial_index = trial.trialIndex,
+                attempt_index = AttemptIndex(trial),
+                latin_square_row = latinRow,
+                task_order_latin_row = trial.taskOrderLatinRow,
+                task_set_version = taskSet.generatorVersion,
+                task_set_seed = taskSet.generatorSeed
+            };
+            Debug.Log($"[ParticipantSession] Trial {trial.trialIndex + 1}/{trials.Count}: {scene.name} task '{def.id}' " +
+                $"(position {trial.taskOrderPosition}, attempt {recorder.trialInfo.attempt_index}{(recorder.trialInfo.c_excluded ? ", C-excluded" : "")}).");
+        }
+
+        private int AttemptIndex(SessionSchedule.Trial trial)
+        {
+            return abortedAttempts.TryGetValue(trial.trialIndex, out int n) ? n : 0;
+        }
+
+        /// <summary>The session plan for the console: layout and task per trial.</summary>
+        private string DescribeTrials()
+        {
+            var sb = new StringBuilder();
+            foreach (SessionSchedule.Trial t in trials)
+            {
+                sb.Append($"  {t.trialIndex + 1,2}. {Path.GetFileNameWithoutExtension(config.LayoutScenePaths[t.layoutIndex])} " +
+                          $"{(t.IsTest ? HumanTaskSet.TestTaskId : HumanTaskSet.TrainTaskId(t.trainingTaskIndex))}\n");
+            }
+            return sb.ToString();
         }
 
         // ------------------------------------------------------------------
@@ -390,7 +448,9 @@ namespace Assets.Scripts.ExperimentFlow
         private void AppendLog(SessionSchedule.Trial trial, string status, ZarrDataContract.EpisodeManifest manifest, string episodeDir)
         {
             Directory.CreateDirectory(SessionLogDirectory);
+            RotateLogWithOldColumns();
             bool writeHeader = !File.Exists(SessionLogPath);
+            ZarrDataContract.TrialInfo info = recorder != null ? recorder.trialInfo : null;
             var inv = CultureInfo.InvariantCulture;
             string[] fields =
             {
@@ -409,11 +469,19 @@ namespace Assets.Scripts.ExperimentFlow
                 manifest?.scene_name ?? Path.GetFileNameWithoutExtension(config.LayoutScenePaths[trial.layoutIndex]),
                 manifest?.layout_typology ?? "",
                 manifest != null ? manifest.layout_seed.ToString(inv) : "",
-                (manifest?.repetition_index ?? trial.repetitionIndex).ToString(inv),
+                (manifest?.repetition_index ?? trial.taskOrderPosition).ToString(inv),
                 manifest?.episode_id ?? "",
                 manifest != null ? manifest.frame_count.ToString(inv) : "",
                 manifest != null ? (manifest.end_time - manifest.start_time).ToString("F2", inv) : "",
-                episodeDir ?? ""
+                episodeDir ?? "",
+                fold.ToString(inv),
+                info?.task_id ?? "",
+                info?.task_role ?? "",
+                trial.taskOrderPosition.ToString(inv),
+                trial.taskOrderLatinRow.ToString(inv),
+                AttemptIndex(trial).ToString(inv),
+                info != null && info.c_excluded ? "1" : "0",
+                info != null ? info.task_set_seed.ToString(inv) : ""
             };
 
             var line = new StringBuilder();
@@ -428,11 +496,25 @@ namespace Assets.Scripts.ExperimentFlow
             {
                 Debug.LogError($"[ParticipantSession] Trial {trial.trialIndex + 1}: no manifest in '{episodeDir}' - logged without episode metadata.");
             }
-            else if (manifest.participant_id != participantId || manifest.repetition_index != trial.repetitionIndex || manifest.source != ZarrDataContract.EpisodeSources.Human)
+            else if (manifest.participant_id != participantId || manifest.repetition_index != trial.taskOrderPosition ||
+                     manifest.source != ZarrDataContract.EpisodeSources.Human || manifest.trial == null || info == null || manifest.trial.task_id != info.task_id)
             {
                 Debug.LogError($"[ParticipantSession] Trial {trial.trialIndex + 1}: manifest has participant '{manifest.participant_id}', repetition " +
-                    $"{manifest.repetition_index}, source '{manifest.source}' - expected '{participantId}', {trial.repetitionIndex}, 'human'.");
+                    $"{manifest.repetition_index}, source '{manifest.source}', task '{manifest.trial?.task_id}' - expected '{participantId}', " +
+                    $"{trial.taskOrderPosition}, 'human', '{info?.task_id}'.");
             }
+        }
+
+        /// <summary>A log written with another column set (older protocol) is renamed, so every row of the active log has the same columns.</summary>
+        private void RotateLogWithOldColumns()
+        {
+            if (!File.Exists(SessionLogPath)) return;
+            string firstLine;
+            using (var reader = new StreamReader(SessionLogPath)) firstLine = reader.ReadLine();
+            if (firstLine == LogHeader) return;
+            string rotated = Path.Combine(SessionLogDirectory, $"{Path.GetFileNameWithoutExtension(SessionLogPath)}_oldcolumns_{DateTime.Now:yyyyMMdd_HHmmss}.csv");
+            File.Move(SessionLogPath, rotated);
+            Debug.LogWarning($"[ParticipantSession] {SessionLogPath} had another column set; moved to {rotated}.");
         }
 
         private static string CsvField(string value)
@@ -476,7 +558,6 @@ namespace Assets.Scripts.ExperimentFlow
             errorMessage = message;
             Debug.LogError($"[ParticipantSession] {message}");
             SetStage(Stage.Error);
-            if (trials != null) RequestRetrainOnce(aborted: true);
         }
 
         private void OnGUI()

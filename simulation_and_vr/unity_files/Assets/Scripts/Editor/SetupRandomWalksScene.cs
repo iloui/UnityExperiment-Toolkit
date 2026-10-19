@@ -13,7 +13,7 @@ namespace Assets.Scripts.Editor
     /// </summary>
     internal static class SetupRandomWalksScene
     {
-        [MenuItem("Tools/Random Walks/Add RecordRandomWalksHarness To Current Scene")]
+        [MenuItem(ToolsMenu.SyntheticWalks + "Add Random Walks Harness", priority = ToolsMenu.SyntheticWalksPriority)]
         public static void AddHarness()
         {
             Scene scene = EditorSceneManager.GetActiveScene();
@@ -41,7 +41,7 @@ namespace Assets.Scripts.Editor
         /// pairs, the FPSController bot settings) never reach it. This copies a fresh component's
         /// defaults over it (undoable).
         /// </summary>
-        [MenuItem("Tools/Random Walks/Reset RecordRandomWalksHarness To Code Defaults")]
+        [MenuItem(ToolsMenu.SyntheticWalks + "Reset Harness To Code Defaults", priority = ToolsMenu.SyntheticWalksPriority + 1)]
         public static void ResetHarnessToDefaults()
         {
             var harness = Object.FindObjectOfType<RecordRandomWalksHarness>();
@@ -70,7 +70,7 @@ namespace Assets.Scripts.Editor
                 $"(k={harness.pairCount}, m={harness.agentsPerPair}). Save the scene.");
         }
 
-        [MenuItem("Tools/DAgger/Add DaggerHarness To Current Scene")]
+        [MenuItem(ToolsMenu.ImitationAdvanced + "Add DAgger Harness", priority = ToolsMenu.ImitationAdvancedPriority)]
         public static void AddDaggerHarness()
         {
             Scene scene = EditorSceneManager.GetActiveScene();

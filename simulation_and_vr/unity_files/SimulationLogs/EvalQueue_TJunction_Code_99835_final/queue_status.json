@@ -1,0 +1,33 @@
+{
+    "state": "done",
+    "queue_name": "final",
+    "scene": "TJunction_Code_99835",
+    "started_at": "2026-10-05T16:24:42.1271570+02:00",
+    "updated_at": "2026-10-05T20:24:58.8281780+02:00",
+    "entry": 16,
+    "entries": 16,
+    "current": "",
+    "episodes_done_in_current": 0,
+    "episodes_per_entry": 20,
+    "elapsed_min": 240.27703857421876,
+    "estimated_remaining_min": 0.0,
+    "sim_speed_vs_real": 1.9103277921676636,
+    "results": [
+        "ShortestPath: 20/20 successful, 0 timeouts, 0 other (4 min)",
+        "ImitationAgent_A_proprio2_s1: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_A_proprio2_s2: 1/20 successful, 19 timeouts, 0 other (10 min)",
+        "ImitationAgent_A_proprio2_s3: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_B_proprio2_f1_s1: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_B_proprio2_f1_s2: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_B_proprio2_f1_s3: 0/20 successful, 20 timeouts, 0 other (97 min)",
+        "ImitationAgent_B_proprio2_f2_s1: 2/20 successful, 18 timeouts, 0 other (10 min)",
+        "ImitationAgent_B_proprio2_f2_s2: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_B_proprio2_f2_s3: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_C_proprio2_f1_s1: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_C_proprio2_f1_s2: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_C_proprio2_f1_s3: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_C_proprio2_f2_s1: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_C_proprio2_f2_s2: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_C_proprio2_f2_s3: 1/20 successful, 19 timeouts, 0 other (10 min)"
+    ]
+}

@@ -108,12 +108,13 @@ def _concat(frames: list[pd.DataFrame]) -> pd.DataFrame:
 # ----------------------------------------------------------------------------------------------------------------------
 
 def load_eval_run(run_dir: str | Path) -> pd.DataFrame:
-    """All finished episodes of one EvalHarness run (harness_version 6: traj_*.csv listed in episodes.csv), concatenated.
-    Episodes with fewer than two trajectory rows (e.g. agent_never_started) are skipped."""
+    """All finished episodes of one EvalHarness run (harness_version 7: traj_*.csv listed in episodes.csv), concatenated.
+    Episodes with fewer than two trajectory rows (e.g. agent_never_started) are skipped. Version 6 runs are refused: they
+    spawned the agent facing the goal in a straight line, not along the NavMesh path the participants started on."""
     run_dir = Path(run_dir)
     cfg = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
-    if cfg.get("harness_version") != "6":
-        raise ValueError(f"{run_dir}: harness_version is {cfg.get('harness_version')!r}, expected '6'. Re-run the evaluation.")
+    if cfg.get("harness_version") != "7":
+        raise ValueError(f"{run_dir}: harness_version is {cfg.get('harness_version')!r}, expected '7'. Re-run the evaluation.")
     source = _AGENT_KIND_TO_SOURCE[cfg["agent_kind"]]
     condition = cfg.get("condition") or None
     if source == SOURCE_IMITATION and condition is None:

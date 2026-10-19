@@ -63,6 +63,8 @@ namespace Assets.Scripts.DataRecording
         public string inputMode = ZarrDataContract.InputModeDesktop;
         /// <summary>start_jitter_heading_deg written to the NEXT episode. Set per episode by the synthetic harnesses; humans keep 0.</summary>
         [HideInInspector] public float startJitterHeadingDeg;
+        /// <summary>Design labels written to the NEXT episode's manifest ('trial'). Set per trial by ParticipantSession; empty otherwise.</summary>
+        [HideInInspector] public ZarrDataContract.TrialInfo trialInfo = new ZarrDataContract.TrialInfo();
 
         /// <summary>Record from this camera instead of the scene's CanonicalRecordingCamera (DaggerHarness: the policy agent's head). null = unchanged behaviour.</summary>
         [HideInInspector] public Camera recordingCameraOverride;
@@ -183,7 +185,7 @@ namespace Assets.Scripts.DataRecording
             {
                 throw new System.InvalidOperationException("[ParticipantRecorder] Cannot start recording: inputMode is empty.");
             }
-            // Throws unless the scene has exactly one LayoutInfo (added by Tools > Generate Layout).
+            // Throws unless the scene has exactly one LayoutInfo (added by Tools > Generative Design > Generate Layout).
             layoutInfo = LayoutInfo.ResolveInScene();
             if (string.IsNullOrWhiteSpace(sessionId))
             {
@@ -441,6 +443,7 @@ namespace Assets.Scripts.DataRecording
                 input_mode = inputMode,
                 task = episodeTask,
                 start_jitter_heading_deg = startJitterHeadingDeg,
+                trial = trialInfo ?? new ZarrDataContract.TrialInfo(),
                 camera_height_m = float.IsNaN(measuredCameraHeight) ? -1f : measuredCameraHeight,
                 camera_fov_deg = hiddenCaptureCamera != null ? hiddenCaptureCamera.fieldOfView : -1f,
                 frame_count = episodeFrameCount,
@@ -623,7 +626,7 @@ namespace Assets.Scripts.DataRecording
             {
                 Debug.LogWarning($"[ParticipantRecorder] Recording camera is {height:F2} m above the NavMesh, but the contract (and ImitationAgent) " +
                     $"uses {ZarrDataContract.CameraHeightAboveNavMeshMeters:F2} m - this episode will not match the other recordings. " +
-                    "Fix the FPSController with Tools > Recording > Apply Contract Camera Height.");
+                    "Fix the FPSController with Tools > Imitation Learning Agent > Advanced > Apply Contract Camera Height.");
             }
         }
 

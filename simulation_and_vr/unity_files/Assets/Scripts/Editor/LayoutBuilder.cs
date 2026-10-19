@@ -89,7 +89,8 @@ namespace Assets.Scripts.Editor
             
             if (settings.Topology != LayoutTopology.Racetrack && 
                 settings.Topology != LayoutTopology.ShiftedGridGrammar &&
-                settings.Topology != LayoutTopology.Comb)
+                settings.Topology != LayoutTopology.Comb &&
+                settings.Topology != LayoutTopology.SCurvedCorridor) // builds its own room walls around randomly placed doors
             {
                 CreateTerminalRoomWalls(root.transform, leftRoomBoundaryX, rightRoomBoundaryX, halfDepth, wallHeight, sharedMaterial, obstacleLayer);
             }
@@ -137,7 +138,7 @@ namespace Assets.Scripts.Editor
                     BuildCentralPillar(root, area, sharedMaterial, obstacleLayer);
                     break;
                 case LayoutTopology.SCurvedCorridor:
-                    BuildSCurvedCorridor(root, area, sharedMaterial, obstacleLayer);
+                    BuildSCurvedCorridor(root, area, sharedMaterial, obstacleLayer, rng);
                     break;
                 case LayoutTopology.TJunction:
                     BuildTJunction(root, area, sharedMaterial, obstacleLayer);
@@ -1074,15 +1075,63 @@ namespace Assets.Scripts.Editor
             CreateWall(root, "CentralSouthRail", new Vector3(0f, area.WallHeight * 0.5f, -area.HalfDepth * 0.55f), new Vector3(corridorLength, area.WallHeight, WallThickness), material, obstacleLayer);
         }
 
-        private static void BuildSCurvedCorridor(Transform root, LayoutArea area, Material material, int obstacleLayer)
+        /// <summary>
+        /// One corridor of width w from a random door in the spawn room wall to a random door in the target room wall:
+        /// a leg along x at the spawn door, a jog along z at distance d3 from the spawn room, a leg along x at the target door.
+        /// Doors are at least w apart (in either direction), both legs are at least w long. Everything between the room walls
+        /// that is not corridor is filled with solid obstacle blocks, so only the rooms and the corridor end up on the NavMesh.
+        /// </summary>
+        private static void BuildSCurvedCorridor(Transform root, LayoutArea area, Material material, int obstacleLayer, System.Random rng)
         {
-            var segmentLength = (area.CorridorRightX - area.CorridorLeftX) * 0.45f;
-            var leftCenter = Mathf.Lerp(area.LeftRoomBoundaryX, 0f, 0.5f);
-            var rightCenter = Mathf.Lerp(0f, area.RightRoomBoundaryX, 0.5f);
+            const float doorMargin = 0.5f; // door edge to the N/S perimeter, matches CreateWallWithDoor's clamp
+            float w = MinCorridorClearance;
+            float xL = area.LeftRoomBoundaryX;
+            float xR = area.RightRoomBoundaryX;
+            float zMin = -area.HalfDepth + WallThickness;
+            float zMax = area.HalfDepth - WallThickness;
 
-            CreateWall(root, "SCurveUpperLeft", new Vector3(leftCenter, area.WallHeight * 0.5f, area.HalfDepth * 0.35f), new Vector3(segmentLength, area.WallHeight, WallThickness), material, obstacleLayer);
-            CreateWall(root, "SCurveLowerRight", new Vector3(rightCenter, area.WallHeight * 0.5f, -area.HalfDepth * 0.35f), new Vector3(segmentLength, area.WallHeight, WallThickness), material, obstacleLayer);
-            CreateWall(root, "SCurveCenterSpine", new Vector3(0f, area.WallHeight * 0.5f, 0f), new Vector3(WallThickness, area.WallHeight, area.HalfDepth * 0.6f), material, obstacleLayer);
+            // Door centres: gap uniform in [w, range], then the pair placed uniformly and mirrored half the time.
+            float centerMin = zMin + doorMargin + w * 0.5f;
+            float centerMax = zMax - doorMargin - w * 0.5f;
+            float centerRange = Mathf.Max(0f, centerMax - centerMin);
+            float gap = centerRange >= w ? Lerp(w, centerRange, (float)rng.NextDouble()) : centerRange;
+            float lowCenter = Lerp(centerMin, centerMax - gap, (float)rng.NextDouble());
+            bool jogPositive = rng.NextDouble() < 0.5;
+            float spawnDoorZ = jogPositive ? lowCenter : lowCenter + gap;
+            float targetDoorZ = jogPositive ? lowCenter + gap : lowCenter;
+
+            // Jog position: both legs at least w long.
+            float length = xR - xL;
+            float d3 = length >= 2f * w ? Lerp(w, length - w, (float)rng.NextDouble()) : length * 0.5f;
+            float jogStartX = xL + d3 - w;
+            float jogEndX = xL + d3;
+
+            CreateWallWithDoor(root, "SpawnRoomDoorWall", xL, zMin, zMax, area.WallHeight, material, obstacleLayer, doorCenterZ: spawnDoorZ, doorWidth: w);
+            CreateWallWithDoor(root, "TargetRoomDoorWall", xR, zMin, zMax, area.WallHeight, material, obstacleLayer, doorCenterZ: targetDoorZ, doorWidth: w);
+
+            float half = w * 0.5f;
+            float jogLow = Mathf.Min(spawnDoorZ, targetDoorZ) - half;
+            float jogHigh = Mathf.Max(spawnDoorZ, targetDoorZ) + half;
+            CreatePocketStrip(root, "SCurve_Leg1", xL, jogStartX, spawnDoorZ - half, spawnDoorZ + half, zMin, zMax, area.WallHeight, material, obstacleLayer);
+            CreatePocketStrip(root, "SCurve_Jog", jogStartX, jogEndX, jogLow, jogHigh, zMin, zMax, area.WallHeight, material, obstacleLayer);
+            CreatePocketStrip(root, "SCurve_Leg2", jogEndX, xR, targetDoorZ - half, targetDoorZ + half, zMin, zMax, area.WallHeight, material, obstacleLayer);
+        }
+
+        /// <summary>Solid blocks filling x in [xMin, xMax] except the open band z in [openMin, openMax].</summary>
+        private static void CreatePocketStrip(Transform root, string name, float xMin, float xMax, float openMin, float openMax,
+            float zMin, float zMax, float wallHeight, Material material, int layer)
+        {
+            const float minSize = 0.01f;
+            float stripWidth = xMax - xMin;
+            if (stripWidth < minSize) return;
+            float centerX = (xMin + xMax) * 0.5f;
+
+            if (openMin - zMin >= minSize)
+                CreateWall(root, $"{name}_PocketSouth", new Vector3(centerX, wallHeight * 0.5f, (zMin + openMin) * 0.5f),
+                    new Vector3(stripWidth, wallHeight, openMin - zMin), material, layer);
+            if (zMax - openMax >= minSize)
+                CreateWall(root, $"{name}_PocketNorth", new Vector3(centerX, wallHeight * 0.5f, (openMax + zMax) * 0.5f),
+                    new Vector3(stripWidth, wallHeight, zMax - openMax), material, layer);
         }
 
         private static void BuildTJunction(Transform root, LayoutArea area, Material material, int obstacleLayer)

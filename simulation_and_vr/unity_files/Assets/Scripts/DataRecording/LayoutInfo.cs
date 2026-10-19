@@ -24,7 +24,7 @@ namespace Assets.Scripts.DataRecording
             {
                 throw new System.InvalidOperationException(
                     $"[LayoutInfo] Expected exactly one LayoutInfo in the scene, found {all.Length}. Generate the scene with " +
-                    "Tools > Generate Layout (it adds one to the environment root), or add one by hand with the typology and seed.");
+                    "Tools > Generative Design > Generate Layout (it adds one to the environment root), or add one by hand with the typology and seed.");
             }
             if (string.IsNullOrWhiteSpace(all[0].typology))
             {

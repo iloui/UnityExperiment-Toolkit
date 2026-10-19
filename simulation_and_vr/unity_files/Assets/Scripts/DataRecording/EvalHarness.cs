@@ -11,174 +11,148 @@ using Agent_Based_Modelling;
 namespace Assets.Scripts.DataRecording
 {
     /// <summary>
-    /// Closed-loop evaluation harness for ImitationAgent and for the NavMesh shortest-path baseline (ShortestPathAgent),
-    /// picked by agentKind; one run evaluates one kind. Runs configurationCount scene
-    /// configurations back-to-back in a single Editor Play session (no manual replay, no
-    /// headless/batchmode). Every layout is evaluated on its own TaskScript (start -> POI(s) -> end, as
-    /// placed in the scene). For each configuration: if
-    /// randomizeMarkersPerConfiguration is true, randomizes the scene's start/POI/end marker positions (NavMesh-valid,
-    /// mutually spaced) - if false, leaves them exactly where they already are in the scene, so
-    /// every configuration reuses the same start/POI/end (useful for isolating a layout's own
-    /// effect from goal-placement variance, e.g. when comparing the same fixed task across
-    /// different scenes/layouts). Either way, agentsPerConfiguration agents are then spawned
-    /// onto that configuration, staggered spawnIntervalSeconds apart (so several can be
-    /// active at once, exactly like EngineScript's existing spawnInterval pattern) - each
-    /// spawned the way EngineScript.SpawnAgent() does. Once every agent on the current
-    /// configuration has either succeeded (poiTracker.IsFinished) or timed out, the harness
-    /// advances to the next configuration and the cycle repeats. One scalar metrics row + one
-    /// top-down trajectory PNG is appended per agent, immediately on that agent's completion,
-    /// so an unattended multi-hour run survives a mid-run Editor stop.
+    /// Closed-loop evaluation of the open layout scene (methodology 3.8 / 3.9). One Play session runs a queue of entries -
+    /// the shortest-path reference and every imitation model - one after another on the scene's own hand-placed
+    /// Start -> POI -> End task. The markers are never moved except for the start jitter below (training used randomized
+    /// tasks, evaluation uses the one fixed test task per layout). randomizeMarkersPerConfiguration still exists for other
+    /// uses, but is off and not part of the thesis evaluation.
     ///
-    /// Both kinds get the same configurations, start jitter, timeout, metrics, episodes.csv columns and trajectory file
-    /// (traj_config<C>_agent<A>.csv in the unified ZarrDataContract.Trajectory schema, sampled by the harness itself on a
-    /// 0.1 s sim-time grid - the same schema eval_tools/trajectories.py derives for human episodes); columns that only
-    /// exist for the imitation model (model identity, collisions, nudges) are left empty for ShortestPath, and its per-tick
-    /// model outputs go to a separate optional modeldebug_config<C>_agent<A>.csv. AgentScript/
-    /// EngineScript are not used - see ShortestPathAgent for why.
-    /// Aggregating these rows into Goal Completion Rate / Collision Frequency / MTTC / SPL is a
-    /// deliberately separate downstream (pandas) step, not this harness's job.
+    /// Per entry, configurationCount episodes are run. Configuration i gets the same seeded start jitter (position within
+    /// startJitterPositionMeters, heading within +-startJitterHeadingDegrees) for every entry, so all models and the
+    /// shortest-path agent walk the same set of starts. The spawn heading is along the NavMesh path to the first target
+    /// (PoiProgressTracker.StartYawAlongPath), as every participant started, plus the heading jitter.
+    ///
+    /// Output: SimulationLogs/EvalQueue_<scene>_<queueName>/EvalRun_<entry>/ with run_config.json, episodes.csv and one
+    /// trajectory file per episode (ZarrDataContract.Trajectory, 0.1 s sim-time grid), plus run_complete.json once the entry
+    /// is done. Pressing Play again with the same queueName skips completed entries and renames an unfinished one to
+    /// *_incomplete_<time>, so an interrupted queue resumes. queue_status.json in the queue folder shows progress and an
+    /// estimate of the time left, and every finished episode prints one console line.
+    ///
+    /// Condition, fold, seed and held-out participants of a model come from its training sidecar (.json next to the .onnx),
+    /// never from typing. All metrics are computed downstream from the trajectory files (eval_tools); the per-episode
+    /// columns here (path length, stalls, collisions, ...) are diagnostics.
+    ///
+    /// Runs unattended in the background: the harness turns on Application.runInBackground and turns off vSync. Episode
+    /// time is simulated time (sum of Time.deltaTime, frame step capped at the 0.1 s tick), so a throttled or slow editor
+    /// only takes longer; it does not change results.
     /// </summary>
     public class EvalHarness : MonoBehaviour
     {
         public enum AgentKind { Imitation, ShortestPath }
 
-        [Header("Task & Agent")]
-        [Tooltip("The TaskScript whose start/end/pointsOfInterest marker GameObjects get repositioned each configuration. Must be the same TaskScript ImitationAgent/ParticipantRecorder use for this scene.")]
-        public TaskScript task;
-        [Tooltip("Imitation = ImitationAgent running modelAsset. ShortestPath = ShortestPathAgent (NavMeshAgent following the NavMesh " +
-                 "shortest path through the same start -> POI -> end task). Written to every row (agent_kind) and to run_config.json.")]
-        public AgentKind agentKind = AgentKind.Imitation;
-        [Tooltip("The .onnx model every spawned agent runs. Only used with agentKind = Imitation.")]
-        public ModelAsset modelAsset;
-        [Tooltip("Training condition of modelAsset: A = synthetic only, B = synthetic + some training participants, C = synthetic + " +
-                 "all training participants. Required for Imitation, ignored for ShortestPath. Written to run_config.json and every " +
-                 "episodes.csv row, and read by eval_tools/trajectories.py.")]
-        public string condition = "";
+        [Serializable]
+        public class QueueEntry
+        {
+            public AgentKind agentKind = AgentKind.Imitation;
+            [Tooltip("Imitation only: the .onnx model.")]
+            public ModelAsset modelAsset;
+            [Tooltip("Imitation only: the training sidecar (<model>.json, written next to the .onnx by the training script). " +
+                     "Condition, fold, seed and held-out participants are read from it.")]
+            public TextAsset sidecar;
 
-        [Header("Shortest-Path Baseline (agentKind = ShortestPath)")]
+            public string Label => agentKind == AgentKind.ShortestPath ? "ShortestPath" : (modelAsset != null ? modelAsset.name : "<missing model>");
+        }
+
+        /// <summary>The fields of the training sidecar the harness uses (train_2DCNN_discrete.py writes many more).</summary>
+        [Serializable]
+        private class SidecarInfo
+        {
+            public string condition;
+            public int seed;
+            public int fold;
+            public string[] heldout_participants;
+            public string splits_design;
+        }
+
+        [Header("Task")]
+        [Tooltip("The scene's TaskScript (Environment_Root/Task) with the hand-placed Start/POI_0/End markers.")]
+        public TaskScript task;
+
+        [Header("Queue")]
+        [Tooltip("Run in this order. Tools > Imitation Learning Agent > 5 · Evaluate Design > Set Up Evaluation Harness fills it: ShortestPath, then every " +
+                 "ImitationAgent_<A|B|C>_proprio2* model in Assets/ImitationModel with its sidecar.")]
+        public List<QueueEntry> queue = new List<QueueEntry>();
+        [Tooltip("Names the queue folder (EvalQueue_<scene>_<queueName>). Keep it the same to resume an interrupted queue; " +
+                 "change it to start a fresh one.")]
+        public string queueName = "final";
+        [Tooltip("Seeds the per-configuration start jitter and the stochastic walk. Fixed, so every entry and every rerun gets " +
+                 "the same starts.")]
+        public int baseSeed = 20261005;
+        [Tooltip("Leave Play mode when the queue is done (Editor only).")]
+        public bool exitPlayModeWhenDone = true;
+
+        [Header("Shortest-Path Reference (agentKind = ShortestPath)")]
         [Tooltip("m/s. Default = the recording body's walk speed (humans, bot and ImitationAgent all walk at 1.3 m/s).")]
         public float shortestPathSpeedMps = ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond;
         [Tooltip("Meters. Default = the recording body's radius. Wall clearance comes from the NavMesh bake radius (logged as navmesh_bake_agent_radius), not from this.")]
         public float shortestPathRadiusM = ZarrDataContract.RecordingBody.Radius;
-        [Tooltip("m/s^2. High, so the baseline is at full speed almost immediately and its time is the path length / speed.")]
+        [Tooltip("m/s^2. High, so the reference is at full speed almost immediately.")]
         public float shortestPathAccelerationMps2 = 50f;
         [Tooltip("deg/s. 120 = the largest discrete yaw bin (12 deg per 0.1 s sample).")]
         public float shortestPathAngularSpeedDegPerS = 120f;
 
-        [Header("Run Configuration")]
-        [Tooltip("How many distinct randomized start/POI/end layouts to test.")]
-        [Min(1)] public int configurationCount = 50;
-        [Tooltip("How many agents to run on each configuration before advancing to the next one.")]
-        [Min(1)] public int agentsPerConfiguration = 1;
-        [Tooltip("If true, a fresh random start/POI/end placement is generated every configuration. " +
-                 "If false (default), start/POI/end are left exactly where they are in the scene - unchanged - for every configuration, " +
-                 "so all configurationCount runs reuse the same task.")]
-        public bool randomizeMarkersPerConfiguration = false;
-        [Tooltip("Sets UnityEngine.Time.timeScale for this run to shrink wall-clock time. The harness also caps Time.maximumDeltaTime " +
-                 "at ZarrDataContract.SamplingIntervalSeconds (0.1s) so ImitationAgent's observation gate never skips ticks. The " +
-                 "catch: once (real frame time x simulationSpeed) exceeds 0.1s the sim stops getting faster, so values above " +
-                 "~5-6x at 60fps buy nothing. Canonical value for all eval runs: 3.")]
+        [Header("Episodes (identical for every entry)")]
+        [Tooltip("Episodes per entry (methodology 3.8.1: 20).")]
+        [Min(1)] public int configurationCount = 20;
+        [Tooltip("Time.timeScale during the run. The frame step is capped at the 0.1 s tick, so values above what the frame rate " +
+                 "allows only stop speeding the run up. Keep it the same for all thesis runs: 3.")]
         [Min(0.01f)] public float simulationSpeed = 3f;
-        [Tooltip("If true (default), ImitationAgent's deadlock nudge is disabled for every eval agent. That nudge fires roughly " +
-                 "every 10 real seconds regardless of whether the agent is actually stuck, and moves it to the nearest NavMesh " +
-                 "point without a wall check - so it inflates completion rate and distorts path length/SPL. With it off, a genuinely " +
-                 "stuck agent times out. The value is written to every CSV row (nudge_enabled); a row is only counted in " +
-                 "success_no_rescue if nudge_count == 0 (with the nudge on this is only true for episodes shorter than ~10 real seconds, " +
-                 "because it fires on a clock, not on real stuck-ness; use stall_seconds / longest_stall_s to judge stuck-ness).")]
-        public bool disableDeadlockNudge = true;
-        [Tooltip("Seconds between spawning each successive agent within a configuration (0 = spawn all at once). Mirrors EngineScript's existing spawnInterval.")]
-        public float spawnIntervalSeconds = 2f;
-        [Tooltip("SIMULATED seconds (sum of Time.deltaTime, so independent of simulationSpeed and editor stalls). An agent that " +
-                 "hasn't finished by this point is logged as outcome=timeout. Canonical value: 90 (~3x the median human duration of " +
-                 "~31.4s). The time of every success is logged (success_time_s), so a stricter cutoff such as 45s can be applied " +
-                 "afterwards in summarize_eval.py (--ref 45) without re-running.")]
+        [Tooltip("SIMULATED seconds. An episode that has not reached the End by then is a timeout. Canonical: 90 (about 2.5x the " +
+                 "human median of 36 s on the test tasks).")]
         public float episodeTimeoutSeconds = 90f;
-        [Tooltip("Sim seconds. Only written to run_config.json as a reference: the human-comparable cutoff the summary script uses by default.")]
-        public float humanReferenceSeconds = 45f;
+        [Tooltip("Meters. Seeded start-position jitter radius (NavMesh-valid, with a complete path to the End). Canonical: 0.5.")]
+        public float startJitterPositionMeters = 0.5f;
+        [Tooltip("Degrees. Seeded heading jitter (+-) added to the spawn heading along the NavMesh path. Canonical: 15.")]
+        public float startJitterHeadingDegrees = 15f;
+        [Tooltip("If true (default), ImitationAgent's deadlock nudge is off, so a stuck agent times out instead of being teleported.")]
+        public bool disableDeadlockNudge = true;
+        [Tooltip("Imitation only: ImitationAgent.stochasticWalk (walk key drawn with probability P(walk), seeded per configuration).")]
+        public bool imitationStochasticWalk = true;
+        [Tooltip("Imitation only: ImitationAgent.minWalkHoldSeconds, the shortest walk-key press (sim s).")]
+        [Min(0f)] public float imitationMinWalkHoldSeconds = 1.5f;
 
-        [Header("Episode Validity")]
-        [Tooltip("m/s. If an episode's mean speed OR its fastest 1-simulated-second window exceeds this, the episode is flagged " +
-                 "speed_violation=1 and its outcome is rewritten to invalid_speed (original kept in raw_outcome). ImitationAgent " +
-                 "clamps the model to 2.0 m/s and the fastest recorded human walk is ~1.56 m/s, so anything above ~2.5 " +
-                 "means the agent was teleported or timing is broken.")]
+        [Header("Random Markers (NOT used for the thesis evaluation)")]
+        [Tooltip("Off (default and thesis setting): every episode uses the scene's hand-placed Start/POI/End, with only the start " +
+                 "jitter above. On: every configuration moves start, POI(s) and end to seeded random NavMesh positions instead " +
+                 "(start jitter is then ignored) - a generalisation test, not the methodology's evaluation.")]
+        public bool randomizeMarkersPerConfiguration = false;
+        [Tooltip("Random markers only: minimum spacing (m) between all randomized marker positions.")]
+        public float minPositionSpacingMeters = 3f;
+        [Tooltip("Random markers only: radius (m) around a random candidate to search for the NavMesh.")]
+        public float navMeshSampleRadius = 2f;
+        [Tooltip("Random markers only: candidates tried per marker before the configuration is skipped.")]
+        public int maxPlacementAttempts = 30;
+
+        [Header("Episode Validity / Diagnostics")]
+        [Tooltip("m/s. Mean speed or fastest 1-sim-second window above this marks the episode invalid_speed (teleport or broken timing).")]
         public float maxPlausibleSpeedMps = 2.5f;
         [Tooltip("Simulated seconds per window used for stall detection and the fastest-window speed check.")]
         public float metricWindowSeconds = 1f;
-        [Tooltip("Meters. If the agent moved less than this over one metric window, that window counts towards stall_seconds " +
-                 "(a harness-side stall measure that works with the nudge off, unlike stuck_count).")]
+        [Tooltip("Meters. Moving less than this over one metric window counts towards stall_seconds.")]
         public float stallDisplacementMeters = 0.1f;
-        [Tooltip("REAL seconds to wait for a freshly spawned agent to run its first Update before giving up (agent_never_started).")]
-        public float agentStartTimeoutRealSeconds = 30f;
-        [Tooltip("Sim seconds. A stall (moved less than stallDisplacementMeters per window) must last at least this long to count as one stall event.")]
+        [Tooltip("Sim seconds. A stall must last at least this long to count as one stall event.")]
         public float stallEventMinSeconds = 2f;
-        [Tooltip("Sim seconds. Raw CollisionCount goes up every time the agent re-touches a wall (rotation jitter while pinned re-triggers it hundreds of times). " +
-                 "collision_events only counts a new event after this many sim seconds without a raw increment.")]
+        [Tooltip("Sim seconds. collision_events counts a new event only after this long without a raw collision increment.")]
         public float collisionDebounceSeconds = 1f;
-
-        [Header("Start Jitter (off by default - keeps the task identical)")]
-        [Tooltip("Meters. If > 0, each configuration shifts the start position by a seeded random offset within this radius (NavMesh-valid, " +
-                 "and a complete path to the end must exist). Makes agentsPerConfiguration x configurationCount runs independent samples " +
-                 "instead of near-copies of one deterministic episode. Logged per row (start_offset_m). Ignored with randomized markers.")]
-        public float startJitterPositionMeters = 0f;
-        [Tooltip("Degrees. If > 0, each configuration rotates the agent by a seeded random angle within +-this value right after spawn " +
-                 "(ImitationAgent normally spawns facing the goal). Logged per row (start_heading_jitter_deg).")]
-        public float startJitterHeadingDegrees = 0f;
-
-        [Header("Random Placement (only used when randomizeMarkersPerConfiguration is on)")]
-        [Tooltip("Minimum spacing (meters) enforced between every pair of randomized start/POI/end positions each configuration, so goals don't spawn on top of each other.")]
-        public float minPositionSpacingMeters = 3f;
-        [Tooltip("Radius (meters) around a random candidate point to search for a valid NavMesh surface.")]
-        public float navMeshSampleRadius = 2f;
-        [Tooltip("How many random candidates to try per marker before giving up on that configuration's placement.")]
-        public int maxPlacementAttempts = 30;
+        [Tooltip("REAL seconds to wait for a spawned agent's first Update (model loading) before logging agent_never_started. " +
+                 "Generous, because a backgrounded editor can run at a few frames per second.")]
+        public float agentStartTimeoutRealSeconds = 120f;
 
         [Header("Output")]
-        [Tooltip("Leave empty to default to <project root>/SimulationLogs, matching EngineScript's existing convention.")]
+        [Tooltip("Leave empty for <project root>/SimulationLogs.")]
         public string outputRootFolder = "";
-        [Tooltip("Save a heatmap PNG every Nth episode (1 = every episode). AnalyticsManager.ExportHeatMap does a " +
-                 "synchronous ~2048x2048 render+readback on the main thread every time it's called, so this is a real " +
-                 "per-call cost - raise this if episodes are still stalling after maxHeatmapTrajectoryPoints. 0 or less disables PNGs entirely.")]
-        public int heatmapEveryNthEpisode = 1;
-        [Tooltip("Trajectory points are uniformly subsampled to at most this many before being handed to the heatmap " +
-                 "exporter. ExportHeatMap's dwell-time coloring is O(n^2) in trajectory length - an uncapped ~95s " +
-                 "episode at 60fps accumulates thousands of points (trajectory.Add() runs every Update(), not just " +
-                 "every sampling tick), which is the main cause of the per-episode stall/lag.")]
-        public int maxHeatmapTrajectoryPoints = 300;
-        [Tooltip("Imitation only: also write modeldebug_config<C>_agent<A>.csv, one row per trajectory row (same t) with the goal " +
-                 "vector/distance the model sees, the wall-blocked flag and the latest raw and commanded model outputs. The " +
-                 "trajectory file (traj_*.csv) is always written. Use analyze_stall.py to inspect where and why an agent stalls.")]
+        [Tooltip("Imitation only: also write modeldebug_config<C>_agent0.csv (model inputs/outputs per tick) for stall analysis.")]
         public bool logModelDebugTicks = true;
-        [Tooltip("Imitation only: ImitationAgent.stochasticWalk. On = the walk key is drawn with probability P(walk) each tick " +
-                 "(UnityEngine.Random, seeded per configuration); off = pressed while P(walk) >= 0.5. Logged as imitation_stochastic_walk.")]
-        public bool imitationStochasticWalk = true;
-        [Tooltip("Imitation only: ImitationAgent.minWalkHoldSeconds, the shortest walk-key press (sim s; 0 = decide every tick). " +
-                 "Logged as imitation_min_walk_hold_s.")]
-        [Min(0f)] public float imitationMinWalkHoldSeconds = 1.5f;
+        [Tooltip("Save AnalyticsManager's heatmap PNG every Nth episode; 0 = never (default). It is a slow main-thread render; " +
+                 "the thesis figures come from eval_tools instead.")]
+        public int heatmapEveryNthEpisode = 0;
+        [Tooltip("Trajectory points are subsampled to at most this many before the heatmap export (its cost is O(n^2)).")]
+        public int maxHeatmapTrajectoryPoints = 300;
+        [Tooltip("Color of the spawned agent's capsule (visible in the Scene/Game view only; the agent's own camera sits inside it).")]
+        public Color agentColor = new Color(1f, 0.549f, 0f);
 
-        [Header("Visualization")]
-        [Tooltip("Color applied to every spawned agent's capsule.")]
-        public Color agentColor = new Color(1f, 0.549f, 0f); // orange
-        [Tooltip("Recolor the task markers with the colors below. Off by default: the markers are part of what the policy sees, " +
-                 "and in every recording (human and synthetic) they keep the scene's own look (white default material).")]
-        public bool colorizeTaskMarkers = false;
-        [Tooltip("Color applied to the start marker(s), if they have a Renderer to recolor.")]
-        public Color startMarkerColor = Color.green;
-        [Tooltip("Color applied to the POI marker(s), if they have a Renderer to recolor.")]
-        public Color poiMarkerColor = Color.cyan;
-        [Tooltip("Color applied to the end marker(s), if they have a Renderer to recolor.")]
-        public Color endMarkerColor = Color.red;
-
-        private string runFolderPath;
-        private StreamWriter csvWriter;
-        private Vector3[] navMeshVertices;
-
-        private int episodeIndex = 0; // global row/PNG counter, unique across the whole run
-        private bool harnessFinished = false;
-        private float previousMaximumDeltaTime = 0f;
-        private int consecutivePlacementFailures = 0;
-        private const int MaxConsecutivePlacementFailures = 10;
-
-        private const string HarnessVersion = "6";
+        private const string HarnessVersion = "7";
+        private const string SpawnHeadingRule = "navmesh_path_first_corner_plus_jitter";
         private static readonly string TrajectoryCsvHeader = string.Join(ZarrDataContract.Trajectory.CsvDelimiter, ZarrDataContract.Trajectory.Columns);
         private static readonly string ModelDebugCsvHeader = string.Join(ZarrDataContract.Trajectory.CsvDelimiter, new[]
         {
@@ -186,27 +160,55 @@ namespace Assets.Scripts.DataRecording
             "raw_fwd", "raw_yaw_deg_per_sample", "raw_pitch", "applied_fwd_mps", "applied_yaw_deg_per_s",
             "proprio_speed", "proprio_prev_speed", "proprio_yaw", "proprio_turn", "proprio_available"
         });
+
+        // Queue state
+        private string queueFolderPath;
+        private string sceneName;
+        private int entryIndex = -1;
+        private QueueEntry entry;
+        private SidecarInfo entrySidecar;
+        private int[] configSeeds;
+        private bool harnessFinished = false;
+        private string queueStartedAt;
+        private float queueStartRealtime;
+        private int episodesThisSession = 0;
+        private float realSecondsThisSession = 0f;
+        private readonly List<string> entryResults = new List<string>();
+
+        // Current entry (run) state
+        private string runFolderPath;
+        private StreamWriter csvWriter;
+        private int episodeIndex = 0;
+        private int entrySuccesses = 0;
+        private int entryTimeouts = 0;
+        private int entryOther = 0;
+        private float entryStartRealtime;
         private string modelSha256 = "";
-        private string diskModelPath;
-        private string diskModelMtimeAtStart = "";
-        private bool warnedDiskModelChanged = false;
+        private string modelFileMtime = "";
 
+        // Saved engine settings
+        private float previousMaximumDeltaTime = 0f;
+        private bool previousRunInBackground;
+        private int previousVSyncCount;
+        private int previousTargetFrameRate;
+        private bool engineSettingsChanged = false;
+
+        // Random markers (off for the thesis evaluation)
+        private Vector3[] navMeshVertices;
+        private int consecutivePlacementFailures = 0;
+        private const int MaxConsecutivePlacementFailures = 10;
+
+        // Current configuration
         private Vector3[] baseStartPositions;
-        private float currentConfigStartOffsetM = 0f;
-        private float currentConfigHeadingJitterDeg = 0f;
-
-        // Current configuration (fixed layout) state
         private int currentConfigId = -1;
         private int currentConfigSeed = 0;
         private int currentConfigAgentsSpawned = 0;
         private int currentConfigAgentsCompleted = 0;
-        private float nextSpawnTime = 0f;
+        private float currentConfigStartOffsetM = 0f;
+        private float currentConfigHeadingJitterDeg = 0f;
         private List<Vector3> currentConfigPoiPositions;
         private Vector3 currentConfigEndPos;
 
-        // One entry per currently-running agent. Positions are snapshotted per-episode rather
-        // than read from shared/mutable harness fields, since several agents can now be
-        // in-flight at once (staggered spawnIntervalSeconds) and finish in any order.
         private class ActiveEpisode
         {
             public GameObject agentGO;
@@ -222,10 +224,7 @@ namespace Assets.Scripts.DataRecording
             public StreamWriter modelDebugWriter;
             public string trajFileName;
 
-            // Harness-side episode clock/metrics. Everything is derived from the agent's own trajectory
-            // (one point per agent Update) and Time.deltaTime, so it is independent of realtime stalls
-            // (heatmap export, editor hitches) and of simulationSpeed. The clock only starts once the agent
-            // has run its first Update (i.e. after ImitationAgent.Start() finished its slow setup).
+            // Harness-side clock and diagnostics, all from the agent's own trajectory and Time.deltaTime (simulated time).
             public bool started;
             public int startFrame;
             public float simElapsed;
@@ -252,8 +251,8 @@ namespace Assets.Scripts.DataRecording
             public Vector3 longestStallPos;
             public float startOffsetM;
             public float headingJitterDeg;
+            public float spawnYawDeg;
 
-            // Trajectory sampling (sim time).
             public float nextTickSim;
             public float prevTickSim;
             public Vector3 prevTickEyePos;
@@ -261,7 +260,9 @@ namespace Assets.Scripts.DataRecording
         }
         private readonly List<ActiveEpisode> activeEpisodes = new List<ActiveEpisode>();
 
-        void Awake()
+        // OnEnable, not Awake: Awake also runs on a disabled harness, which would switch off the recorder of a human
+        // session in the same scene. OnEnable still runs before every Start in the scene.
+        void OnEnable()
         {
             // A layout scene's human FPSController has AutoStartForTesting on - without this it would record (and
             // train on) a motionless episode during every eval run.
@@ -270,165 +271,163 @@ namespace Assets.Scripts.DataRecording
 
         void Start()
         {
-            if (task == null)
-            {
-                Debug.LogError("[EvalHarness] 'task' is not assigned. Refusing to start.");
-                enabled = false;
-                return;
-            }
-            if (agentKind == AgentKind.Imitation && modelAsset == null)
-            {
-                Debug.LogError("[EvalHarness] agentKind is Imitation but 'modelAsset' is not assigned. Refusing to start.");
-                enabled = false;
-                return;
-            }
-            if (agentKind == AgentKind.Imitation && string.IsNullOrWhiteSpace(condition))
-            {
-                Debug.LogError("[EvalHarness] agentKind is Imitation but 'condition' (A/B/C: what modelAsset was trained on) is empty. Refusing to start.");
-                enabled = false;
-                return;
-            }
-
-            var triangulation = NavMesh.CalculateTriangulation();
-            navMeshVertices = triangulation.vertices;
-            if (navMeshVertices == null || navMeshVertices.Length == 0)
-            {
-                Debug.LogError("[EvalHarness] NavMesh triangulation has no vertices - is the scene's NavMesh baked? Refusing to start.");
-                enabled = false;
-                return;
-            }
-
-            if (!ValidateSceneTask())
+            sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            if (!ValidateScene() || !ValidateQueue())
             {
                 enabled = false;
                 return;
             }
-            if (agentKind == AgentKind.Imitation && !disableDeadlockNudge)
-            {
-                Debug.LogWarning("[EvalHarness] disableDeadlockNudge is OFF - the deadlock nudge will move stuck agents. " +
-                    "Rows with stuck_count > 0 are excluded from success_no_rescue, but the run is not a clean baseline.");
-            }
 
-            CaptureBaseStartPositions();
-            if (agentKind == AgentKind.Imitation) ComputeModelIdentity();
+            baseStartPositions = new Vector3[task.start.Length];
+            for (int i = 0; i < baseStartPositions.Length; i++) baseStartPositions[i] = task.start[i].transform.position;
 
-            previousMaximumDeltaTime = Time.maximumDeltaTime;
-            // Caps one frame's scaled deltaTime at the sampling interval so ImitationAgent's single-`if` capture gate
-            // can never skip ticks; at high simulationSpeed the sim just stops getting faster instead of corrupting
-            // the observation cadence.
-            Time.maximumDeltaTime = ZarrDataContract.SamplingIntervalSeconds;
-            Time.timeScale = simulationSpeed;
+            // One seed per configuration, from baseSeed only: configuration i is the same for every entry and every rerun.
+            var seedRng = new System.Random(baseSeed);
+            configSeeds = new int[configurationCount];
+            for (int i = 0; i < configSeeds.Length; i++) configSeeds[i] = seedRng.Next();
 
-            if (colorizeTaskMarkers) ColorizeTaskMarkers();
-            SetupRunFolder();
-            WriteRunConfig();
-            AdvanceToNextConfiguration();
+            ApplyEngineSettings();
+            SetupQueueFolder();
+            queueStartedAt = DateTime.Now.ToString("o", CultureInfo.InvariantCulture);
+            queueStartRealtime = Time.realtimeSinceStartup;
+            StartNextEntry();
         }
 
         // ------------------------------------------------------------------
-        // Scene task validation, model identity, run config
+        // Validation
         // ------------------------------------------------------------------
 
-        /// <summary>
-        /// Checks the scene's own TaskScript before the run starts: start/end markers exist, there are enough POI
-        /// markers for numberOfNeeds, and (with fixed markers) every POI and end marker is reachable over the NavMesh
-        /// from every start marker. Returns false (harness refuses to run) otherwise. Nothing is moved.
-        /// </summary>
-        private bool ValidateSceneTask()
+        /// <summary>Scene task: one start, the POI(s), one end, all on the NavMesh and connected. Nothing is moved.</summary>
+        private bool ValidateScene()
         {
+            if (task == null)
+            {
+                Debug.LogError("[EvalHarness] 'task' is not assigned. Run Tools > Imitation Learning Agent > 5 · Evaluate Design > Set Up Evaluation Harness. Refusing to start.");
+                return false;
+            }
+            navMeshVertices = NavMesh.CalculateTriangulation().vertices;
+            if (navMeshVertices == null || navMeshVertices.Length == 0)
+            {
+                Debug.LogError("[EvalHarness] The scene has no baked NavMesh. Refusing to start.");
+                return false;
+            }
             if (!HasMarkers(task.start) || !HasMarkers(task.end))
             {
                 Debug.LogError("[EvalHarness] task.start / task.end are empty or contain null markers. Refusing to start.");
                 return false;
             }
-            if (task.numberOfNeeds > 0)
+            if (randomizeMarkersPerConfiguration)
             {
-                if (!HasMarkers(task.pointsOfInterest))
+                Debug.LogWarning("[EvalHarness] randomizeMarkersPerConfiguration is ON: markers are re-placed randomly every configuration. " +
+                    "This is NOT the thesis evaluation (fixed hand-placed test task).");
+                if (task.numberOfNeeds > 0 && !HasMarkers(task.pointsOfInterest))
                 {
-                    Debug.LogError($"[EvalHarness] task.numberOfNeeds={task.numberOfNeeds} but task.pointsOfInterest is empty or contains null markers. Refusing to start.");
+                    Debug.LogError("[EvalHarness] task.numberOfNeeds > 0 but the task has no POI markers. Refusing to start.");
                     return false;
                 }
-                if (!task.revisit && task.numberOfNeeds > task.pointsOfInterest.Length)
-                {
-                    Debug.LogError($"[EvalHarness] task.numberOfNeeds={task.numberOfNeeds} exceeds the {task.pointsOfInterest.Length} POI marker(s) and revisit is off. Refusing to start.");
-                    return false;
-                }
+                return true;
             }
-            else
+            if (task.start.Length != 1 || task.end.Length != 1)
             {
-                Debug.LogWarning("[EvalHarness] task.numberOfNeeds is 0 - this scene's task has no POI (start -> end only).");
+                Debug.LogError($"[EvalHarness] The evaluation task needs exactly one start and one end marker (found {task.start.Length} and {task.end.Length}). Refusing to start.");
+                return false;
             }
+            if (task.numberOfNeeds > 0 && (!HasMarkers(task.pointsOfInterest) || task.numberOfNeeds > task.pointsOfInterest.Length))
+            {
+                Debug.LogError($"[EvalHarness] task.numberOfNeeds={task.numberOfNeeds} but the task has too few POI markers. Refusing to start.");
+                return false;
+            }
+            if (task.numberOfNeeds == 0) Debug.LogWarning("[EvalHarness] task.numberOfNeeds is 0 - this task has no POI (start -> end only).");
 
-            // Randomized markers are re-placed (NavMesh-valid) every configuration, so only fixed markers are checked here.
-            if (randomizeMarkersPerConfiguration) return true;
-
+            GameObject startMarker = task.start[0];
+            if (!NavMesh.SamplePosition(startMarker.transform.position, out NavMeshHit startHit, 2f, NavMesh.AllAreas))
+            {
+                Debug.LogError($"[EvalHarness] Start marker at {startMarker.transform.position} is not within 2 m of the NavMesh. Refusing to start.");
+                return false;
+            }
             var targets = new List<GameObject>();
             if (task.numberOfNeeds > 0) targets.AddRange(task.pointsOfInterest);
             targets.AddRange(task.end);
-            foreach (var startMarker in task.start)
+            foreach (var target in targets)
             {
-                if (!NavMesh.SamplePosition(startMarker.transform.position, out NavMeshHit startHit, navMeshSampleRadius, NavMesh.AllAreas))
+                if (!HasCompletePath(startHit.position, target.transform.position))
                 {
-                    Debug.LogError($"[EvalHarness] Start marker '{startMarker.name}' at {startMarker.transform.position} is not within {navMeshSampleRadius}m of the NavMesh. Refusing to start.");
+                    Debug.LogError($"[EvalHarness] No complete NavMesh path from the start to '{target.name}' at {target.transform.position}. Refusing to start.");
                     return false;
                 }
-                foreach (var target in targets)
-                {
-                    if (!HasCompletePath(startHit.position, target.transform.position))
-                    {
-                        Debug.LogError($"[EvalHarness] No complete NavMesh path from start marker '{startMarker.name}' to '{target.name}' at {target.transform.position}. Refusing to start.");
-                        return false;
-                    }
-                }
             }
-
-            Debug.Log($"[EvalHarness] Scene task: {task.start.Length} start(s), {task.numberOfNeeds} need(s) over " +
-                $"{(task.pointsOfInterest != null ? task.pointsOfInterest.Length : 0)} POI marker(s), {task.end.Length} end(s).");
             return true;
         }
 
-        private void CaptureBaseStartPositions()
-        {
-            baseStartPositions = null;
-            if (!HasMarkers(task.start)) return;
-            baseStartPositions = new Vector3[task.start.Length];
-            for (int i = 0; i < baseStartPositions.Length; i++) baseStartPositions[i] = task.start[i].transform.position;
-        }
-
         /// <summary>
-        /// Seeded (via the per-configuration Random state) start jitter. Position is applied by moving the start
-        /// markers; heading is applied to the agent on its first Update (see TickEpisodeClock).
+        /// Every entry is usable before anything runs: imitation entries have a model and the matching sidecar, the sidecar's
+        /// condition is A/B/C, B and C name their fold and held-out participants, and labels are unique (one folder each).
         /// </summary>
-        private void ApplyStartJitter()
+        private bool ValidateQueue()
         {
-            currentConfigStartOffsetM = 0f;
-            currentConfigHeadingJitterDeg = 0f;
-            if (baseStartPositions == null) return;
-
-            Vector2 offset = startJitterPositionMeters > 0f ? UnityEngine.Random.insideUnitCircle * startJitterPositionMeters : Vector2.zero;
-            float heading = startJitterHeadingDegrees > 0f ? UnityEngine.Random.Range(-startJitterHeadingDegrees, startJitterHeadingDegrees) : 0f;
-
-            for (int i = 0; i < baseStartPositions.Length; i++)
+            if (queue == null || queue.Count == 0)
             {
-                Vector3 target = baseStartPositions[i];
-                if (offset != Vector2.zero)
-                {
-                    Vector3 candidate = target + new Vector3(offset.x, 0f, offset.y);
-                    if (NavMesh.SamplePosition(candidate, out NavMeshHit hit, 1f, NavMesh.AllAreas) && HasCompletePath(hit.position, currentConfigEndPos))
-                    {
-                        target = hit.position;
-                    }
-                }
-                task.start[i].transform.position = target;
+                Debug.LogError("[EvalHarness] The queue is empty. Run Tools > Imitation Learning Agent > 5 · Evaluate Design > Set Up Evaluation Harness. Refusing to start.");
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(queueName) || queueName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            {
+                Debug.LogError($"[EvalHarness] queueName '{queueName}' is empty or not a valid folder name. Refusing to start.");
+                return false;
             }
 
-            currentConfigStartOffsetM = Vector3.Distance(task.start[0].transform.position, baseStartPositions[0]);
-            currentConfigHeadingJitterDeg = heading;
+            var labels = new HashSet<string>();
+            var problems = new List<string>();
+            for (int i = 0; i < queue.Count; i++)
+            {
+                QueueEntry e = queue[i];
+                if (e == null) { problems.Add($"entry {i} is empty"); continue; }
+                if (!labels.Add(e.Label)) problems.Add($"entry {i} '{e.Label}' appears twice");
+                if (e.agentKind != AgentKind.Imitation) continue;
+
+                if (e.modelAsset == null) { problems.Add($"entry {i} has no model"); continue; }
+                if (e.sidecar == null) { problems.Add($"'{e.Label}' has no sidecar (.json)"); continue; }
+                if (e.sidecar.name != e.modelAsset.name) problems.Add($"'{e.Label}' is paired with sidecar '{e.sidecar.name}'");
+                if (!TryReadSidecar(e, out SidecarInfo info, out string error)) { problems.Add($"'{e.Label}': {error}"); continue; }
+                if (info.condition != "A" && info.condition != "B" && info.condition != "C")
+                    problems.Add($"'{e.Label}': sidecar condition '{info.condition}' is not A, B or C");
+                if ((info.condition == "B" || info.condition == "C") &&
+                    (info.fold < 1 || info.heldout_participants == null || info.heldout_participants.Length == 0))
+                    problems.Add($"'{e.Label}': condition {info.condition} sidecar has no fold / held-out participants");
+            }
+            if (problems.Count > 0)
+            {
+                Debug.LogError("[EvalHarness] Queue problems - refusing to start:\n  " + string.Join("\n  ", problems));
+                return false;
+            }
+            return true;
+        }
+
+        private static bool TryReadSidecar(QueueEntry e, out SidecarInfo info, out string error)
+        {
+            info = null;
+            error = null;
+            try
+            {
+                info = JsonUtility.FromJson<SidecarInfo>(e.sidecar.text);
+            }
+            catch (Exception ex)
+            {
+                error = $"sidecar is not valid JSON ({ex.Message})";
+                return false;
+            }
+            if (info == null || string.IsNullOrEmpty(info.condition))
+            {
+                error = "sidecar has no 'condition'";
+                return false;
+            }
+            info.condition = info.condition.Trim();
+            return true;
         }
 
         private bool HasCompletePath(Vector3 from, Vector3 to)
         {
-            if (!NavMesh.SamplePosition(to, out NavMeshHit toHit, navMeshSampleRadius, NavMesh.AllAreas)) return false;
+            if (!NavMesh.SamplePosition(to, out NavMeshHit toHit, 2f, NavMesh.AllAreas)) return false;
             var path = new NavMeshPath();
             return NavMesh.CalculatePath(from, toHit.position, NavMesh.AllAreas, path) && path.status == NavMeshPathStatus.PathComplete;
         }
@@ -440,42 +439,171 @@ namespace Assets.Scripts.DataRecording
             return true;
         }
 
-        /// <summary>SHA-256 (first 12 hex chars) of the actual .onnx file, so a CSV row identifies the exact weights, not just the file name.</summary>
+        // ------------------------------------------------------------------
+        // Engine settings (background running)
+        // ------------------------------------------------------------------
+
+        private void ApplyEngineSettings()
+        {
+            previousMaximumDeltaTime = Time.maximumDeltaTime;
+            previousRunInBackground = Application.runInBackground;
+            previousVSyncCount = QualitySettings.vSyncCount;
+            previousTargetFrameRate = Application.targetFrameRate;
+            engineSettingsChanged = true;
+
+            // Keep running when another app has focus, and don't wait for the display between frames.
+            Application.runInBackground = true;
+            QualitySettings.vSyncCount = 0;
+            Application.targetFrameRate = -1;
+            // Caps one frame's scaled deltaTime at the sampling interval so ImitationAgent's capture gate never skips a tick;
+            // if frames get slow (background throttling) the simulation slows down instead of changing.
+            Time.maximumDeltaTime = ZarrDataContract.SamplingIntervalSeconds;
+            Time.timeScale = simulationSpeed;
+        }
+
+        private void RestoreEngineSettings()
+        {
+            if (!engineSettingsChanged) return;
+            engineSettingsChanged = false;
+            Time.timeScale = 1f;
+            if (previousMaximumDeltaTime > 0f) Time.maximumDeltaTime = previousMaximumDeltaTime;
+            Application.runInBackground = previousRunInBackground;
+            QualitySettings.vSyncCount = previousVSyncCount;
+            Application.targetFrameRate = previousTargetFrameRate;
+        }
+
+        // ------------------------------------------------------------------
+        // Queue lifecycle
+        // ------------------------------------------------------------------
+
+        private void SetupQueueFolder()
+        {
+            string root = string.IsNullOrWhiteSpace(outputRootFolder)
+                ? Path.Combine(Application.dataPath, "..", "SimulationLogs")
+                : outputRootFolder;
+            queueFolderPath = Path.GetFullPath(Path.Combine(root, $"EvalQueue_{sceneName}_{queueName.Trim()}"));
+            Directory.CreateDirectory(queueFolderPath);
+            Debug.Log($"[EvalHarness] Queue '{queueName}' on '{sceneName}': {queue.Count} entries x {configurationCount} episodes -> '{queueFolderPath}'.");
+        }
+
+        private static string RunFolderName(QueueEntry e) => $"EvalRun_{e.Label}";
+
+        private bool IsEntryComplete(QueueEntry e) => File.Exists(Path.Combine(queueFolderPath, RunFolderName(e), "run_complete.json"));
+
+        private void StartNextEntry()
+        {
+            while (true)
+            {
+                entryIndex++;
+                if (entryIndex >= queue.Count)
+                {
+                    FinishQueue();
+                    return;
+                }
+                entry = queue[entryIndex];
+                if (IsEntryComplete(entry))
+                {
+                    entryResults.Add($"{entry.Label}: already complete (skipped)");
+                    Debug.Log($"[EvalHarness] {entryIndex + 1}/{queue.Count} {entry.Label}: already complete in this queue folder - skipped.");
+                    continue;
+                }
+                break;
+            }
+
+            entrySidecar = null;
+            if (entry.agentKind == AgentKind.Imitation) TryReadSidecar(entry, out entrySidecar, out _);
+
+            runFolderPath = Path.Combine(queueFolderPath, RunFolderName(entry));
+            if (Directory.Exists(runFolderPath))
+            {
+                // Unfinished run from an interrupted session: keep it for inspection, never mix it into the new run.
+                string aside = $"{runFolderPath}_incomplete_{DateTime.Now:yyyyMMdd_HHmmss}";
+                Directory.Move(runFolderPath, aside);
+                Debug.LogWarning($"[EvalHarness] {entry.Label}: found an unfinished run folder - moved to '{Path.GetFileName(aside)}' and starting over.");
+            }
+            Directory.CreateDirectory(runFolderPath);
+            csvWriter = new StreamWriter(Path.Combine(runFolderPath, "episodes.csv"), append: false);
+            csvWriter.WriteLine(string.Join(";", CsvColumns));
+            csvWriter.Flush();
+
+            episodeIndex = 0;
+            entrySuccesses = entryTimeouts = entryOther = 0;
+            entryStartRealtime = Time.realtimeSinceStartup;
+            ComputeModelIdentity();
+            WriteRunConfig();
+            Debug.Log($"[EvalHarness] {entryIndex + 1}/{queue.Count} {entry.Label}: starting {configurationCount} episodes" +
+                (entrySidecar != null ? $" (condition {entrySidecar.condition}, fold {entrySidecar.fold}, seed {entrySidecar.seed})." : "."));
+
+            currentConfigId = -1;
+            AdvanceToNextConfiguration();
+        }
+
+        private void FinishEntry()
+        {
+            if (csvWriter != null)
+            {
+                csvWriter.Flush();
+                csvWriter.Close();
+                csvWriter = null;
+            }
+            float realSeconds = Time.realtimeSinceStartup - entryStartRealtime;
+            var done = new RunCompleteDump
+            {
+                finished_at = DateTime.Now.ToString("o", CultureInfo.InvariantCulture),
+                episodes = episodeIndex,
+                successes = entrySuccesses,
+                timeouts = entryTimeouts,
+                other = entryOther,
+                real_seconds = realSeconds
+            };
+            File.WriteAllText(Path.Combine(runFolderPath, "run_complete.json"), JsonUtility.ToJson(done, true));
+            string summary = $"{entry.Label}: {entrySuccesses}/{episodeIndex} successful, {entryTimeouts} timeouts, {entryOther} other ({realSeconds / 60f:F0} min)";
+            entryResults.Add(summary);
+            Debug.Log($"[EvalHarness] {entryIndex + 1}/{queue.Count} done - {summary}.");
+        }
+
+        private void FinishQueue()
+        {
+            harnessFinished = true;
+            RestoreEngineSettings();
+            WriteStatus("done");
+            Debug.Log($"[EvalHarness] Queue '{queueName}' on '{sceneName}' complete ({(Time.realtimeSinceStartup - queueStartRealtime) / 60f:F0} min):\n  " +
+                string.Join("\n  ", entryResults) + $"\nResults in '{queueFolderPath}'.");
+#if UNITY_EDITOR
+            if (exitPlayModeWhenDone) UnityEditor.EditorApplication.isPlaying = false;
+#endif
+        }
+
+        // ------------------------------------------------------------------
+        // Run config, model identity, status
+        // ------------------------------------------------------------------
+
+        /// <summary>SHA-256 (first 12 hex chars) and modification time of the entry's .onnx file.</summary>
         private void ComputeModelIdentity()
         {
-            diskModelPath = Path.Combine(Application.dataPath, "ImitationModel", "ImitationAgentModel.onnx");
-            diskModelMtimeAtStart = ReadDiskModelMtime();
+            modelSha256 = "";
+            modelFileMtime = "";
+            if (entry.agentKind != AgentKind.Imitation) return;
+#if UNITY_EDITOR
             try
             {
-                string assetFile = null;
-#if UNITY_EDITOR
-                string assetPath = UnityEditor.AssetDatabase.GetAssetPath(modelAsset);
-                if (!string.IsNullOrEmpty(assetPath)) assetFile = Path.GetFullPath(Path.Combine(Application.dataPath, "..", assetPath));
-#endif
-                if (assetFile != null && File.Exists(assetFile))
+                string assetPath = UnityEditor.AssetDatabase.GetAssetPath(entry.modelAsset);
+                string file = string.IsNullOrEmpty(assetPath) ? null : Path.GetFullPath(Path.Combine(Application.dataPath, "..", assetPath));
+                if (file != null && File.Exists(file))
                 {
                     using (var sha = SHA256.Create())
-                    using (var fs = File.OpenRead(assetFile))
+                    using (var fs = File.OpenRead(file))
                     {
-                        byte[] hash = sha.ComputeHash(fs);
-                        modelSha256 = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant().Substring(0, 12);
+                        modelSha256 = BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "").ToLowerInvariant().Substring(0, 12);
                     }
+                    modelFileMtime = File.GetLastWriteTimeUtc(file).ToString("o", CultureInfo.InvariantCulture);
                 }
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[EvalHarness] Could not hash model file: {ex.Message}");
             }
-        }
-
-        private string ReadDiskModelMtime()
-        {
-            if (string.IsNullOrEmpty(diskModelPath)) return "";
-            try
-            {
-                return File.Exists(diskModelPath) ? File.GetLastWriteTimeUtc(diskModelPath).ToString("o", CultureInfo.InvariantCulture) : "";
-            }
-            catch { return ""; }
+#endif
         }
 
         [Serializable]
@@ -487,18 +615,26 @@ namespace Assets.Scripts.DataRecording
             public string scene;
             public string started_at;
             public string unity_version;
+            public string queue_name;
+            public int queue_entry_index;
+            public int queue_entries;
+            public int base_seed;
             public string model_asset;
             public string model_sha256;
             public string model_disk_mtime_utc;
+            public int model_fold;
+            public int model_seed;
+            public string model_splits_design;
+            public List<string> heldout_participants;
             public int configuration_count;
             public int agents_per_configuration;
             public bool randomize_markers;
             public float simulation_speed;
             public float episode_timeout_sim_s;
             public bool nudge_enabled;
-            public float human_reference_s;
             public float start_jitter_position_m;
             public float start_jitter_heading_deg;
+            public string spawn_heading_rule;
             public float stall_event_min_s;
             public float collision_debounce_s;
             public float max_plausible_speed_mps;
@@ -508,17 +644,10 @@ namespace Assets.Scripts.DataRecording
             public int task_start_markers;
             public int task_poi_markers;
             public int task_end_markers;
-            public bool task_revisit;
-            public bool task_choose_non_deterministically;
-            // Marker positions at run start, in the TaskScript's array order. With randomize_markers they are
-            // re-placed every configuration - the per-episode route is in episodes.csv.
+            // Hand-placed marker positions (the start before jitter); the per-episode spawn is in episodes.csv.
             public List<Vector3> task_start_positions;
             public List<Vector3> task_poi_positions;
             public List<Vector3> task_end_positions;
-            // TaskScript's agent fields; neither agent kind moves at task_agent_speed - see body_*.
-            public float task_agent_speed;
-            public float task_agent_size;
-            public float task_agent_radius;
             // What actually walks: the recording body (Imitation) or the NavMeshAgent (ShortestPath).
             public float body_speed_mps;
             public float body_radius_m;
@@ -531,67 +660,76 @@ namespace Assets.Scripts.DataRecording
             public float imitation_min_walk_hold_s;
         }
 
-        private void WriteRunConfig()
+        [Serializable]
+        private class RunCompleteDump
         {
-            try
-            {
-                var dump = new RunConfigDump
-                {
-                    harness_version = HarnessVersion,
-                    agent_kind = agentKind.ToString(),
-                    condition = ConditionName(),
-                    scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name,
-                    started_at = DateTime.Now.ToString("o", CultureInfo.InvariantCulture),
-                    unity_version = Application.unityVersion,
-                    model_asset = ModelName(),
-                    model_sha256 = modelSha256,
-                    model_disk_mtime_utc = diskModelMtimeAtStart,
-                    configuration_count = configurationCount,
-                    agents_per_configuration = agentsPerConfiguration,
-                    randomize_markers = randomizeMarkersPerConfiguration,
-                    simulation_speed = simulationSpeed,
-                    episode_timeout_sim_s = episodeTimeoutSeconds,
-                    nudge_enabled = agentKind == AgentKind.Imitation && !disableDeadlockNudge,
-                    human_reference_s = humanReferenceSeconds,
-                    start_jitter_position_m = startJitterPositionMeters,
-                    start_jitter_heading_deg = startJitterHeadingDegrees,
-                    stall_event_min_s = stallEventMinSeconds,
-                    collision_debounce_s = collisionDebounceSeconds,
-                    max_plausible_speed_mps = maxPlausibleSpeedMps,
-                    metric_window_s = metricWindowSeconds,
-                    stall_displacement_m = stallDisplacementMeters,
-                    task_number_of_needs = task.numberOfNeeds,
-                    task_start_markers = task.start != null ? task.start.Length : 0,
-                    task_poi_markers = task.pointsOfInterest != null ? task.pointsOfInterest.Length : 0,
-                    task_end_markers = task.end != null ? task.end.Length : 0,
-                    task_revisit = task.revisit,
-                    task_choose_non_deterministically = task.chooseNonDeterministically,
-                    task_start_positions = MarkerPositions(task.start),
-                    task_poi_positions = MarkerPositions(task.pointsOfInterest),
-                    task_end_positions = MarkerPositions(task.end),
-                    task_agent_speed = task.agentSpeed,
-                    task_agent_size = task.agentSize,
-                    task_agent_radius = task.agentRadius,
-                    body_speed_mps = agentKind == AgentKind.Imitation ? ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond : shortestPathSpeedMps,
-                    body_radius_m = agentKind == AgentKind.Imitation ? ZarrDataContract.RecordingBody.Radius : shortestPathRadiusM,
-                    shortest_path_acceleration_mps2 = agentKind == AgentKind.ShortestPath ? shortestPathAccelerationMps2 : 0f,
-                    shortest_path_angular_speed_deg_per_s = agentKind == AgentKind.ShortestPath ? shortestPathAngularSpeedDegPerS : 0f,
-                    navmesh_bake_agent_radius = NavMesh.GetSettingsByID(0).agentRadius,
-                    arrival_radius_m = ZarrDataContract.ArrivalRadiusMeters,
-                    tick_interval_s = ZarrDataContract.SamplingIntervalSeconds,
-                    imitation_stochastic_walk = agentKind == AgentKind.Imitation && imitationStochasticWalk,
-                    imitation_min_walk_hold_s = agentKind == AgentKind.Imitation ? imitationMinWalkHoldSeconds : 0f
-                };
-                File.WriteAllText(Path.Combine(runFolderPath, "run_config.json"), JsonUtility.ToJson(dump, true));
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[EvalHarness] Could not write run_config.json: {ex.Message}");
-            }
+            public string finished_at;
+            public int episodes;
+            public int successes;
+            public int timeouts;
+            public int other;
+            public float real_seconds;
         }
 
-        private string ModelName() => agentKind == AgentKind.Imitation && modelAsset != null ? modelAsset.name : "";
-        private string ConditionName() => agentKind == AgentKind.Imitation ? condition.Trim() : "";
+        private void WriteRunConfig()
+        {
+            bool imitation = entry.agentKind == AgentKind.Imitation;
+            var startPositions = new List<Vector3>(baseStartPositions);
+            var dump = new RunConfigDump
+            {
+                harness_version = HarnessVersion,
+                agent_kind = entry.agentKind.ToString(),
+                condition = ConditionName(),
+                scene = sceneName,
+                started_at = DateTime.Now.ToString("o", CultureInfo.InvariantCulture),
+                unity_version = Application.unityVersion,
+                queue_name = queueName.Trim(),
+                queue_entry_index = entryIndex,
+                queue_entries = queue.Count,
+                base_seed = baseSeed,
+                model_asset = imitation ? entry.modelAsset.name : "",
+                model_sha256 = modelSha256,
+                model_disk_mtime_utc = modelFileMtime,
+                model_fold = entrySidecar != null ? entrySidecar.fold : 0,
+                model_seed = entrySidecar != null ? entrySidecar.seed : 0,
+                model_splits_design = entrySidecar != null ? entrySidecar.splits_design ?? "" : "",
+                heldout_participants = entrySidecar != null && entrySidecar.heldout_participants != null
+                    ? new List<string>(entrySidecar.heldout_participants) : new List<string>(),
+                configuration_count = configurationCount,
+                agents_per_configuration = 1,
+                randomize_markers = randomizeMarkersPerConfiguration,
+                simulation_speed = simulationSpeed,
+                episode_timeout_sim_s = episodeTimeoutSeconds,
+                nudge_enabled = imitation && !disableDeadlockNudge,
+                start_jitter_position_m = startJitterPositionMeters,
+                start_jitter_heading_deg = startJitterHeadingDegrees,
+                spawn_heading_rule = SpawnHeadingRule,
+                stall_event_min_s = stallEventMinSeconds,
+                collision_debounce_s = collisionDebounceSeconds,
+                max_plausible_speed_mps = maxPlausibleSpeedMps,
+                metric_window_s = metricWindowSeconds,
+                stall_displacement_m = stallDisplacementMeters,
+                task_number_of_needs = task.numberOfNeeds,
+                task_start_markers = task.start.Length,
+                task_poi_markers = task.pointsOfInterest != null ? task.pointsOfInterest.Length : 0,
+                task_end_markers = task.end.Length,
+                task_start_positions = startPositions,
+                task_poi_positions = MarkerPositions(task.pointsOfInterest),
+                task_end_positions = MarkerPositions(task.end),
+                body_speed_mps = imitation ? ZarrDataContract.RecordingBody.WalkSpeedMetersPerSecond : shortestPathSpeedMps,
+                body_radius_m = imitation ? ZarrDataContract.RecordingBody.Radius : shortestPathRadiusM,
+                shortest_path_acceleration_mps2 = imitation ? 0f : shortestPathAccelerationMps2,
+                shortest_path_angular_speed_deg_per_s = imitation ? 0f : shortestPathAngularSpeedDegPerS,
+                navmesh_bake_agent_radius = NavMesh.GetSettingsByID(0).agentRadius,
+                arrival_radius_m = ZarrDataContract.ArrivalRadiusMeters,
+                tick_interval_s = ZarrDataContract.SamplingIntervalSeconds,
+                imitation_stochastic_walk = imitation && imitationStochasticWalk,
+                imitation_min_walk_hold_s = imitation ? imitationMinWalkHoldSeconds : 0f
+            };
+            File.WriteAllText(Path.Combine(runFolderPath, "run_config.json"), JsonUtility.ToJson(dump, true));
+        }
+
+        private string ConditionName() => entry != null && entry.agentKind == AgentKind.Imitation && entrySidecar != null ? entrySidecar.condition : "";
 
         private static List<Vector3> MarkerPositions(GameObject[] markers)
         {
@@ -601,11 +739,70 @@ namespace Assets.Scripts.DataRecording
             return list;
         }
 
+        [Serializable]
+        private class StatusDump
+        {
+            public string state;
+            public string queue_name;
+            public string scene;
+            public string started_at;
+            public string updated_at;
+            public int entry;
+            public int entries;
+            public string current;
+            public int episodes_done_in_current;
+            public int episodes_per_entry;
+            public float elapsed_min;
+            public float estimated_remaining_min;
+            public float sim_speed_vs_real;
+            public List<string> results;
+        }
+
+        /// <summary>queue_status.json: progress readable without switching to Unity. The estimate uses the mean real time per
+        /// episode of this Play session.</summary>
+        private void WriteStatus(string state)
+        {
+            if (string.IsNullOrEmpty(queueFolderPath)) return;
+            int remaining = configurationCount - episodeIndex;
+            for (int i = entryIndex + 1; i < queue.Count; i++) if (!IsEntryComplete(queue[i])) remaining += configurationCount;
+            if (state == "done") remaining = 0;
+            float perEpisode = episodesThisSession > 0 ? realSecondsThisSession / episodesThisSession : 0f;
+            var status = new StatusDump
+            {
+                state = state,
+                queue_name = queueName,
+                scene = sceneName,
+                started_at = queueStartedAt,
+                updated_at = DateTime.Now.ToString("o", CultureInfo.InvariantCulture),
+                entry = Mathf.Min(entryIndex + 1, queue.Count),
+                entries = queue.Count,
+                current = state == "done" || entry == null ? "" : entry.Label,
+                episodes_done_in_current = state == "done" ? 0 : episodeIndex,
+                episodes_per_entry = configurationCount,
+                elapsed_min = (Time.realtimeSinceStartup - queueStartRealtime) / 60f,
+                estimated_remaining_min = perEpisode * remaining / 60f,
+                sim_speed_vs_real = sessionSimSeconds > 0f && realSecondsThisSession > 0f ? sessionSimSeconds / realSecondsThisSession : 0f,
+                results = new List<string>(entryResults)
+            };
+            try
+            {
+                File.WriteAllText(Path.Combine(queueFolderPath, "queue_status.json"), JsonUtility.ToJson(status, true));
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[EvalHarness] Could not write queue_status.json: {ex.Message}");
+            }
+        }
+        private float sessionSimSeconds = 0f;
+
+        // ------------------------------------------------------------------
+        // Main loop
+        // ------------------------------------------------------------------
+
         void Update()
         {
-            if (harnessFinished) return;
+            if (harnessFinished || entry == null) return;
 
-            // 1. Check every in-flight agent for success/timeout.
             for (int i = activeEpisodes.Count - 1; i >= 0; i--)
             {
                 ActiveEpisode ep = activeEpisodes[i];
@@ -623,7 +820,7 @@ namespace Assets.Scripts.DataRecording
 
                 if (!ep.started)
                 {
-                    // Agent hasn't run its first Update yet (ImitationAgent.Start() still initialising, or it threw).
+                    // The agent's Start() is still initialising (model loading), or it threw.
                     if (Time.realtimeSinceStartup - ep.startRealtime >= agentStartTimeoutRealSeconds)
                     {
                         FinishEpisode(ep, "other", "agent_never_started");
@@ -647,23 +844,19 @@ namespace Assets.Scripts.DataRecording
                 }
             }
 
-            // 2. Spawn the current configuration's next agent, if it's due.
-            if (currentConfigAgentsSpawned < agentsPerConfiguration && Time.realtimeSinceStartup >= nextSpawnTime)
+            if (currentConfigAgentsSpawned < 1)
             {
                 SpawnAgentForEpisode();
                 currentConfigAgentsSpawned++;
-                nextSpawnTime = Time.realtimeSinceStartup + spawnIntervalSeconds;
             }
-
-            // 3. Once every agent on this layout has been spawned AND has finished, move on.
-            if (currentConfigAgentsSpawned >= agentsPerConfiguration && currentConfigAgentsCompleted >= agentsPerConfiguration)
+            else if (currentConfigAgentsCompleted >= 1)
             {
                 AdvanceToNextConfiguration();
             }
         }
 
         // ------------------------------------------------------------------
-        // Configuration (layout) lifecycle
+        // Configurations
         // ------------------------------------------------------------------
 
         private void AdvanceToNextConfiguration()
@@ -671,58 +864,147 @@ namespace Assets.Scripts.DataRecording
             currentConfigId++;
             if (currentConfigId >= configurationCount)
             {
-                FinishRun();
+                FinishEntry();
+                StartNextEntry();
                 return;
             }
 
-            currentConfigSeed = UnityEngine.Random.Range(int.MinValue, int.MaxValue);
-            UnityEngine.Random.InitState(currentConfigSeed);
-
+            currentConfigSeed = configSeeds[currentConfigId];
             if (randomizeMarkersPerConfiguration)
             {
+                UnityEngine.Random.InitState(currentConfigSeed);
+                currentConfigStartOffsetM = 0f;
+                currentConfigHeadingJitterDeg = 0f;
                 if (!RandomizeTaskMarkers())
                 {
                     consecutivePlacementFailures++;
-                    Debug.LogError($"[EvalHarness] Configuration {currentConfigId}: could not find valid spaced NavMesh positions for all markers after {maxPlacementAttempts} attempts each. Logging as outcome=other and skipping.");
+                    Debug.LogError($"[EvalHarness] Configuration {currentConfigId}: no valid spaced NavMesh positions for all markers - logged as outcome=other and skipped.");
                     WriteEpisodeRow(new EpisodeRecord
                     {
-                        configId = currentConfigId,
-                        agentId = -1,
-                        seed = currentConfigSeed,
-                        outcome = "other",
-                        rawOutcome = "other",
-                        secondsToFirstCollision = -1f,
-                        error = "navmesh_placement_failed"
+                        configId = currentConfigId, agentId = -1, seed = currentConfigSeed,
+                        outcome = "other", rawOutcome = "other", secondsToFirstCollision = -1f, error = "navmesh_placement_failed"
                     });
                     episodeIndex++;
-
+                    entryOther++;
                     if (consecutivePlacementFailures >= MaxConsecutivePlacementFailures)
                     {
-                        Debug.LogError($"[EvalHarness] {MaxConsecutivePlacementFailures} consecutive placement failures - aborting run early. Check the scene's NavMesh bake and minPositionSpacingMeters.");
-                        FinishRun();
-                        return;
+                        Debug.LogError($"[EvalHarness] {MaxConsecutivePlacementFailures} consecutive placement failures - ending this entry early.");
+                        currentConfigId = configurationCount;
                     }
-
                     AdvanceToNextConfiguration();
                     return;
                 }
+                consecutivePlacementFailures = 0;
             }
             else
             {
                 SnapshotFixedTaskMarkers();
-                ApplyStartJitter();
+                ApplyStartJitter(new System.Random(currentConfigSeed));
             }
-            consecutivePlacementFailures = 0;
+            // The stochastic walk (and PoiProgressTracker's draws) use UnityEngine.Random: seed it per configuration too.
+            UnityEngine.Random.InitState(currentConfigSeed);
 
             currentConfigAgentsSpawned = 0;
             currentConfigAgentsCompleted = 0;
-            nextSpawnTime = Time.realtimeSinceStartup;
+        }
+
+        private void SnapshotFixedTaskMarkers()
+        {
+            currentConfigPoiPositions = new List<Vector3>();
+            if (task.pointsOfInterest != null && task.numberOfNeeds > 0)
+            {
+                foreach (var poi in task.pointsOfInterest)
+                {
+                    if (poi != null) currentConfigPoiPositions.Add(poi.transform.position);
+                }
+            }
+            currentConfigEndPos = task.end[0].transform.position;
+        }
+
+        /// <summary>
+        /// Moves the start marker to base + a seeded offset (uniform in a disc of startJitterPositionMeters) if that point is on
+        /// the NavMesh with a complete path to the End, else keeps the base position; draws the heading jitter. Uses its own
+        /// System.Random(configuration seed), so the draw is identical for every entry.
+        /// </summary>
+        private void ApplyStartJitter(System.Random rng)
+        {
+            double angle = rng.NextDouble() * 2.0 * Math.PI;
+            double radius = startJitterPositionMeters * Math.Sqrt(rng.NextDouble());
+            float heading = (float)((rng.NextDouble() * 2.0 - 1.0) * startJitterHeadingDegrees);
+
+            Vector3 target = baseStartPositions[0];
+            if (radius > 1e-4)
+            {
+                Vector3 candidate = target + new Vector3((float)(radius * Math.Cos(angle)), 0f, (float)(radius * Math.Sin(angle)));
+                if (NavMesh.SamplePosition(candidate, out NavMeshHit hit, 1f, NavMesh.AllAreas) && HasCompletePath(hit.position, currentConfigEndPos))
+                {
+                    target = hit.position;
+                }
+            }
+            task.start[0].transform.position = target;
+
+            currentConfigStartOffsetM = Vector3.Distance(target, baseStartPositions[0]);
+            currentConfigHeadingJitterDeg = heading;
+        }
+
+        /// <summary>Random markers only: start(s), POI(s) and end(s) to seeded, mutually spaced NavMesh positions.</summary>
+        private bool RandomizeTaskMarkers()
+        {
+            var chosen = new List<Vector3>();
+            if (!RepositionArray(task.start, chosen)) return false;
+
+            var poiChosen = new List<Vector3>();
+            if (!RepositionArray(task.pointsOfInterest, chosen, poiChosen)) return false;
+            currentConfigPoiPositions = poiChosen;
+
+            var endChosen = new List<Vector3>();
+            if (!RepositionArray(task.end, chosen, endChosen)) return false;
+            currentConfigEndPos = endChosen.Count > 0 ? endChosen[0] : Vector3.zero;
+            return true;
+        }
+
+        private bool RepositionArray(GameObject[] markers, List<Vector3> chosen, List<Vector3> outPositions = null)
+        {
+            if (markers == null) return true;
+            foreach (var marker in markers)
+            {
+                if (marker == null) continue;
+                if (!TryFindSpacedNavMeshPosition(chosen, out Vector3 pos)) return false;
+                marker.transform.position = pos;
+                chosen.Add(pos);
+                outPositions?.Add(pos);
+            }
+            return true;
+        }
+
+        private bool TryFindSpacedNavMeshPosition(List<Vector3> alreadyChosen, out Vector3 result)
+        {
+            for (int attempt = 0; attempt < maxPlacementAttempts; attempt++)
+            {
+                Vector3 baseVertex = navMeshVertices[UnityEngine.Random.Range(0, navMeshVertices.Length)];
+                Vector2 jitter = UnityEngine.Random.insideUnitCircle * navMeshSampleRadius;
+                Vector3 candidate = baseVertex + new Vector3(jitter.x, 0f, jitter.y);
+                if (!NavMesh.SamplePosition(candidate, out NavMeshHit hit, navMeshSampleRadius, NavMesh.AllAreas)) continue;
+
+                bool farEnough = true;
+                foreach (Vector3 other in alreadyChosen)
+                {
+                    if (Vector3.Distance(hit.position, other) < minPositionSpacingMeters) { farEnough = false; break; }
+                }
+                if (farEnough)
+                {
+                    result = hit.position;
+                    return true;
+                }
+            }
+            result = Vector3.zero;
+            return false;
         }
 
         private void SpawnAgentForEpisode()
         {
             GameObject agentGO = GameObject.CreatePrimitive(PrimitiveType.Capsule);
-            agentGO.name = $"EvalHarness_{agentKind}_Config{currentConfigId}_Agent{currentConfigAgentsSpawned}";
+            agentGO.name = $"EvalHarness_{entry.Label}_Config{currentConfigId}";
 
             Collider capCollider = agentGO.GetComponent<Collider>();
             if (capCollider != null) Destroy(capCollider);
@@ -735,18 +1017,20 @@ namespace Assets.Scripts.DataRecording
                 agentRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             }
 
+            // Fields are set right after AddComponent, before the agent's Start() runs on its first frame.
             IEvalAgent agent;
             ImitationAgent imitation = null;
-            if (agentKind == AgentKind.Imitation)
+            if (entry.agentKind == AgentKind.Imitation)
             {
                 imitation = agentGO.AddComponent<ImitationAgent>();
                 imitation.task = task;
                 imitation.ArchitectureLayerMask = LayerMask.GetMask(ZarrDataContract.ArchitectureObstacleLayerName);
-                imitation.BaselineModelAsset = modelAsset;
+                imitation.BaselineModelAsset = entry.modelAsset;
                 imitation.enableDeadlockNudge = !disableDeadlockNudge;
-                imitation.hotReloadModel = false; // the run evaluates exactly modelAsset (its sha256 is logged)
+                imitation.hotReloadModel = false; // the run evaluates exactly this model (its sha256 is logged)
                 imitation.stochasticWalk = imitationStochasticWalk;
                 imitation.minWalkHoldSeconds = imitationMinWalkHoldSeconds;
+                imitation.spawnHeadingOffsetDeg = currentConfigHeadingJitterDeg;
                 agent = imitation;
             }
             else
@@ -757,11 +1041,12 @@ namespace Assets.Scripts.DataRecording
                 shortestPath.radiusMeters = shortestPathRadiusM;
                 shortestPath.accelerationMetersPerSecond2 = shortestPathAccelerationMps2;
                 shortestPath.angularSpeedDegreesPerSecond = shortestPathAngularSpeedDegPerS;
+                shortestPath.spawnHeadingOffsetDeg = currentConfigHeadingJitterDeg;
                 agent = shortestPath;
             }
 
             // AutoFlush: both files survive stopping Play mid-episode.
-            string episodeKey = $"config{currentConfigId}_agent{currentConfigAgentsSpawned}";
+            string episodeKey = $"config{currentConfigId}_agent0";
             string trajFileName = $"traj_{episodeKey}.csv";
             var trajWriter = new StreamWriter(Path.Combine(runFolderPath, trajFileName), false) { AutoFlush = true };
             trajWriter.WriteLine(TrajectoryCsvHeader);
@@ -782,7 +1067,7 @@ namespace Assets.Scripts.DataRecording
                 imitation = imitation,
                 startRealtime = Time.realtimeSinceStartup,
                 configId = currentConfigId,
-                agentId = currentConfigAgentsSpawned,
+                agentId = 0,
                 seed = currentConfigSeed,
                 poiPositions = currentConfigPoiPositions,
                 endPos = currentConfigEndPos,
@@ -791,9 +1076,13 @@ namespace Assets.Scripts.DataRecording
             });
         }
 
+        // ------------------------------------------------------------------
+        // Per-frame episode clock, trajectory ticks, diagnostics
+        // ------------------------------------------------------------------
+
         /// <summary>
-        /// Advances one episode's harness-side clock and metrics by one frame. All numbers come from the agent's own
-        /// trajectory and Time.deltaTime (simulated time), never from realtime.
+        /// Advances one episode's clock and diagnostics by one frame. All numbers come from the agent's own trajectory and
+        /// Time.deltaTime (simulated time), never from realtime.
         /// </summary>
         private void TickEpisodeClock(ActiveEpisode ep)
         {
@@ -802,15 +1091,14 @@ namespace Assets.Scripts.DataRecording
 
             if (!ep.started)
             {
+                // First Update of the agent: it has spawned and already faces its start heading (path + jitter).
                 ep.started = true;
                 ep.startFrame = Time.frameCount;
                 ep.processedPoints = 1;
                 ep.windowStartPos = traj[0];
-                // The agent's Start() has just spawned it facing its goal; apply the (seeded) heading jitter now,
-                // before the model's temporal window has filled and produced its first action.
-                if (Mathf.Abs(ep.headingJitterDeg) > 0.001f) ep.agentGO.transform.Rotate(0f, ep.headingJitterDeg, 0f, Space.World);
                 ep.prevTickEyePos = Eye(ep).position;
                 ZarrDataContract.HeadingPitch(Eye(ep), out ep.prevTickHeading, out _);
+                ep.spawnYawDeg = ep.prevTickHeading;
                 WriteTick(ep);
                 return;
             }
@@ -868,12 +1156,10 @@ namespace Assets.Scripts.DataRecording
         private static Transform Eye(ActiveEpisode ep) => ep.agent.EyeAnchor != null ? ep.agent.EyeAnchor : ep.agentGO.transform;
 
         /// <summary>
-        /// One row of the trajectory file (ZarrDataContract.Trajectory) and, if enabled, of the model-debug file, at the current
-        /// episode sim time. Called on a ZarrDataContract.SamplingIntervalSeconds grid (t = 0 on the agent's first Update); t is
-        /// the actual sim time of the frame that crossed the grid point (eval_tools/trajectories.py resamples onto the exact grid).
-        /// Position, heading and pitch are the eye's, as ParticipantRecorder's pose is the camera's; speed and yaw rate come from
-        /// the eye's change since the previous row, so they mean the same thing for both agent kinds and for recorded episodes.
-        /// Model-debug: the goal vector is in the eye's frame, as in the model input; model columns are empty until the first call.
+        /// One row of the trajectory file (ZarrDataContract.Trajectory) and, if enabled, of the model-debug file, on the 0.1 s
+        /// sim-time grid (t = 0 on the agent's first Update; t is the sim time of the frame that crossed the grid point, and
+        /// eval_tools/trajectories.py resamples onto the exact grid). Position, heading and pitch are the eye's, as the
+        /// recordings' pose is the camera's.
         /// </summary>
         private void WriteTick(ActiveEpisode ep)
         {
@@ -934,7 +1220,7 @@ namespace Assets.Scripts.DataRecording
         {
             ProcessNewTrajectoryPoints(ep);
 
-            List<Vector3> trajectory = (ep.agent.Trajectory != null) ? ep.agent.Trajectory : new List<Vector3>();
+            List<Vector3> trajectory = ep.agent.Trajectory ?? new List<Vector3>();
             Vector3 spawnPos = trajectory.Count > 0 ? trajectory[0] : ep.agentGO.transform.position;
             Vector3 finalPos = trajectory.Count > 0 ? trajectory[trajectory.Count - 1] : ep.agentGO.transform.position;
             Vector3 finalGoalPos = ep.agent.CurrentGoalPosition;
@@ -943,11 +1229,9 @@ namespace Assets.Scripts.DataRecording
             float realSeconds = Time.realtimeSinceStartup - ep.startRealtime;
             int frames = ep.started ? Time.frameCount - ep.startFrame : 0;
             int steps = Mathf.RoundToInt(simSeconds / ZarrDataContract.SamplingIntervalSeconds);
-
             float pathLengthM = ep.pathLengthM;
 
-            // Optimal path: sum of NavMesh-shortest segments spawn -> POI_0 -> ... -> end, in the order this agent's
-            // PoiProgressTracker planned (and therefore had to visit) them.
+            // NavMesh shortest route from this episode's actual spawn via the planned POI(s) to the end (methodology 3.9.2).
             List<Vector3> routePois = ep.poiPositions;
             Vector3 routeEnd = ep.endPos;
             if (ep.agent.PlannedPois != null && ep.agent.PlannedEnd != null)
@@ -979,16 +1263,7 @@ namespace Assets.Scripts.DataRecording
             bool successNoRescue = outcome == "success" && stuckCount == 0;
             float spl = successNoRescue ? Mathf.Clamp01(optimalPathLengthM / Mathf.Max(pathLengthM, optimalPathLengthM)) : 0f;
 
-            var goalXZ = new Vector2(finalGoalPos.x, finalGoalPos.z);
-            float finalDistToGoal = Vector2.Distance(new Vector2(finalPos.x, finalPos.z), goalXZ);
-
-            string note = errorMessage;
-            if (agentKind == AgentKind.Imitation && !warnedDiskModelChanged && ReadDiskModelMtime() != diskModelMtimeAtStart)
-            {
-                warnedDiskModelChanged = true;
-                Debug.LogWarning("[EvalHarness] The model file on disk changed during this run - ImitationAgent may have hot-swapped it. Rows from here on are tagged disk_model_changed.");
-            }
-            if (warnedDiskModelChanged) note = string.IsNullOrEmpty(note) ? "disk_model_changed" : note + "|disk_model_changed";
+            float finalDistToGoal = Vector2.Distance(new Vector2(finalPos.x, finalPos.z), new Vector2(finalGoalPos.x, finalGoalPos.z));
 
             string pngFilename = "";
             if (heatmapEveryNthEpisode > 0 && episodeIndex % heatmapEveryNthEpisode == 0)
@@ -1005,6 +1280,7 @@ namespace Assets.Scripts.DataRecording
                 startPos = spawnPos,
                 startOffsetM = ep.startOffsetM,
                 startHeadingJitterDeg = ep.headingJitterDeg,
+                spawnYawDeg = ep.spawnYawDeg,
                 poiPositions = routePois,
                 endPos = routeEnd,
                 outcome = outcome,
@@ -1036,12 +1312,27 @@ namespace Assets.Scripts.DataRecording
                 nudgeCount = stuckCount,
                 png = pngFilename,
                 trajectoryFile = ep.trajFileName,
-                error = note
+                error = errorMessage
             });
 
             CloseTickWriters(ep);
             Destroy(ep.agentGO);
             episodeIndex++;
+
+            if (outcome == "success") entrySuccesses++;
+            else if (outcome == "timeout") entryTimeouts++;
+            else entryOther++;
+            episodesThisSession++;
+            realSecondsThisSession += realSeconds;
+            sessionSimSeconds += simSeconds;
+            WriteStatus("running");
+
+            float perEpisode = realSecondsThisSession / episodesThisSession;
+            int remaining = configurationCount - episodeIndex;
+            for (int i = entryIndex + 1; i < queue.Count; i++) if (!IsEntryComplete(queue[i])) remaining += configurationCount;
+            Debug.Log($"[EvalHarness] {entryIndex + 1}/{queue.Count} {entry.Label} episode {episodeIndex}/{configurationCount}: " +
+                $"{outcome} after {simSeconds:F1} s sim ({simSeconds / Mathf.Max(realSeconds, 1e-3f):F1}x real) | " +
+                $"{entrySuccesses}/{episodeIndex} successful | about {perEpisode * remaining / 60f:F0} min left in the queue");
         }
 
         private static void CloseTickWriters(ActiveEpisode ep)
@@ -1052,177 +1343,12 @@ namespace Assets.Scripts.DataRecording
             ep.modelDebugWriter = null;
         }
 
-        private void FinishRun()
-        {
-            harnessFinished = true;
-            RestoreTimeSettings();
-            if (csvWriter != null)
-            {
-                csvWriter.Flush();
-                csvWriter.Close();
-                csvWriter = null;
-            }
-            Debug.Log($"[EvalHarness] Run complete. {episodeIndex} row(s) across {currentConfigId} configuration(s) written to '{runFolderPath}'. Editor stays in Play mode - stop it manually whenever you're done watching.");
-        }
-
-        // ------------------------------------------------------------------
-        // Visualization
-        // ------------------------------------------------------------------
-
-        /// <summary>
-        /// Recolors each marker's own Renderer (if it has one) once, at harness startup - marker
-        /// GameObjects persist across configurations (only their position changes), so this
-        /// doesn't need to re-run per configuration. If a marker has no Renderer of its own (e.g.
-        /// it's only visualized via POIMarkerScript's separately-generated cylinders), this logs
-        /// a warning instead of fabricating new geometry, since that would need a different, more
-        /// invasive change (and risks showing up in the agent's own RGB camera differently than
-        /// training data did).
-        /// </summary>
-        private void ColorizeTaskMarkers()
-        {
-            ColorizeMarkerArray(task.start, startMarkerColor, "start");
-            ColorizeMarkerArray(task.pointsOfInterest, poiMarkerColor, "POI");
-            ColorizeMarkerArray(task.end, endMarkerColor, "end");
-        }
-
-        private void ColorizeMarkerArray(GameObject[] markers, Color color, string roleName)
-        {
-            if (markers == null) return;
-
-            foreach (var marker in markers)
-            {
-                if (marker == null) continue;
-
-                Renderer r = marker.GetComponent<Renderer>();
-                if (r == null) r = marker.GetComponentInChildren<Renderer>();
-
-                if (r != null)
-                {
-                    r.material = CreateColorMaterial(color);
-                }
-                else
-                {
-                    Debug.LogWarning($"[EvalHarness] '{marker.name}' ({roleName} marker) has no Renderer to recolor - " +
-                        "if it's visualized some other way (e.g. POIMarkerScript's generated cylinders), that needs a separate change.");
-                }
-            }
-        }
-
-        private static Material CreateColorMaterial(Color color)
-        {
-            Shader shader = Shader.Find("Diffuse");
-            Material material = new Material(shader != null ? shader : Shader.Find("Standard"));
-            material.color = color;
-            return material;
-        }
-
-        // ------------------------------------------------------------------
-        // NavMesh-valid, mutually-spaced random placement
-        // ------------------------------------------------------------------
-
-        private bool RandomizeTaskMarkers()
-        {
-            var chosen = new List<Vector3>();
-
-            // Start positions aren't snapshotted here: PoiProgressTracker.ChooseSpawnPosition()
-            // picks randomly among task.start's *repositioned* candidates inside each agent's own
-            // Start(), so which one a given agent actually used is only known once it has spawned
-            // - FinishEpisode() reads it back from that agent's own recorded trajectory instead.
-            if (!RepositionArray(task.start, chosen)) return false;
-
-            var poiChosen = new List<Vector3>();
-            if (!RepositionArray(task.pointsOfInterest, chosen, poiChosen)) return false;
-            currentConfigPoiPositions = poiChosen;
-
-            var endChosen = new List<Vector3>();
-            if (!RepositionArray(task.end, chosen, endChosen)) return false;
-            currentConfigEndPos = endChosen.Count > 0 ? endChosen[0] : Vector3.zero;
-
-            return true;
-        }
-
-        /// <summary>
-        /// Used instead of RandomizeTaskMarkers() when randomizeMarkersPerConfiguration is false:
-        /// reads the start/POI/end markers' CURRENT positions (whatever they already are in the
-        /// scene - untouched) into currentConfigPoiPositions/currentConfigEndPos, purely so
-        /// FinishEpisode()/WriteEpisodeRow() have something to log. Mirrors RandomizeTaskMarkers()'s
-        /// contract but never moves anything and cannot fail placement.
-        /// </summary>
-        private void SnapshotFixedTaskMarkers()
-        {
-            currentConfigPoiPositions = new List<Vector3>();
-            if (task.pointsOfInterest != null && task.numberOfNeeds > 0)
-            {
-                foreach (var poi in task.pointsOfInterest)
-                {
-                    if (poi != null) currentConfigPoiPositions.Add(poi.transform.position);
-                }
-            }
-
-            currentConfigEndPos = (task.end != null && task.end.Length > 0 && task.end[0] != null)
-                ? task.end[0].transform.position
-                : Vector3.zero;
-        }
-
-        private bool RepositionArray(GameObject[] markers, List<Vector3> chosen, List<Vector3> outPositions = null)
-        {
-            if (markers == null) return true;
-
-            foreach (var marker in markers)
-            {
-                if (marker == null) continue;
-
-                if (!TryFindSpacedNavMeshPosition(chosen, out Vector3 pos))
-                {
-                    return false;
-                }
-
-                marker.transform.position = pos;
-                chosen.Add(pos);
-                if (outPositions != null) outPositions.Add(pos);
-            }
-
-            return true;
-        }
-
-        private bool TryFindSpacedNavMeshPosition(List<Vector3> alreadyChosen, out Vector3 result)
-        {
-            for (int attempt = 0; attempt < maxPlacementAttempts; attempt++)
-            {
-                Vector3 baseVertex = navMeshVertices[UnityEngine.Random.Range(0, navMeshVertices.Length)];
-                Vector2 jitter = UnityEngine.Random.insideUnitCircle * navMeshSampleRadius;
-                Vector3 candidate = baseVertex + new Vector3(jitter.x, 0f, jitter.y);
-
-                if (NavMesh.SamplePosition(candidate, out NavMeshHit hit, navMeshSampleRadius, NavMesh.AllAreas))
-                {
-                    bool farEnough = true;
-                    for (int i = 0; i < alreadyChosen.Count; i++)
-                    {
-                        if (Vector3.Distance(hit.position, alreadyChosen[i]) < minPositionSpacingMeters)
-                        {
-                            farEnough = false;
-                            break;
-                        }
-                    }
-
-                    if (farEnough)
-                    {
-                        result = hit.position;
-                        return true;
-                    }
-                }
-            }
-
-            result = Vector3.zero;
-            return false;
-        }
-
         private float ComputeNavMeshPathLength(Vector3 from, Vector3 to)
         {
             // Snap both ends onto the NavMesh first: a marker floating above the floor (e.g. end at y=1) makes
             // CalculatePath fail, which used to silently fall back to the straight-line distance.
-            if (NavMesh.SamplePosition(from, out NavMeshHit fromHit, navMeshSampleRadius, NavMesh.AllAreas)) from = fromHit.position;
-            if (NavMesh.SamplePosition(to, out NavMeshHit toHit, navMeshSampleRadius, NavMesh.AllAreas)) to = toHit.position;
+            if (NavMesh.SamplePosition(from, out NavMeshHit fromHit, 2f, NavMesh.AllAreas)) from = fromHit.position;
+            if (NavMesh.SamplePosition(to, out NavMeshHit toHit, 2f, NavMesh.AllAreas)) to = toHit.position;
 
             NavMeshPath path = new NavMeshPath();
             if (!NavMesh.CalculatePath(from, to, NavMesh.AllAreas, path) || path.status != NavMeshPathStatus.PathComplete)
@@ -1231,43 +1357,20 @@ namespace Assets.Scripts.DataRecording
             }
 
             float length = 0f;
-            for (int i = 1; i < path.corners.Length; i++)
-            {
-                length += Vector3.Distance(path.corners[i - 1], path.corners[i]);
-            }
+            for (int i = 1; i < path.corners.Length; i++) length += Vector3.Distance(path.corners[i - 1], path.corners[i]);
             return length;
         }
 
         // ------------------------------------------------------------------
-        // Output: run folder, per-episode PNG, per-episode CSV row
+        // Output: heatmap PNG, episodes.csv
         // ------------------------------------------------------------------
 
-        private void SetupRunFolder()
+        private static Material CreateColorMaterial(Color color)
         {
-            string root = string.IsNullOrWhiteSpace(outputRootFolder)
-                ? Path.Combine(Application.dataPath, "..", "SimulationLogs")
-                : outputRootFolder;
-
-            string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
-            string baseName = $"EvalRun_{sceneName}_{agentKind}_{DateTime.Now:yyyyMMdd_HHmmss}";
-            string candidate = Path.Combine(root, baseName);
-
-            int suffix = 0;
-            while (Directory.Exists(candidate))
-            {
-                suffix++;
-                candidate = Path.Combine(root, $"{baseName}_{suffix}");
-            }
-
-            Directory.CreateDirectory(candidate);
-            runFolderPath = candidate;
-
-            string csvPath = Path.Combine(runFolderPath, "episodes.csv");
-            csvWriter = new StreamWriter(csvPath, append: false);
-            csvWriter.WriteLine(string.Join(";", CsvColumns));
-            csvWriter.Flush();
-
-            Debug.Log($"[EvalHarness] Run folder created at '{runFolderPath}'. Testing {agentKind} on {configurationCount} configuration(s) x {agentsPerConfiguration} agent(s) each.");
+            Shader shader = Shader.Find("Diffuse");
+            Material material = new Material(shader != null ? shader : Shader.Find("Standard"));
+            material.color = color;
+            return material;
         }
 
         private void SaveEpisodeHeatmap(List<Vector3> trajectory, string pngFilename)
@@ -1278,12 +1381,11 @@ namespace Assets.Scripts.DataRecording
                 var allAgentPositions = new List<List<Vector3>>[] { new List<List<Vector3>> { trajectoryCopy } };
 
                 var pois = new List<GameObject>();
-                if (task.start != null) pois.AddRange(task.start);
+                pois.AddRange(task.start);
                 if (task.pointsOfInterest != null) pois.AddRange(task.pointsOfInterest);
-                if (task.end != null) pois.AddRange(task.end);
+                pois.AddRange(task.end);
 
-                string pngPath = Path.Combine(runFolderPath, pngFilename);
-                AnalyticsManager.ExportHeatMap(allAgentPositions, pois, pngPath);
+                AnalyticsManager.ExportHeatMap(allAgentPositions, pois, Path.Combine(runFolderPath, pngFilename));
             }
             catch (Exception ex)
             {
@@ -1291,14 +1393,6 @@ namespace Assets.Scripts.DataRecording
             }
         }
 
-        /// <summary>
-        /// Uniformly subsamples a trajectory down to at most maxPoints, keeping the first and
-        /// last point. Exists because AnalyticsManager.ExportHeatMap's dwell-time coloring is
-        /// O(n^2) in trajectory length, and trajectory.Add() in ImitationAgent.Update() runs
-        /// every frame (not just every observation-sampling tick) - an uncapped near-timeout
-        /// episode can have thousands of points, turning one heatmap export into a multi-second
-        /// main-thread stall.
-        /// </summary>
         private static List<Vector3> SubsampleTrajectory(List<Vector3> trajectory, int maxPoints)
         {
             if (maxPoints <= 0 || trajectory.Count <= maxPoints) return new List<Vector3>(trajectory);
@@ -1340,7 +1434,8 @@ namespace Assets.Scripts.DataRecording
             "mean_speed_mps", "max_window_speed_mps", "max_step_m", "final_dist_to_goal_m",
             "collision_count", "collision_events", "steps_to_first_collision", "seconds_to_first_collision",
             "stall_seconds", "stall_events", "longest_stall_s", "longest_stall_pos",
-            "nudge_count", "png_filename", "trajectory_file", "error_message"
+            "nudge_count", "png_filename", "trajectory_file", "error_message",
+            "spawn_yaw_deg"
         };
 
         private class EpisodeRecord
@@ -1362,6 +1457,7 @@ namespace Assets.Scripts.DataRecording
             public List<float> poiTimes;
             public float startOffsetM;
             public float startHeadingJitterDeg;
+            public float spawnYawDeg;
             public int collisionEvents;
             public int stallEvents;
             public float longestStallS;
@@ -1404,7 +1500,7 @@ namespace Assets.Scripts.DataRecording
                 poiTimesJoined = string.Join("|", parts);
             }
 
-            // One NavMesh length per route leg (start -> POI_0, ..., POI_last -> end); they sum to optimal_path_length_m.
+            // One NavMesh length per route leg (spawn -> POI_0, ..., POI_last -> end); they sum to optimal_path_length_m.
             string optimalSegmentsJoined = "";
             if (r.optimalSegmentsM != null && r.optimalSegmentsM.Count > 0)
             {
@@ -1414,7 +1510,7 @@ namespace Assets.Scripts.DataRecording
             }
 
             // Model identity, nudge and collision columns only exist for ImitationAgent (a NavMeshAgent cannot touch a wall).
-            bool imitation = agentKind == AgentKind.Imitation;
+            bool imitation = entry.agentKind == AgentKind.Imitation;
             string[] cells =
             {
                 I(episodeIndex),
@@ -1422,12 +1518,12 @@ namespace Assets.Scripts.DataRecording
                 I(r.agentId),
                 DateTime.Now.ToString("o", CultureInfo.InvariantCulture),
                 HarnessVersion,
-                agentKind.ToString(),
+                entry.agentKind.ToString(),
                 ConditionName(),
-                UnityEngine.SceneManagement.SceneManager.GetActiveScene().name,
-                ModelName(),
+                sceneName,
+                imitation ? entry.modelAsset.name : "",
                 modelSha256,
-                ReadDiskModelMtime(),
+                modelFileMtime,
                 I(r.seed),
                 randomizeMarkersPerConfiguration ? "randomized" : "fixed",
                 F(simulationSpeed),
@@ -1470,22 +1566,17 @@ namespace Assets.Scripts.DataRecording
                 imitation ? I(r.nudgeCount) : "",
                 r.png ?? "",
                 r.trajectoryFile ?? "",
-                r.error ?? ""
+                r.error ?? "",
+                F(r.spawnYawDeg)
             };
 
             csvWriter.WriteLine(string.Join(";", cells));
             csvWriter.Flush();
         }
 
-        private void RestoreTimeSettings()
-        {
-            Time.timeScale = 1f;
-            if (previousMaximumDeltaTime > 0f) Time.maximumDeltaTime = previousMaximumDeltaTime;
-        }
-
         void OnDestroy()
         {
-            RestoreTimeSettings();
+            RestoreEngineSettings();
             foreach (ActiveEpisode ep in activeEpisodes) CloseTickWriters(ep);
             if (csvWriter != null)
             {
@@ -1493,6 +1584,9 @@ namespace Assets.Scripts.DataRecording
                 csvWriter.Close();
                 csvWriter = null;
             }
+            // Play mode reverts the moved start marker on exit; outside the Editor, put it back explicitly.
+            if (task != null && baseStartPositions != null && HasMarkers(task.start))
+                task.start[0].transform.position = baseStartPositions[0];
         }
     }
 }

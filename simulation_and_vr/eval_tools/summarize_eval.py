@@ -148,7 +148,8 @@ def main():
     ap.add_argument("--csv", help="also write the summary table to this CSV")
     args = ap.parse_args()
 
-    runs = args.runs or sorted(glob.glob(os.path.join(args.root, "EvalRun_*")))
+    runs = args.runs or sorted(r for r in glob.glob(os.path.join(args.root, "EvalRun_*")) +
+                               glob.glob(os.path.join(args.root, "EvalQueue_*", "EvalRun_*")) if "_incomplete_" not in r)
     runs = [r for r in runs if os.path.exists(os.path.join(r, "episodes.csv"))]
     if not runs:
         raise SystemExit("No EvalRun_* folders with episodes.csv found.")

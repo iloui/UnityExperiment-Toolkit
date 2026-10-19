@@ -149,6 +149,11 @@ SOURCE_HUMAN = "human"
 SOURCE_SYNTHETIC = "synthetic"
 EPISODE_SOURCES = (SOURCE_HUMAN, SOURCE_SYNTHETIC)
 INPUT_MODE_DESKTOP = "desktop"
+# manifest["trial"]: where a human episode sits in the design (ParticipantSession; methodology 3.8).
+TASK_ROLE_TRAIN = "train"
+TASK_ROLE_TEST = "test"
+TASK_ROLES = (TASK_ROLE_TRAIN, TASK_ROLE_TEST)
+FOLDS = (1, 2)
 
 # Manifest key -> accepted Python type(s) after json.load.
 _NUMBER = (int, float)
@@ -263,6 +268,12 @@ def check_manifest(manifest: Dict[str, Any], source: str = "manifest") -> None:
         problems.append("'participant_id' is 'unknown'")
     if manifest["source"] not in EPISODE_SOURCES:
         problems.append(f"'source' is {manifest['source']!r}, expected one of {EPISODE_SOURCES}")
+    if manifest["source"] == SOURCE_HUMAN:
+        trial = manifest.get("trial")
+        if (not isinstance(trial, dict) or trial.get("task_role") not in TASK_ROLES or not trial.get("task_id")
+                or trial.get("fold") not in FOLDS):
+            problems.append("human episode without session labels ('trial' needs task_id, task_role in "
+                            f"{TASK_ROLES} and fold in {FOLDS}) - record humans through ParticipantSession")
     if manifest["repetition_index"] < 0:
         problems.append("'repetition_index' is negative")
     if manifest["frame_count"] <= 0:

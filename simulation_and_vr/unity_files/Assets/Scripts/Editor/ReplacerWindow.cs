@@ -12,7 +12,7 @@ public class ReplacerWindow : EditorWindow
 
     private GameObject[] current;
 
-    [MenuItem("Tools/Replacer")]
+    [MenuItem(Assets.Scripts.Editor.ToolsMenu.Utilities + "Replacer", priority = Assets.Scripts.Editor.ToolsMenu.UtilitiesWindowPriority + 1)]
     static void Init()
     {
         // Get existing open window or if none, make a new one:

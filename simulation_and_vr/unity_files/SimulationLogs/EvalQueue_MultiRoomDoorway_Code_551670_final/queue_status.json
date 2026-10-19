@@ -1,0 +1,33 @@
+{
+    "state": "done",
+    "queue_name": "final",
+    "scene": "MultiRoomDoorway_Code_551670",
+    "started_at": "2026-10-05T13:49:41.9436930+02:00",
+    "updated_at": "2026-10-05T16:10:24.6620380+02:00",
+    "entry": 16,
+    "entries": 16,
+    "current": "",
+    "episodes_done_in_current": 0,
+    "episodes_per_entry": 20,
+    "elapsed_min": 140.71078491210938,
+    "estimated_remaining_min": 0.0,
+    "sim_speed_vs_real": 2.997605562210083,
+    "results": [
+        "ShortestPath: 20/20 successful, 0 timeouts, 0 other (3 min)",
+        "ImitationAgent_A_proprio2_s1: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_A_proprio2_s2: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_A_proprio2_s3: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_B_proprio2_f1_s1: 7/20 successful, 13 timeouts, 0 other (9 min)",
+        "ImitationAgent_B_proprio2_f1_s2: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_B_proprio2_f1_s3: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_B_proprio2_f2_s1: 13/20 successful, 7 timeouts, 0 other (8 min)",
+        "ImitationAgent_B_proprio2_f2_s2: 0/20 successful, 20 timeouts, 0 other (10 min)",
+        "ImitationAgent_B_proprio2_f2_s3: 1/20 successful, 19 timeouts, 0 other (10 min)",
+        "ImitationAgent_C_proprio2_f1_s1: 11/20 successful, 9 timeouts, 0 other (7 min)",
+        "ImitationAgent_C_proprio2_f1_s2: 5/20 successful, 15 timeouts, 0 other (10 min)",
+        "ImitationAgent_C_proprio2_f1_s3: 9/20 successful, 11 timeouts, 0 other (9 min)",
+        "ImitationAgent_C_proprio2_f2_s1: 11/20 successful, 9 timeouts, 0 other (8 min)",
+        "ImitationAgent_C_proprio2_f2_s2: 16/20 successful, 4 timeouts, 0 other (7 min)",
+        "ImitationAgent_C_proprio2_f2_s3: 2/20 successful, 18 timeouts, 0 other (10 min)"
+    ]
+}

@@ -24,14 +24,14 @@ namespace Assets.Scripts.Editor
     /// Exits with code 0 on a pass and a non-zero code on any failure (mismatch, or the Python
     /// side failing to run), so it fails loudly in CI rather than silently skipping.
     ///
-    /// Also runnable interactively via Tools/Imitation Agent/Run Sensory Tensor Parity Test.
+    /// Also runnable interactively via Tools > Imitation Learning Agent > Advanced > Run Sensory Tensor Parity Test.
     /// </summary>
     internal static class SensoryTensorParityTest
     {
         private const int Seed = 1234;
         private const float FloatTolerance = 1e-4f;
 
-        [MenuItem("Tools/Imitation Agent/Run Sensory Tensor Parity Test")]
+        [MenuItem(ToolsMenu.ImitationAdvanced + "Run Sensory Tensor Parity Test", priority = ToolsMenu.ImitationAdvancedPriority + 1)]
         public static void RunSensoryTensorParityTestMenuItem()
         {
             RunSensoryTensorParityTest();

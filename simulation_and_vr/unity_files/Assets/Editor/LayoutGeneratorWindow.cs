@@ -20,7 +20,7 @@ namespace Assets.Scripts.Editor
         private float wallHeight = 3.5f;
         private GameObject fpsControllerPrefab;
 
-        [MenuItem("Tools/Generate Layout")]
+        [MenuItem(ToolsMenu.GenerativeDesign + "Generate Layout...", priority = ToolsMenu.GenerativeDesignPriority)]
         public static void ShowWindow()
         {
             GetWindow<LayoutGeneratorWindow>(WindowTitle);
@@ -154,7 +154,7 @@ namespace Assets.Scripts.Editor
                 layoutInfo.seedCode = finalSeedCode;
                 AgentLinker.SpawnAndWireParticipants(root.transform, settings, layoutData);
                 // Bakes the NavMesh, places Start/POI_0/End + the TaskScript and puts the FPSController on Start at the
-                // contract eye height (the same steps as Tools > Thesis > Prepare Scene).
+                // contract eye height (the same steps as Tools > Scene Preparation > Prepare Scene).
                 ScenePreparation.Prepare(scene);
 
                 string sceneFileName = $"{topology}_Code_{internalSeed}";

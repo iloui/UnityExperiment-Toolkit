@@ -20,25 +20,25 @@ namespace Assets.Scripts.Editor
 
         #region Selection
 
-        [MenuItem("Tools/Select/All", priority = 50)]
+        [MenuItem(ToolsMenu.Select + "All", priority = ToolsMenu.SelectPriority + 50)]
         public static void SelectAll()
         {
             SelectByMatchingComponents(comps => true);
         }
 
-        [MenuItem("Tools/Select/Empty", priority = 51)]
+        [MenuItem(ToolsMenu.Select + "Empty", priority = ToolsMenu.SelectPriority + 51)]
         public static void SelectEmpty()
         {
             SelectByMatchingComponents(comps => comps.Count == 0 || (comps.Count == 1 && comps[0] is Transform));
         }
 
-        [MenuItem("Tools/Select/Non Empty", priority = 52)]
+        [MenuItem(ToolsMenu.Select + "Non Empty", priority = ToolsMenu.SelectPriority + 52)]
         public static void SelectNonEmpty()
         {
             SelectByMatchingComponents(comps => comps.Count > 1);
         }
 
-        [MenuItem("Tools/Select/Invert Selection", priority = 53)]
+        [MenuItem(ToolsMenu.Select + "Invert Selection", priority = ToolsMenu.SelectPriority + 53)]
         public static void InvertSelection()
         {
             goLookup.Clear();
@@ -71,19 +71,19 @@ namespace Assets.Scripts.Editor
 
         #region Render selection
 
-        [MenuItem("Tools/Select/Renderer/Any", priority = 100)]
+        [MenuItem(ToolsMenu.Select + "Renderer/Any", priority = ToolsMenu.SelectPriority + 100)]
         public static void SelectRenderer()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Renderer));
         }
 
-        [MenuItem("Tools/Select/Renderer/Mesh Renderer", priority = 101)]
+        [MenuItem(ToolsMenu.Select + "Renderer/Mesh Renderer", priority = ToolsMenu.SelectPriority + 101)]
         public static void SelectMeshRenderer()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is MeshRenderer));
         }
 
-        [MenuItem("Tools/Select/Renderer/Skinned Mesh Renderer", priority = 102)]
+        [MenuItem(ToolsMenu.Select + "Renderer/Skinned Mesh Renderer", priority = ToolsMenu.SelectPriority + 102)]
         public static void SelectSkinnedMeshRenderer()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is SkinnedMeshRenderer));
@@ -93,49 +93,49 @@ namespace Assets.Scripts.Editor
 
         #region Collider selection
 
-        [MenuItem("Tools/Select/Collider/Any", priority = 110)]
+        [MenuItem(ToolsMenu.Select + "Collider/Any", priority = ToolsMenu.SelectPriority + 110)]
         public static void SelectCollider()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Collider));
         }
 
-        [MenuItem("Tools/Select/Collider/Box", priority = 111)]
+        [MenuItem(ToolsMenu.Select + "Collider/Box", priority = ToolsMenu.SelectPriority + 111)]
         public static void SelectBoxCollider()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is BoxCollider));
         }
 
-        [MenuItem("Tools/Select/Collider/Sphere", priority = 112)]
+        [MenuItem(ToolsMenu.Select + "Collider/Sphere", priority = ToolsMenu.SelectPriority + 112)]
         public static void SelectSphereCollider()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is SphereCollider));
         }
 
-        [MenuItem("Tools/Select/Collider/Capsule", priority = 113)]
+        [MenuItem(ToolsMenu.Select + "Collider/Capsule", priority = ToolsMenu.SelectPriority + 113)]
         public static void SelectCapsuleCollider()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is CapsuleCollider));
         }
 
-        [MenuItem("Tools/Select/Collider/Terrain", priority = 114)]
+        [MenuItem(ToolsMenu.Select + "Collider/Terrain", priority = ToolsMenu.SelectPriority + 114)]
         public static void SelectTerrainCollider()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is TerrainCollider));
         }
 
-        [MenuItem("Tools/Select/Collider/Mesh", priority = 115)]
+        [MenuItem(ToolsMenu.Select + "Collider/Mesh", priority = ToolsMenu.SelectPriority + 115)]
         public static void SelectMeshCollider()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is MeshCollider));
         }
 
-        [MenuItem("Tools/Select/Collider/Convex Mesh", priority = 116)]
+        [MenuItem(ToolsMenu.Select + "Collider/Convex Mesh", priority = ToolsMenu.SelectPriority + 116)]
         public static void SelectConvexMeshCollider()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is MeshCollider m && m.convex));
         } 
 
-        [MenuItem("Tools/Select/Collider/Concave Mesh", priority = 117)]
+        [MenuItem(ToolsMenu.Select + "Collider/Concave Mesh", priority = ToolsMenu.SelectPriority + 117)]
         public static void SelectConcaveMeshCollider()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is MeshCollider m && m.convex));
@@ -145,43 +145,43 @@ namespace Assets.Scripts.Editor
 
         #region Light selection
 
-        [MenuItem("Tools/Select/Lights/Any", priority = 120)]
+        [MenuItem(ToolsMenu.Select + "Lights/Any", priority = ToolsMenu.SelectPriority + 120)]
         public static void SelectLight()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Light));
         }
 
-        [MenuItem("Tools/Select/Lights/Point", priority = 121)]
+        [MenuItem(ToolsMenu.Select + "Lights/Point", priority = ToolsMenu.SelectPriority + 121)]
         public static void SelectPointLight()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Light l && l.type == LightType.Point));
         }
 
-        [MenuItem("Tools/Select/Lights/Spot", priority = 122)]
+        [MenuItem(ToolsMenu.Select + "Lights/Spot", priority = ToolsMenu.SelectPriority + 122)]
         public static void SelectSpotLight()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Light l && l.type == LightType.Spot));
         }
 
-        [MenuItem("Tools/Select/Lights/Directional", priority = 123)]
+        [MenuItem(ToolsMenu.Select + "Lights/Directional", priority = ToolsMenu.SelectPriority + 123)]
         public static void SelectDirectionalLight()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Light l && l.type == LightType.Directional));
         }
 
-        [MenuItem("Tools/Select/Lights/Area", priority = 124)]
+        [MenuItem(ToolsMenu.Select + "Lights/Area", priority = ToolsMenu.SelectPriority + 124)]
         public static void SelectAreaLight()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Light l && l.type == LightType.Area));
         }
 
-        [MenuItem("Tools/Select/Lights/Rectangle", priority = 125)]
+        [MenuItem(ToolsMenu.Select + "Lights/Rectangle", priority = ToolsMenu.SelectPriority + 125)]
         public static void SelectRectangleLight()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Light l && l.type == LightType.Rectangle));
         }
 
-        [MenuItem("Tools/Select/Lights/Disc", priority = 126)]
+        [MenuItem(ToolsMenu.Select + "Lights/Disc", priority = ToolsMenu.SelectPriority + 126)]
         public static void SelectDiscLight()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Light l && l.type == LightType.Disc));
@@ -191,7 +191,7 @@ namespace Assets.Scripts.Editor
 
         #region Other Selection
 
-        [MenuItem("Tools/Select/Rigid body", priority = 1000)]
+        [MenuItem(ToolsMenu.Select + "Rigid body", priority = ToolsMenu.SelectPriority + 1000)]
         public static void SelectRigidBody()
         {
             SelectByMatchingComponents(comps => comps.Count > 1 && comps.Any(c => c is Rigidbody));

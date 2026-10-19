@@ -65,6 +65,29 @@ namespace Assets.Scripts.DataRecording
         }
 
         /// <summary>
+        /// Spawn heading (Unity yaw in degrees, 0 = +z, clockwise from above) shared by every mover: towards the first
+        /// corner of the NavMesh shortest path from `from` to `target`. This is the rule the participant session used for
+        /// every human start (HumanTaskGenerator.StartYaw), so agents and participants begin a task looking the same way.
+        /// Falls back to the straight line to `target` if there is no complete path.
+        /// </summary>
+        public static float StartYawAlongPath(Vector3 from, Vector3 target)
+        {
+            Vector3 facing = target - from;
+            if (UnityEngine.AI.NavMesh.SamplePosition(from, out UnityEngine.AI.NavMeshHit fromHit, 2f, UnityEngine.AI.NavMesh.AllAreas) &&
+                UnityEngine.AI.NavMesh.SamplePosition(target, out UnityEngine.AI.NavMeshHit toHit, 2f, UnityEngine.AI.NavMesh.AllAreas))
+            {
+                var path = new UnityEngine.AI.NavMeshPath();
+                if (UnityEngine.AI.NavMesh.CalculatePath(fromHit.position, toHit.position, UnityEngine.AI.NavMesh.AllAreas, path) &&
+                    path.status == UnityEngine.AI.NavMeshPathStatus.PathComplete && path.corners.Length > 1)
+                {
+                    facing = path.corners[1] - path.corners[0];
+                }
+            }
+            facing.y = 0f;
+            return facing.sqrMagnitude > 1e-6f ? Quaternion.LookRotation(facing).eulerAngles.y : 0f;
+        }
+
+        /// <summary>
         /// Advances the tracker's state based on the mover's current position. Call once per
         /// tick (every Update() for a continuously-moving agent, once per recorder sample for
         /// a periodically-sampled recording) - arrival radius and progression rules are

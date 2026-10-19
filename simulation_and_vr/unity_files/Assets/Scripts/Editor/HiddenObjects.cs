@@ -10,7 +10,7 @@ namespace Assets.Scripts.Editor
 {
     public static class HiddenObjects
     {
-        [MenuItem("Tools/Objects/Make hidden visible")]
+        [MenuItem(ToolsMenu.Objects + "Make hidden visible", priority = ToolsMenu.ObjectsPriority + 0)]
         public static void MakeHiddenObjectsVisible()
         {
             var gos = GameObject.FindObjectsOfType<GameObject>();
@@ -23,7 +23,7 @@ namespace Assets.Scripts.Editor
             }
         }
 
-        [MenuItem("Tools/Objects/Make selection invisible")]
+        [MenuItem(ToolsMenu.Objects + "Make selection invisible", priority = ToolsMenu.ObjectsPriority + 1)]
         public static void MakeSelectionInvisible()
         {
             var gos = Selection.gameObjects;
@@ -33,7 +33,7 @@ namespace Assets.Scripts.Editor
             }
         }
 
-        [MenuItem("Tools/Objects/Make selection editable")]
+        [MenuItem(ToolsMenu.Objects + "Make selection editable", priority = ToolsMenu.ObjectsPriority + 2)]
         public static void MakeSelectionEditable()
         {
             var gos = Selection.gameObjects;
@@ -43,7 +43,7 @@ namespace Assets.Scripts.Editor
             }
         }
 
-        [MenuItem("Tools/Objects/Make selection non editable")]
+        [MenuItem(ToolsMenu.Objects + "Make selection non editable", priority = ToolsMenu.ObjectsPriority + 3)]
         public static void MakeSelectionNonEditable()
         {
             var gos = Selection.gameObjects;

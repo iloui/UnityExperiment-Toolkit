@@ -29,7 +29,7 @@ namespace Assets.Scripts.Editor
 
         private bool moveChildren = false;
 
-        [MenuItem("Tools/Set Position")]
+        [MenuItem(ToolsMenu.Utilities + "Set Position", priority = ToolsMenu.UtilitiesWindowPriority)]
         static void Init()
         {
             // Get existing open window or if none, make a new one:

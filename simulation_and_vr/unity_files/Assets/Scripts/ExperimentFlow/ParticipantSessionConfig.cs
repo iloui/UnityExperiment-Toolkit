@@ -7,9 +7,10 @@ namespace Assets.Scripts.ExperimentFlow
 {
     /// <summary>
     /// Everything that defines a human recording session, so every participant gets the same procedure: which practice
-    /// scene and layout scenes, how many repetitions, and the on-screen instructions. ParticipantSession reads it; the
-    /// layout order per participant is derived from the participant number (see SessionSchedule), never set by hand.
-    /// Create it with Tools > Recording > Create Participant Session Scene.
+    /// scene and layout scenes, how many training tasks per layout, and the on-screen instructions. ParticipantSession reads it; the
+    /// layout order, the training-task order and the fold per participant are derived from the participant number (see
+    /// SessionSchedule), never set by hand. The tasks themselves live in each layout scene's HumanTaskSet.
+    /// Create it with Tools > Imitation Learning Agent > 2 · Record Human Walks > Create Participant Session Scene.
     /// </summary>
     [CreateAssetMenu(fileName = "ParticipantSessionConfig", menuName = "Recording/Participant Session Config")]
     public class ParticipantSessionConfig : ScriptableObject
@@ -18,7 +19,7 @@ namespace Assets.Scripts.ExperimentFlow
         [Header("Scenes")]
         [Tooltip("Untracked practice run. Must be a layout scene (FPSController + ParticipantRecorder + TaskScript) that is NOT one of the layout scenes below.")]
         public SceneAsset practiceScene;
-        [Tooltip("The layouts every participant walks, each 'repetitions' times. Order is counterbalanced per participant (balanced Latin square).")]
+        [Tooltip("The layouts every participant walks: the training tasks of the scene's HumanTaskSet, then its test task. Layout order is counterbalanced per participant (balanced Latin square).")]
         public SceneAsset[] layoutScenes = new SceneAsset[3];
 #endif
         [Tooltip("Filled from the scene fields above (a build has no SceneAsset).")]
@@ -26,19 +27,13 @@ namespace Assets.Scripts.ExperimentFlow
         [SerializeField] private string[] layoutScenePaths = new string[0];
 
         [Header("Procedure")]
-        [Min(1)] public int repetitions = 3;
+        [Tooltip("Training tasks walked per layout before the test task (methodology 3.8.2). Every layout scene's HumanTaskSet must have exactly this many.")]
+        [Min(1)] public int trainingTasksPerLayout = 3;
         [Tooltip("Participant IDs must match this regex. The trailing number selects the Latin-square row.")]
         public string participantIdPattern = @"^P\d{2,3}$";
         [Tooltip("Allow a session for an ID that already has completed episodes in the session log (e.g. to resume). " +
                  "Off: such an ID is refused, so a typo can't mix two people under one ID.")]
         public bool allowExistingParticipant = false;
-
-        [Header("Retraining")]
-        [Tooltip("After the last episode of a finished session, start one full retrain of the discrete model on everything in " +
-                 "zarr_recordings (RetrainPipeline; held-out participants in splits.json are excluded).")]
-        public bool retrainAfterSession = true;
-        [Tooltip("Also retrain when the session ends early (error, or Play mode stopped) after at least one completed episode.")]
-        public bool retrainOnAbort = false;
 
         [Header("Experimenter keys")]
         [Tooltip("Aborts the running trial (or skips practice). An aborted episode is moved out of zarr_recordings and the trial is repeated.")]
@@ -53,10 +48,11 @@ namespace Assets.Scripts.ExperimentFlow
         [Header("Instructions")]
         [TextArea(6, 20)]
         public string instructions =
-            "In each run you start in a building.\n\n" +
+            "You will walk through three buildings, four runs in each (12 runs in total).\n\n" +
+            "In every run:\n" +
             "1. Walk to the sphere labelled POI.\n" +
             "2. Then walk to the sphere labelled EXIT. The run ends when you reach it.\n\n" +
-            "Walk the way you naturally would. There is no time limit.\n\n" +
+            "The spheres are in different places in every run. Walk the way you naturally would. There is no time limit.\n\n" +
             "Controls: W A S D to walk, mouse to look around.\n\n" +
             "First comes a practice run that is not recorded.";
 

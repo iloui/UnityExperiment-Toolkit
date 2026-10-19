@@ -1,7 +1,0 @@
-{
-  "attributes": {
-    "manifest": "{\"schema_version\": \"zarr-v1\", \"episode_id\": \"episode_20260922_113247_530\", \"participant_id\": \"unknown\", \"session_id\": \"unknown\", \"frame_count\": 344, \"start_time\": 399.0563659667969, \"end_time\": 434.076904296875, \"image_width\": 64, \"image_height\": 64, \"total_pixels\": 4096, \"temporal_window_size\": 1, \"sampling_interval_s\": 0.10000000149011612, \"max_ray_distance\": 50.0, \"horizontal_fov_deg\": 90.0, \"vertical_fov_deg\": 90.0, \"arrays\": [{\"name\": \"rgb\", \"shape\": [0, 64, 64, 3], \"dtype\": \"uint8\"}, {\"name\": \"depth\", \"shape\": [0, 64, 64], \"dtype\": \"float32\"}, {\"name\": \"goal\", \"shape\": [0, 3], \"dtype\": \"float32\"}, {\"name\": \"goal_distance\", \"shape\": [0], \"dtype\": \"float32\"}, {\"name\": \"pose\", \"shape\": [0, 3], \"dtype\": \"float32\"}, {\"name\": \"action_vel\", \"shape\": [0, 3], \"dtype\": \"float32\"}, {\"name\": \"action_rot\", \"shape\": [0, 3], \"dtype\": \"float32\"}, {\"name\": \"timestamp\", \"shape\": [0], \"dtype\": \"float64\"}]}"
-  },
-  "zarr_format": 3,
-  "node_type": "group"
-}

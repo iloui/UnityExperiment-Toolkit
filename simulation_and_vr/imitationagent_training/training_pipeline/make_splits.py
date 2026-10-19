@@ -1,99 +1,199 @@
-"""Participant-level splits for the A/B/C experiment, written once after all human sessions are recorded.
+"""Fold x task splits for the A/B/C experiment (methodology 3.8), written once after all human sessions are recorded.
 
-Reads every human manifest in --recordings_dir and writes
+Every human manifest already carries its design labels (manifest["trial"], written by ParticipantSession): the
+participant fold (1 = odd participant numbers, 2 = even), the task walked (task_id "train_0".."train_2" or "test",
+task_role "train"/"test") and whether condition C leaves this training task out (c_excluded). This script only
+collects and checks them and writes
 
-    {"heldout": [...], "train": [...], "subset_B": [...], "seed": ..., "episodes_per_participant": {...}}
+    {"design": "folds_x_tasks_v1",
+     "folds": {"1": [participants], "2": [participants]},
+     "c_excluded": {scene_name: task_id},
+     "test_episodes": {"1": [episode ids], "2": [...]},      # each fold's test-task walks = the human reference
+     "episodes_per_participant": {...}, "repeats": [...]}
 
-- heldout: never trained or validated on; the human baseline for EvalHarness.
-- train: the humans of condition C (every training participant).
-- subset_B: the humans of condition B, a subset of train.
-Condition A uses no humans. Participants are sorted, shuffled with --seed and cut by the counts, so the same seed,
-counts and participant set always give the same file. dryrun_* participants (ParticipantSession dry runs) are ignored.
+A model trained on fold f never loads the other fold's participants; the other fold's test_episodes are its reference.
 
-    python make_splits.py --n_heldout 4 --n_subset_B 4 --seed 1
+    A: synthetic only (no humans, no fold)
+    B: synthetic + fold f humans, the three training tasks per layout
+    C: synthetic + fold f humans, the test task + the two training tasks that are not c_excluded
+
+B and C have the same participants and the same number of episodes; they differ only in whether the evaluated route was
+seen. dryrun_* participants are ignored.
+
+    python make_splits.py
 """
 import argparse
 import json
-import random
+import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
-from data_contract import SOURCE_HUMAN, read_manifest
+from data_contract import FOLDS, SOURCE_HUMAN, TASK_ROLE_TEST, TASK_ROLE_TRAIN, read_manifest
 
+DESIGN = "folds_x_tasks_v1"
 DRY_RUN_PREFIX = "dryrun_"
 CONDITIONS = ("A", "B", "C")
+HUMAN_CONDITIONS = ("B", "C")
+TRAINING_TASKS_PER_LAYOUT = 3
+LAYOUT_DIR = Path(__file__).resolve().parents[2] / "eval_tools" / "layouts"
 
 
-def human_participants(recordings_dir: Path) -> dict:
-    """{participant_id: episode count} over every human manifest in recordings_dir (dry runs excluded).
-    Raises on an invalid manifest, like load_episodes, so a broken episode can't silently drop a participant."""
-    counts = {}
+def human_episodes(recordings_dir: Path) -> list:
+    """[(episode_dir, manifest)] of every human, non-dry-run episode. Raises on an invalid manifest (read_manifest),
+    so a broken episode can't silently drop out of a condition."""
+    result = []
     for ep in sorted(p for p in recordings_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
         manifest = read_manifest(ep)
-        pid = manifest["participant_id"]
-        if manifest["source"] == SOURCE_HUMAN and not pid.startswith(DRY_RUN_PREFIX):
-            counts[pid] = counts.get(pid, 0) + 1
-    return counts
+        if manifest["source"] == SOURCE_HUMAN and not manifest["participant_id"].startswith(DRY_RUN_PREFIX):
+            result.append((ep, manifest))
+    return result
 
 
-def make_splits(participants, n_heldout: int, n_subset_b: int, seed: int) -> dict:
-    ids = sorted(participants)
-    n_train = len(ids) - n_heldout
-    if n_heldout < 1 or n_train < 2:
-        raise ValueError(f"{len(ids)} participants: need n_heldout >= 1 and at least 2 left for training "
-                         f"(n_heldout={n_heldout})")
-    if not 1 <= n_subset_b < n_train:
-        raise ValueError(f"n_subset_B must be in [1, {n_train - 1}] so that B has fewer humans than C (got {n_subset_b})")
-    random.Random(seed).shuffle(ids)
-    heldout, train = ids[:n_heldout], ids[n_heldout:]
-    return {"heldout": sorted(heldout), "train": sorted(train), "subset_B": sorted(train[:n_subset_b]), "seed": seed}
+def participant_number(pid: str) -> int:
+    m = re.search(r"(\d+)$", pid)
+    if not m:
+        raise ValueError(f"participant id {pid!r} does not end in a number")
+    return int(m.group(1))
+
+
+def in_condition(trial: dict, condition: str) -> bool:
+    """Whether a human episode with these labels belongs to condition B or C (fold filtering is separate)."""
+    if condition == "B":
+        return trial["task_role"] == TASK_ROLE_TRAIN
+    if condition == "C":
+        return trial["task_role"] == TASK_ROLE_TEST or (trial["task_role"] == TASK_ROLE_TRAIN and not trial["c_excluded"])
+    return False
+
+
+def make_splits(episodes: list) -> tuple:
+    """-> (splits dict, problems list). Problems are design violations that would make B and C incomparable."""
+    problems = []
+    folds = defaultdict(set)
+    c_excluded = defaultdict(set)
+    walks = defaultdict(list)  # (pid, scene, task_id) -> episode ids
+    test_episodes = defaultdict(list)
+    repeats = []
+    per_participant = defaultdict(int)
+
+    for ep, m in episodes:
+        pid, scene, trial = m["participant_id"], m["scene_name"], m["trial"]
+        fold = trial["fold"]
+        expected_fold = 1 if participant_number(pid) % 2 else 2
+        if fold != expected_fold:
+            problems.append(f"{ep.name}: {pid} is labelled fold {fold}, but its number puts it in fold {expected_fold}")
+        folds[fold].add(pid)
+        per_participant[pid] += 1
+        walks[(pid, scene, trial["task_id"])].append(ep.name)
+        if trial["c_excluded"]:
+            c_excluded[scene].add(trial["task_id"])
+        if trial["task_role"] == TASK_ROLE_TEST:
+            test_episodes[fold].append(ep.name)
+        if trial.get("attempt_index", 0) > 0:
+            repeats.append({"episode": ep.name, "participant": pid, "scene": scene, "task_id": trial["task_id"],
+                            "attempt_index": trial["attempt_index"]})
+
+    both = folds[1] & folds[2]
+    if both:
+        problems.append(f"participants in both folds: {sorted(both)}")
+    for scene, tasks in sorted(c_excluded.items()):
+        if len(tasks) != 1:
+            problems.append(f"{scene}: episodes disagree on the C-excluded task {sorted(tasks)}")
+    c_map = {scene: next(iter(tasks)) for scene, tasks in c_excluded.items() if len(tasks) == 1}
+
+    # Cross-check with the generator's export (the tasks fixed before recording).
+    for scene, task_id in sorted(c_map.items()):
+        exported = LAYOUT_DIR / f"{scene}_human_tasks.json"
+        if exported.exists():
+            marked = [t["id"] for t in json.loads(exported.read_text())["tasks"] if t.get("c_excluded")]
+            if marked != [task_id]:
+                problems.append(f"{scene}: manifests say C leaves out {task_id}, {exported.name} says {marked}")
+
+    # Every participant walks every task of every layout exactly once.
+    scenes = sorted({m["scene_name"] for _, m in episodes})
+    task_ids = [f"train_{i}" for i in range(TRAINING_TASKS_PER_LAYOUT)] + ["test"]
+    for pid in sorted(per_participant):
+        for scene in scenes:
+            for task_id in task_ids:
+                n = len(walks.get((pid, scene, task_id), []))
+                if n != 1:
+                    problems.append(f"{pid} {scene} {task_id}: {n} completed walks (expected 1)"
+                                    + (f" {walks[(pid, scene, task_id)]}" if n > 1 else ""))
+    for scene in scenes:
+        if scene not in c_map:
+            problems.append(f"{scene}: no episode marks a C-excluded task")
+
+    splits = {
+        "design": DESIGN,
+        "folds": {str(f): sorted(folds[f]) for f in FOLDS},
+        "c_excluded": dict(sorted(c_map.items())),
+        "test_episodes": {str(f): sorted(test_episodes[f]) for f in FOLDS},
+        "episodes_per_participant": dict(sorted(per_participant.items())),
+        "repeats": repeats,
+    }
+    return splits, problems
 
 
 def load_splits(path: str) -> dict:
-    """Read and check splits.json: heldout and train disjoint, subset_B a strict subset of train."""
+    """Read and check splits.json (fold x task design): two disjoint, non-empty folds."""
     with open(path) as f:
         splits = json.load(f)
-    missing = [k for k in ("heldout", "train", "subset_B") if not isinstance(splits.get(k), list)]
-    if missing:
-        raise ValueError(f"{path}: missing list(s) {missing} - write it with make_splits.py")
-    heldout, train, subset_b = set(splits["heldout"]), set(splits["train"]), set(splits["subset_B"])
-    problems = []
-    if heldout & train:
-        problems.append(f"participants both held out and training: {sorted(heldout & train)}")
-    if not subset_b < train:
-        problems.append(f"subset_B is not a strict subset of train (extra: {sorted(subset_b - train)})")
-    if problems:
-        raise ValueError(f"{path}: " + "; ".join(problems))
+    if splits.get("design") != DESIGN:
+        raise ValueError(f"{path}: design is {splits.get('design')!r}, expected {DESIGN!r} - rewrite it with make_splits.py")
+    folds = {int(k): set(v) for k, v in splits["folds"].items()}
+    if set(folds) != set(FOLDS):
+        raise ValueError(f"{path}: folds {sorted(folds)}, expected {list(FOLDS)}")
+    if folds[1] & folds[2]:
+        raise ValueError(f"{path}: participants in both folds: {sorted(folds[1] & folds[2])}")
     return splits
 
 
-def condition_humans(splits: dict, condition: str) -> list:
-    """Human participants condition trains (and validates) on: A none, B subset_B, C train. Never a held-out one."""
-    humans = {"A": [], "B": splits["subset_B"], "C": splits["train"]}[condition]
-    assert not set(humans) & set(splits["heldout"])
-    return sorted(humans)
+def condition_humans(splits: dict, condition: str, fold: int) -> list:
+    """Participants a condition trains (and validates) on: none for A, the fold's participants for B and C."""
+    if condition == "A":
+        return []
+    return sorted(splits["folds"][str(fold)])
+
+
+def heldout_humans(splits: dict, condition: str, fold: int) -> list:
+    """Participants a model must never load: the other fold (A: every participant, it loads no humans)."""
+    if condition == "A":
+        return sorted(p for f in FOLDS for p in splits["folds"][str(f)])
+    return sorted(splits["folds"][str(3 - fold)])
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Write participant-level splits.json for conditions A/B/C.")
+    parser = argparse.ArgumentParser(description="Write the fold x task splits.json for conditions A/B/C.")
     parser.add_argument("--recordings_dir", type=str, default="../zarr_recordings")
     parser.add_argument("--output", type=str, default="../splits.json")
-    parser.add_argument("--n_heldout", type=int, required=True, help="Participants never trained on (human baseline).")
-    parser.add_argument("--n_subset_B", type=int, required=True, help="Training participants used by condition B.")
-    parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--force", action="store_true", help="Overwrite an existing splits file.")
+    parser.add_argument("--allow_incomplete", action="store_true",
+                        help="Write the file despite missing/duplicate walks (e.g. a participant who dropped out).")
     args = parser.parse_args()
 
     out = Path(args.output)
     if out.exists() and not args.force:
         print(f"[ERROR] {out} exists. Models trained on it would no longer match; pass --force to overwrite.")
         sys.exit(1)
-    participants = human_participants(Path(args.recordings_dir))
-    splits = make_splits(participants, args.n_heldout, args.n_subset_B, args.seed)
-    splits["episodes_per_participant"] = dict(sorted(participants.items()))
+    episodes = human_episodes(Path(args.recordings_dir))
+    if not episodes:
+        print(f"[ERROR] No human episodes in {args.recordings_dir}.")
+        sys.exit(1)
+    splits, problems = make_splits(episodes)
+    for f in FOLDS:
+        print(f"[SPLITS] fold {f}: {splits['folds'][str(f)]} ({len(splits['test_episodes'][str(f)])} test-task walks)")
+    print(f"[SPLITS] C leaves out: {splits['c_excluded']}")
+    if splits["repeats"]:
+        print(f"[SPLITS] {len(splits['repeats'])} walks were repeats after an abort: "
+              + ", ".join(f"{r['participant']} {r['scene']} {r['task_id']}" for r in splits["repeats"]))
+    if problems:
+        print("[SPLITS] PROBLEMS:\n  " + "\n  ".join(problems))
+        if not args.allow_incomplete:
+            print("[ERROR] Not written. Fix the recordings, or pass --allow_incomplete if this is intended.")
+            sys.exit(1)
+    splits["problems_at_write"] = problems
     out.write_text(json.dumps(splits, indent=2))
-    print(f"[SPLITS] {len(participants)} participants -> heldout {splits['heldout']}, train {splits['train']}, "
-          f"subset_B {splits['subset_B']}\n[SPLITS] written to {out}")
+    print(f"[SPLITS] written to {out}")
 
 
 if __name__ == "__main__":

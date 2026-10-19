@@ -1,0 +1,17 @@
+{
+  "_doc": "Route side (methodology 3.9.3, H3). Per layout: the leg on which the route decision happens (0 = Start -> POI, 1 = POI -> End) and gate segments in world x/z metres. An episode's route side is the side of the first gate its body trajectory crosses on that leg. In both layouts the start -> POI leg has to pass the central obstacle either north (+z) or south (-z); each gate runs along x = 0 from inside the obstacle to the outer wall on one side.",
+  "CentralPillar_Code_102620": {
+    "leg": 0,
+    "gates": [
+      {"side": "north", "a": [0.0, 1.5], "b": [0.0, 15.0]},
+      {"side": "south", "a": [0.0, 1.5], "b": [0.0, -15.0]}
+    ]
+  },
+  "TJunction_Code_99835": {
+    "leg": 0,
+    "gates": [
+      {"side": "north", "a": [0.0, 0.0], "b": [0.0, 15.0]},
+      {"side": "south", "a": [0.0, 0.0], "b": [0.0, -15.0]}
+    ]
+  }
+}

@@ -1,0 +1,67 @@
+{
+    "harness_version": "7",
+    "agent_kind": "ShortestPath",
+    "condition": "",
+    "scene": "CentralPillar_Code_102620",
+    "started_at": "2026-10-05T11:29:58.2028650+02:00",
+    "unity_version": "2022.3.62f3",
+    "queue_name": "final",
+    "queue_entry_index": 0,
+    "queue_entries": 16,
+    "base_seed": 20261005,
+    "model_asset": "",
+    "model_sha256": "",
+    "model_disk_mtime_utc": "",
+    "model_fold": 0,
+    "model_seed": 0,
+    "model_splits_design": "",
+    "heldout_participants": [],
+    "configuration_count": 20,
+    "agents_per_configuration": 1,
+    "randomize_markers": false,
+    "simulation_speed": 3.0,
+    "episode_timeout_sim_s": 90.0,
+    "nudge_enabled": false,
+    "start_jitter_position_m": 0.5,
+    "start_jitter_heading_deg": 15.0,
+    "spawn_heading_rule": "navmesh_path_first_corner_plus_jitter",
+    "stall_event_min_s": 2.0,
+    "collision_debounce_s": 1.0,
+    "max_plausible_speed_mps": 2.5,
+    "metric_window_s": 1.0,
+    "stall_displacement_m": 0.10000000149011612,
+    "task_number_of_needs": 1,
+    "task_start_markers": 1,
+    "task_poi_markers": 1,
+    "task_end_markers": 1,
+    "task_start_positions": [
+        {
+            "x": 11.5,
+            "y": 0.0833333358168602,
+            "z": -6.0
+        }
+    ],
+    "task_poi_positions": [
+        {
+            "x": -5.5,
+            "y": 1.0833333730697632,
+            "z": 1.2000000476837159
+        }
+    ],
+    "task_end_positions": [
+        {
+            "x": -11.5,
+            "y": 1.0833333730697632,
+            "z": -10.0
+        }
+    ],
+    "body_speed_mps": 1.2999999523162842,
+    "body_radius_m": 0.25,
+    "shortest_path_acceleration_mps2": 50.0,
+    "shortest_path_angular_speed_deg_per_s": 120.0,
+    "navmesh_bake_agent_radius": 0.5,
+    "arrival_radius_m": 1.5,
+    "tick_interval_s": 0.10000000149011612,
+    "imitation_stochastic_walk": false,
+    "imitation_min_walk_hold_s": 0.0
+}

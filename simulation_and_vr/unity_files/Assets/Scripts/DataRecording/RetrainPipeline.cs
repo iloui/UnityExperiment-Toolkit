@@ -16,9 +16,9 @@ using UnityEditor;
 namespace Assets.Scripts.DataRecording
 {
     /// <summary>
-    /// One full retrain of the discrete model (train_2DCNN_discrete.py, from scratch, condition C of splits.json) in a
-    /// background process. ParticipantSession requests it once a session is finished; Tools > Thesis > Retrain Discrete Model
-    /// Now starts it by hand. Never two at once: imitationagent_training/retrain.lock holds the running process.
+    /// One full retrain of the discrete model (train_2DCNN_discrete.py, from scratch, condition C fold 1 of splits.json) in a
+    /// background process, started by hand with Tools > Imitation Learning Agent > 3 · Train Model > Train Model Now. A quick in-editor check only:
+    /// the experiment's A/B/C models (both folds, three seeds) are trained from the terminal (training_pipeline/README.md). Never two at once: imitationagent_training/retrain.lock holds the running process.
     ///
     /// The process is a small shell/cmd wrapper that runs the trainer with the interpreter and PYTHONPATH=python_embedded set
     /// up by bootstrap_env.py, writes all output to retrain_logs/&lt;timestamp&gt;.log and its exit code to &lt;timestamp&gt;.exit.
@@ -110,8 +110,7 @@ namespace Assets.Scripts.DataRecording
             {
                 // Without participant splits every human would be trained on, including the held-out baseline.
                 Debug.LogError($"{LogTag} Not started ('{reason}'): {SplitsPath} is missing. Write it once all participants " +
-                               "are recorded: cd imitationagent_training/training_pipeline && python make_splits.py " +
-                               "--n_heldout <k> --n_subset_B <m> --seed 1");
+                               "are recorded: cd imitationagent_training/training_pipeline && python make_splits.py");
                 return false;
             }
 
@@ -134,6 +133,7 @@ namespace Assets.Scripts.DataRecording
                 "--synthetic_sources", "all",
                 "--splits", "../splits.json",
                 "--condition", "C",
+                "--fold", "1",
                 "--output_onnx", $"../imitation_agent_model/{ModelPrefix}{stamp}.onnx",
                 "--reason", SafeArgument(reason),
             };
@@ -186,7 +186,7 @@ namespace Assets.Scripts.DataRecording
             return python != null;
         }
 
-        /// <summary>Running/idle, the last log file and the last exported model, for Tools > Thesis > Show Retrain Status.</summary>
+        /// <summary>Running/idle, the last log file and the last exported model, for Tools > Imitation Learning Agent > 3 · Train Model > Show Training Status.</summary>
         public static string StatusReport()
         {
             var sb = new StringBuilder();

@@ -168,7 +168,7 @@ namespace Assets.Scripts.DataRecording
         /// Written to every manifest as recorder_version. Bump it whenever ParticipantRecorder changes what or how it
         /// records, so episodes from different recorder behaviour can be told apart without the scene.
         /// </summary>
-        public const string RecorderVersion = "participant_recorder_v3";
+        public const string RecorderVersion = "participant_recorder_v4";
 
         /// <summary>Values of the manifest's 'source' field (data_contract.EPISODE_SOURCES).</summary>
         public static class EpisodeSources
@@ -208,6 +208,8 @@ namespace Assets.Scripts.DataRecording
             /// target. Set by the synthetic harnesses; 0 for humans, who start with the scene's FPSController heading.
             /// </summary>
             public float start_jitter_heading_deg;
+            /// <summary>Human session labels (ParticipantSession). Synthetic episodes leave task_id empty.</summary>
+            public TrialInfo trial = new TrialInfo();
 
             public int frame_count;
             public float start_time;
@@ -231,6 +233,36 @@ namespace Assets.Scripts.DataRecording
             public Vector3 start;
             public Vector3[] pois;
             public Vector3 end;
+        }
+
+        /// <summary>
+        /// Where a human episode sits in the experimental design (methodology 3.8): which of the layout's tasks was walked, in
+        /// which position, in which participant fold, and whether condition C leaves this task out. Written by
+        /// ParticipantSession; empty task_id for synthetic episodes.
+        /// </summary>
+        [Serializable]
+        public sealed class TrialInfo
+        {
+            /// <summary>"test" or "train_0".."train_2" (HumanTaskSet ids); empty for synthetic episodes.</summary>
+            public string task_id = "";
+            /// <summary>"train" or "test"; empty for synthetic episodes.</summary>
+            public string task_role = "";
+            /// <summary>1 = odd participant numbers, 2 = even; 0 = not a human session episode.</summary>
+            public int fold;
+            /// <summary>True for the one training task per layout that condition C leaves out (fixed before recording).</summary>
+            public bool c_excluded;
+            /// <summary>0-based position of the task within the layout (3 = the test task, walked last).</summary>
+            public int task_order_position = -1;
+            /// <summary>0-based position of the layout in the participant's layout order.</summary>
+            public int layout_order_position = -1;
+            /// <summary>0-based trial position within the session.</summary>
+            public int trial_index = -1;
+            /// <summary>0 for the first walk of this trial; +1 for every repeat after an experimenter abort.</summary>
+            public int attempt_index;
+            public int latin_square_row = -1;
+            public int task_order_latin_row = -1;
+            public string task_set_version = "";
+            public int task_set_seed;
         }
 
         [Serializable]
