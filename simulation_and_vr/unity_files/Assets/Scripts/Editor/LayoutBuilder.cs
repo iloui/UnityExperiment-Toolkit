@@ -1171,7 +1171,6 @@ namespace Assets.Scripts.Editor
             {
                 for (var z = 0; z < gridCountZ; z++)
                 {
-                    if (z == 1) continue;
                     if (rng.NextDouble() < 0.20d) continue;
 
                     var obstacleScale = new Vector3(cellWidth * 0.55f, area.WallHeight, cellDepth * 0.55f);
@@ -1181,6 +1180,11 @@ namespace Assets.Scripts.Editor
             }
         }
 
+        /// <summary>
+        /// Ring corridor around a solid atrium core between the spawn and target rooms. The bands between the ring walls
+        /// and the N/S perimeter are closed off by the room walls, so they are filled with solid blocks instead of thin
+        /// walls; only the rooms and the ring end up on the NavMesh.
+        /// </summary>
         private static void BuildCircleBath(Transform root, LayoutArea area, Material material, int obstacleLayer)
         {
             var corridorWidth = (area.CorridorRightX - area.CorridorLeftX);
@@ -1189,9 +1193,11 @@ namespace Assets.Scripts.Editor
 
             CreateWall(root, "AtriumCore", new Vector3(0f, area.WallHeight * 0.5f, 0f), new Vector3(coreWidth, area.WallHeight, coreDepth), material, obstacleLayer);
 
+            // Open band = inner faces of the former ring walls at z = +-outerRailZ.
             var outerRailZ = area.HalfDepth * 0.7f;
-            CreateWall(root, "NorthRingWall", new Vector3(0f, area.WallHeight * 0.5f, outerRailZ), new Vector3(corridorWidth, area.WallHeight, WallThickness), material, obstacleLayer);
-            CreateWall(root, "SouthRingWall", new Vector3(0f, area.WallHeight * 0.5f, -outerRailZ), new Vector3(corridorWidth, area.WallHeight, WallThickness), material, obstacleLayer);
+            var ringHalfDepth = outerRailZ - WallThickness * 0.5f;
+            CreatePocketStrip(root, "RingWall", area.CorridorLeftX, area.CorridorRightX, -ringHalfDepth, ringHalfDepth,
+                -area.HalfDepth + WallThickness, area.HalfDepth - WallThickness, area.WallHeight, material, obstacleLayer);
         }
 
         private static void BuildMaggiesCentre(Transform root, LayoutArea area, Material material, int obstacleLayer)
