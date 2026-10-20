@@ -63,6 +63,9 @@ namespace Assets.Scripts.DataRecording
         public string inputMode = ZarrDataContract.InputModeDesktop;
         /// <summary>start_jitter_heading_deg written to the NEXT episode. Set per episode by the synthetic harnesses; humans keep 0.</summary>
         [HideInInspector] public float startJitterHeadingDeg;
+        /// <summary>synthetic_task_kind / synthetic_backtrack_m written to the NEXT episode. Set per episode by RecordRandomWalksHarness.</summary>
+        [HideInInspector] public string syntheticTaskKind = "";
+        [HideInInspector] public float syntheticBacktrackMeters;
         /// <summary>Design labels written to the NEXT episode's manifest ('trial'). Set per trial by ParticipantSession; empty otherwise.</summary>
         [HideInInspector] public ZarrDataContract.TrialInfo trialInfo = new ZarrDataContract.TrialInfo();
 
@@ -443,6 +446,8 @@ namespace Assets.Scripts.DataRecording
                 input_mode = inputMode,
                 task = episodeTask,
                 start_jitter_heading_deg = startJitterHeadingDeg,
+                synthetic_task_kind = syntheticTaskKind ?? "",
+                synthetic_backtrack_m = syntheticBacktrackMeters,
                 trial = trialInfo ?? new ZarrDataContract.TrialInfo(),
                 camera_height_m = float.IsNaN(measuredCameraHeight) ? -1f : measuredCameraHeight,
                 camera_fov_deg = hiddenCaptureCamera != null ? hiddenCaptureCamera.fieldOfView : -1f,

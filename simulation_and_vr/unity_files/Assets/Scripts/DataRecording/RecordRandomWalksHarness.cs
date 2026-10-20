@@ -30,7 +30,8 @@ namespace Assets.Scripts.DataRecording
     /// With probability waypointProbability a walk goes start -> random waypoint -> end, the waypoint registered as the
     /// task's single POI (exactly the human 1-POI format); otherwise start -> end directly. Episodes are written to
     /// imitationagent_training/zarr_recordings with source = "synthetic", participant_id = participantId (default "synthetic_rrw_v3"; the v2
-    /// bot without the stop behaviours recorded as "synthetic_rrw"), session_id = "rrw_" + run start time and
+    /// bot without the stop behaviours recorded as "synthetic_rrw"; the bot refitted to P01-P08 by "Record Random Walks
+    /// (recalibrated)" as "synthetic_rrw_v4"), session_id = "rrw_" + run start time and
     /// repetition_index = index of the kept episode within the run, start_jitter_heading_deg = the episode's random start
     /// heading offset; every other manifest field is filled exactly as for a human.
     ///
@@ -82,6 +83,20 @@ namespace Assets.Scripts.DataRecording
         [Tooltip("Radius (meters) to snap a random candidate point onto the NavMesh.")]
         public float navMeshSampleRadius = 2f;
 
+        [Header("Hidden-goal tasks (v5; share 0 = off)")]
+        [Tooltip("Share of start/end pairs sampled as hidden-goal tasks: the goal lies behind a wall at most " +
+                 "hiddenGoalMaxWallDistanceMeters ahead of the start, and reaching it means walking at least " +
+                 "hiddenGoalMinBacktrackMeters of the route away from it. These episodes have no waypoint and start facing the goal " +
+                 "through the wall, so the first frames show exactly the view the failing agents got stuck on.")]
+        [Range(0f, 1f)] public float hiddenGoalShare = 0f;
+        [Tooltip("Metres of the shortest route along which the straight-line distance to the goal grows.")]
+        public float hiddenGoalMinBacktrackMeters = 2f;
+        public float hiddenGoalMaxWallDistanceMeters = 3f;
+        [Tooltip("Start heading = straight at the goal +- this (instead of the bot's startHeadingJitterDegrees).")]
+        public float hiddenGoalStartHeadingJitterDegrees = 20f;
+        [Tooltip("Hidden-goal pairs are rare under uniform sampling; after this many rejected candidates the slot falls back to a normal pair.")]
+        [Min(1)] public int hiddenGoalMaxAttempts = 400;
+
         [Header("Timeout")]
         [Tooltip("Timeout = max(minTimeoutSeconds, timeoutFactor x plannedLength / walk speed + behaviourTimeBudgetSeconds), simulated seconds.")]
         public float minTimeoutSeconds = 30f;
@@ -129,6 +144,8 @@ namespace Assets.Scripts.DataRecording
         private int episodesRecorded;
         private int episodesDiscarded;
         private int pairsSkipped;
+        private int hiddenGoalEpisodes;
+        private int hiddenGoalFallbacks;
 
         // OnEnable, not Awake: Awake also runs on a disabled harness, which would switch off the recorder of a human
         // session in the same scene. OnEnable still runs before every Start in the scene.
@@ -158,24 +175,36 @@ namespace Assets.Scripts.DataRecording
 
             Debug.Log($"[RecordRandomWalks] Starting: k={pairCount} pairs x m={agentsPerPair} walks, seed={usedSeed}, rig='{rig.name}', " +
                 $"walk speed={rig.WalkSpeed:F2} m/s, frame={simulatedFrameSeconds * 1000f:F1} ms, waypointProbability={waypointProbability:F2}, " +
-                $"look-arounds={bot.lookAroundRatePerMinute:F1}/min, wall excursions={bot.wallExcursionRatePerMinute:F1}/min, minEpisode={minEpisodeSeconds:F1}s.");
+                $"look-arounds={bot.lookAroundRatePerMinute:F1}/min, wall excursions={bot.wallExcursionRatePerMinute:F1}/min, minEpisode={minEpisodeSeconds:F1}s, " +
+                $"participant_id='{participantId}', hiddenGoalShare={hiddenGoalShare:F2}.");
 
             for (int pair = 0; pair < pairCount && !fatal; pair++)
             {
-                if (!TrySamplePair(out Vector3 start, out Vector3 end, out float directLength))
+                // Short-circuit: with hiddenGoalShare 0 no extra random number is drawn, so v3/v4 runs stay reproducible per seed.
+                bool hiddenGoal = hiddenGoalShare > 0f && rng.NextDouble() < hiddenGoalShare;
+                Vector3 start = Vector3.zero, end = Vector3.zero;
+                float directLength = 0f, backtrack = 0f;
+                if (hiddenGoal && !TrySampleHiddenGoalPair(out start, out end, out directLength, out backtrack))
+                {
+                    Debug.LogWarning($"[RecordRandomWalks] Pair {pair + 1}/{pairCount}: no hidden-goal pair after {hiddenGoalMaxAttempts} candidates - using a normal pair.");
+                    hiddenGoalFallbacks++;
+                    hiddenGoal = false;
+                }
+                if (!hiddenGoal && !TrySamplePair(out start, out end, out directLength))
                 {
                     Debug.LogWarning($"[RecordRandomWalks] Pair {pair + 1}/{pairCount}: no valid start/end after {maxResampleAttempts} attempts - skipped.");
                     pairsSkipped++;
                     continue;
                 }
-                Debug.Log($"[RecordRandomWalks] Pair {pair + 1}/{pairCount}: shortest path {directLength:F1} m.");
+                Debug.Log($"[RecordRandomWalks] Pair {pair + 1}/{pairCount}: shortest path {directLength:F1} m" +
+                    (hiddenGoal ? $", hidden goal (backtrack {backtrack:F1} m)." : "."));
 
                 for (int round = 0; round < agentsPerPair && !fatal; round++)
                 {
                     bool ok = false;
                     for (int attempt = 1; attempt <= maxResampleAttempts && !fatal; attempt++)
                     {
-                        yield return RunEpisode(start, end, directLength);
+                        yield return RunEpisode(start, end, directLength, hiddenGoal, backtrack);
                         if (lastEpisodeOk) { ok = true; break; }
                         episodesDiscarded++;
                     }
@@ -192,7 +221,9 @@ namespace Assets.Scripts.DataRecording
             }
 
             Debug.Log($"[RecordRandomWalks] Done. Recorded {episodesRecorded} episodes (target {pairCount * agentsPerPair}), " +
-                $"discarded {episodesDiscarded} attempts, skipped {pairsSkipped} pair(s){(fatal ? " - ABORTED by an error, see log" : "")}.");
+                $"discarded {episodesDiscarded} attempts, skipped {pairsSkipped} pair(s)" +
+                (hiddenGoalShare > 0f ? $", {hiddenGoalEpisodes} hidden-goal episodes ({hiddenGoalFallbacks} slot(s) fell back to normal pairs)" : "") +
+                $"{(fatal ? " - ABORTED by an error, see log" : "")}.");
             RestoreSettings();
 #if UNITY_EDITOR
             if (stopPlayModeWhenDone) UnityEditor.EditorApplication.isPlaying = false;
@@ -408,6 +439,60 @@ namespace Assets.Scripts.DataRecording
             return false;
         }
 
+        /// <summary>
+        /// A pair whose goal is hidden behind a close wall: the straight line from the start towards the goal (at eye height)
+        /// hits a wall within hiddenGoalMaxWallDistanceMeters, and the shortest route walks at least
+        /// hiddenGoalMinBacktrackMeters away from the goal. Plus every TrySamplePair condition.
+        /// </summary>
+        private bool TrySampleHiddenGoalPair(out Vector3 start, out Vector3 end, out float directLength, out float backtrack)
+        {
+            start = end = Vector3.zero;
+            directLength = backtrack = 0f;
+            var path = new NavMeshPath();
+            Vector3 eye = Vector3.up * ZarrDataContract.CameraHeightAboveNavMeshMeters;
+            for (int attempt = 0; attempt < hiddenGoalMaxAttempts; attempt++)
+            {
+                if (!TrySampleNavMeshPoint(out start) || !TrySampleNavMeshPoint(out end)) continue;
+                float straight = Vector3.Distance(start, end);
+                if (straight <= ZarrDataContract.ArrivalRadiusMeters) continue;
+                Vector3 toGoal = end - start;
+                toGoal.y = 0f;
+                if (toGoal.sqrMagnitude < 1e-6f) continue;
+                float wallRange = Mathf.Min(hiddenGoalMaxWallDistanceMeters, toGoal.magnitude);
+                if (!Physics.Raycast(start + eye, toGoal.normalized, wallRange, architectureMask, QueryTriggerInteraction.Ignore)) continue;
+                if (!NavMesh.CalculatePath(start, end, NavMesh.AllAreas, path) || path.status != NavMeshPathStatus.PathComplete) continue;
+                directLength = PathLength(path.corners);
+                if (directLength < minPairPathLengthMeters) continue;
+                backtrack = BacktrackLength(path.corners, end);
+                if (backtrack < hiddenGoalMinBacktrackMeters) continue;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>Metres along `corners` (sampled every 0.25 m) over which the horizontal distance to `goal` grows.</summary>
+        internal static float BacktrackLength(Vector3[] corners, Vector3 goal)
+        {
+            const float step = 0.25f;
+            var g = new Vector2(goal.x, goal.z);
+            float previous = Vector2.Distance(new Vector2(corners[0].x, corners[0].z), g);
+            float total = 0f;
+            for (int i = 1; i < corners.Length; i++)
+            {
+                Vector3 a = corners[i - 1], b = corners[i];
+                float segment = Vector3.Distance(a, b);
+                int n = Mathf.Max(1, Mathf.CeilToInt(segment / step));
+                for (int k = 1; k <= n; k++)
+                {
+                    Vector3 p = Vector3.Lerp(a, b, (float)k / n);
+                    float d = Vector2.Distance(new Vector2(p.x, p.z), g);
+                    if (d > previous) total += segment / n;
+                    previous = d;
+                }
+            }
+            return total;
+        }
+
         private bool TrySampleNavMeshPoint(out Vector3 point)
         {
             point = Vector3.zero;
@@ -441,12 +526,12 @@ namespace Assets.Scripts.DataRecording
         // One episode
         // ------------------------------------------------------------------
 
-        private IEnumerator RunEpisode(Vector3 start, Vector3 end, float directLength)
+        private IEnumerator RunEpisode(Vector3 start, Vector3 end, float directLength, bool hiddenGoal, float backtrack)
         {
             lastEpisodeOk = false;
 
-            // --- plan: start -> (random waypoint, registered as the task's POI) -> end ---
-            bool useWaypoint = rng.NextDouble() < waypointProbability;
+            // --- plan: start -> (random waypoint, registered as the task's POI) -> end; hidden-goal tasks go straight to the end ---
+            bool useWaypoint = !hiddenGoal && rng.NextDouble() < waypointProbability;
             Vector3 waypoint = end;
             float planned = directLength;
             if (useWaypoint)
@@ -474,7 +559,7 @@ namespace Assets.Scripts.DataRecording
             agent.Stop();
             Vector3 toFirst = (useWaypoint ? waypoint : end) - start;
             float yaw = (toFirst.x * toFirst.x + toFirst.z * toFirst.z) > 1e-6f ? Mathf.Atan2(toFirst.x, toFirst.z) * Mathf.Rad2Deg : 0f;
-            float headingJitter = (float)(rng.NextDouble() * 2.0 - 1.0) * bot.startHeadingJitterDegrees;
+            float headingJitter = (float)(rng.NextDouble() * 2.0 - 1.0) * (hiddenGoal ? hiddenGoalStartHeadingJitterDegrees : bot.startHeadingJitterDegrees);
             yaw += headingJitter;
             Vector3 spawn = start + Vector3.up;
             if (RecordingRig.TryGroundedPivotY(rigController, spawn, out float pivotY)) spawn.y = pivotY;
@@ -498,6 +583,8 @@ namespace Assets.Scripts.DataRecording
             // --- record ---
             recorder.repetitionIndex = episodesRecorded; // index among this run's kept episodes (discarded ones don't count)
             recorder.startJitterHeadingDeg = headingJitter;
+            recorder.syntheticTaskKind = hiddenGoal ? "hidden_goal" : "random";
+            recorder.syntheticBacktrackMeters = hiddenGoal ? backtrack : 0f;
             if (!TryStartRecording()) yield break;
             agent.Begin(rng);
             string episodeDir = recorder.CurrentEpisodeDirectory;
@@ -525,9 +612,11 @@ namespace Assets.Scripts.DataRecording
                 yield break;
             }
 
-            Debug.Log($"[RecordRandomWalks] Episode ok: {duration:F1}s, {(useWaypoint ? "via waypoint (POI)" : "direct")}, " +
+            Debug.Log($"[RecordRandomWalks] Episode ok: {duration:F1}s, {(hiddenGoal ? "hidden goal" : useWaypoint ? "via waypoint (POI)" : "direct")}, " +
                 $"turns-in-place={agent.TurnsInPlace}, look-arounds={agent.LookArounds}, wall excursions={agent.WallExcursions}, stall recoveries={agent.StallRecoveries}, " +
-                $"scan stops={agent.ScanStops}, wall stops={agent.WallStops}, POI pauses={agent.PoiPauses}.");
+                $"scan stops={agent.ScanStops}, wall stops={agent.WallStops}, POI pauses={agent.PoiPauses}, " +
+                $"walking turns={agent.WalkingTurns}, suppressed wall stops={agent.SuppressedWallStops}, side decisions={agent.SideDecisions}, side commits={agent.SideCommits}.");
+            if (hiddenGoal) hiddenGoalEpisodes++;
             episodesRecorded++;
             lastEpisodeOk = true;
         }

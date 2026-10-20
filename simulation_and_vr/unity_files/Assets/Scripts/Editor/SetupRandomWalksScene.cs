@@ -37,11 +37,70 @@ namespace Assets.Scripts.Editor
         }
 
         /// <summary>
+        /// Same harness, but with the bot refitted to the thesis participants (RandomWalkBotSettings.RecalibratedV4) and
+        /// recording as participant_id "synthetic_rrw_v4", so its episodes never mix with the v3 ones.
+        /// </summary>
+        [MenuItem(ToolsMenu.SyntheticWalks + "Record Random Walks v4", priority = ToolsMenu.SyntheticWalksPriority + 1)]
+        public static void AddHarnessV4()
+        {
+            ConfigureHarness("v4", RandomWalkBotSettings.RecalibratedV4(), RandomWalkBotSettings.V4ParticipantId, 0f);
+        }
+
+        /// <summary>
+        /// v4 plus pocket handling (RandomWalkBotSettings.RecalibratedV5) and 40% hidden-goal tasks, recording as
+        /// participant_id "synthetic_rrw_v5".
+        /// </summary>
+        [MenuItem(ToolsMenu.SyntheticWalks + "Record Random Walks v5", priority = ToolsMenu.SyntheticWalksPriority + 2)]
+        public static void AddHarnessV5()
+        {
+            ConfigureHarness("v5", RandomWalkBotSettings.RecalibratedV5(), RandomWalkBotSettings.V5ParticipantId, 0.4f);
+        }
+
+        /// <summary>
+        /// Adds a RecordRandomWalksHarness (or takes the one in the scene) and overwrites its bot settings, participant id and
+        /// hidden-goal share (undoable); the run configuration (pairs, seed, timeouts) is kept. "Reset Harness To Code
+        /// Defaults" turns it back into the v3 bot.
+        /// </summary>
+        private static void ConfigureHarness(string version, RandomWalkBotSettings bot, string participantId, float hiddenGoalShare)
+        {
+            Scene scene = EditorSceneManager.GetActiveScene();
+            if (!scene.IsValid())
+            {
+                Debug.LogError("[SetupRandomWalksScene] No valid active scene - open a layout scene first.");
+                return;
+            }
+
+            var harness = Object.FindObjectOfType<RecordRandomWalksHarness>();
+            if (harness == null)
+            {
+                var go = new GameObject("RecordRandomWalksHarness");
+                Undo.RegisterCreatedObjectUndo(go, $"Add RecordRandomWalksHarness {version}");
+                harness = go.AddComponent<RecordRandomWalksHarness>();
+            }
+            else
+            {
+                Undo.RecordObject(harness, $"Configure RecordRandomWalksHarness {version}");
+            }
+            harness.bot = bot;
+            harness.participantId = participantId;
+            harness.hiddenGoalShare = hiddenGoalShare;
+            if (harness.fpsControllerPrefab == null) harness.fpsControllerPrefab = SceneExporter.FindDefaultControllerPrefab();
+
+            EditorUtility.SetDirty(harness);
+            EditorSceneManager.MarkSceneDirty(scene);
+            Selection.activeGameObject = harness.gameObject;
+
+            Debug.Log($"[SetupRandomWalksScene] RecordRandomWalksHarness {version} ready in '{scene.name}' " +
+                $"(participant_id '{harness.participantId}', hidden-goal share {harness.hiddenGoalShare:F2}, k={harness.pairCount}, m={harness.agentsPerPair}). " +
+                "Save the scene, then press Play. Episodes are written to imitationagent_training/zarr_recordings.");
+        }
+
+        /// <summary>
         /// A harness already saved in a scene keeps its serialized Inspector values, so changed code defaults (e.g. 25x1
         /// pairs, the FPSController bot settings) never reach it. This copies a fresh component's
         /// defaults over it (undoable).
         /// </summary>
-        [MenuItem(ToolsMenu.SyntheticWalks + "Reset Harness To Code Defaults", priority = ToolsMenu.SyntheticWalksPriority + 1)]
+        [MenuItem(ToolsMenu.SyntheticWalks + "Reset Harness To Code Defaults", priority = ToolsMenu.SyntheticWalksPriority + 3)]
         public static void ResetHarnessToDefaults()
         {
             var harness = Object.FindObjectOfType<RecordRandomWalksHarness>();

@@ -49,6 +49,7 @@ copying motion: 0.98 walk/stop accuracy with the motion input vs 0.85 without, b
 """
 import argparse
 import copy
+import fnmatch
 import json
 import os
 import random
@@ -128,10 +129,10 @@ def select_episodes(episodes, synthetic_sources, humans, heldout=(), condition=N
     """-> (selected [(episode_dir, source, participant_id)], skipped {"who (why)": episode count}).
     Human episodes are kept only for participants in humans (the fold's list, never a held-out one) and only for the
     condition's tasks (make_splits.in_condition: B = training tasks, C = test task + non-excluded training tasks);
-    synthetic_sources may contain 'all' = every synthetic* participant id in the manifests."""
-    wanted = set(synthetic_sources)
-    if "all" in wanted:
-        wanted = {episode_source(m) for _, m in episodes if episode_source(m).startswith("synthetic")}
+    synthetic_sources may contain 'all' = every synthetic* participant id in the manifests, and shell-style patterns
+    (synthetic_dagger_run1_r*)."""
+    available = {episode_source(m) for _, m in episodes if episode_source(m).startswith("synthetic")}
+    wanted = set(available) if "all" in synthetic_sources else expand_sources(synthetic_sources, available)
     humans, heldout = set(humans), set(heldout)
     selected, skipped = [], {}
     for ep, manifest in episodes:
@@ -148,6 +149,22 @@ def select_episodes(episodes, synthetic_sources, humans, heldout=(), condition=N
             key = f"{pid if src == HUMAN else src} ({why})"
             skipped[key] = skipped.get(key, 0) + 1
     return selected, skipped
+
+
+def expand_sources(patterns, available) -> set:
+    """Synthetic participant ids in `available` matched by any of `patterns` (exact ids or fnmatch patterns)."""
+    return {src for src in available if any(fnmatch.fnmatchcase(src, p) for p in patterns)}
+
+
+def parse_source_weights(items) -> list:
+    """['synthetic_rrw_v5=0.7', 'synthetic_dagger_*=0.3'] -> [(pattern, weight)], in the given order."""
+    out = []
+    for item in items or []:
+        pattern, sep, weight = item.rpartition("=")
+        if not sep or not pattern:
+            raise ValueError(f"--source_weights entry {item!r} is not PATTERN=WEIGHT")
+        out.append((pattern, float(weight)))
+    return out
 
 
 def split_train_val(selected, val_ratio: float, val_participants: int, seed: int):
@@ -208,6 +225,49 @@ def source_balanced_sampler(sources, human_share: float) -> WeightedRandomSample
     return WeightedRandomSampler(torch.as_tensor(weights, dtype=torch.double), num_samples=len(sources), replacement=True)
 
 
+def source_frame_weights(sources, human_share: float, source_weights) -> np.ndarray:
+    """Per-frame sampling probability (sums to 1). Human frames share human_share. The synthetic share is spread over all
+    synthetic frames, or - with source_weights [(pattern, weight)] - split between the patterns in proportion to their
+    weights and spread evenly within each (every synthetic source must match a pattern; the first match counts). That
+    keeps long DAgger episodes, which are mostly a stuck agent, from taking over the synthetic share by frame count."""
+    src = np.array(sources)
+    is_human = src == HUMAN
+    n_h, n_s = int(is_human.sum()), int((~is_human).sum())
+    if human_share > 0 and n_h == 0:
+        raise ValueError(f"human_share {human_share} but no human training frames")
+    if n_s == 0 and human_share < 1:
+        raise ValueError("no synthetic training frames")
+    weights = np.zeros(len(src), dtype=np.float64)
+    if n_h:
+        weights[is_human] = human_share / n_h
+    if not source_weights:
+        if n_s:
+            weights[~is_human] = (1.0 - human_share) / n_s
+        return weights
+    group = np.full(len(src), -1)
+    for i, s in enumerate(src):
+        if s == HUMAN:
+            continue
+        for g, (pattern, _) in enumerate(source_weights):
+            if fnmatch.fnmatchcase(s, pattern):
+                group[i] = g
+                break
+        else:
+            raise ValueError(f"synthetic source {s!r} matches no --source_weights pattern")
+    present = [g for g in range(len(source_weights)) if (group == g).any()]
+    total = sum(source_weights[g][1] for g in present)
+    if total <= 0:
+        raise ValueError("--source_weights of the sources present sum to 0")
+    for g in present:
+        mask = group == g
+        weights[mask] = (1.0 - human_share) * source_weights[g][1] / total / mask.sum()
+    return weights
+
+
+def frame_sampler(weights: np.ndarray) -> WeightedRandomSampler:
+    return WeightedRandomSampler(torch.as_tensor(weights, dtype=torch.double), num_samples=len(weights), replacement=True)
+
+
 def git_revision() -> str:
     """HEAD of the repository this script lives in, with '-dirty' if tracked files are modified; 'unknown' without git."""
     cwd = os.path.dirname(os.path.abspath(__file__))
@@ -250,6 +310,30 @@ def label_weights_from(dataset: DiscreteLabelDataset, sources, human_share: floa
         if n > 0:
             freq += share * yaw_counts[key] / n
             stop_freq += share * stop_counts[key] / n
+    total = freq.sum()
+    freq, stop_freq = freq / total, stop_freq / total
+    print("[LABELS] yaw class frequency under the sampling mix: " + " ".join(f"{f:.3f}" for f in freq))
+    w = (1.0 / np.maximum(freq, 1e-4)) ** power
+    stop_weight = 1.0
+    if 0.0 < stop_freq < target_stop_share:
+        stop_weight = (target_stop_share / (1.0 - target_stop_share)) * ((1.0 - stop_freq) / stop_freq)
+    print(f"[LABELS] stop frequency under the sampling mix {stop_freq:.3f} -> stop weight {stop_weight:.2f} "
+          f"(target share {target_stop_share:.2f})")
+    return torch.tensor(w / w.mean(), dtype=torch.float32), stop_weight
+
+
+def label_weights_from_frames(dataset: DiscreteLabelDataset, frame_weights: np.ndarray, power: float, target_stop_share: float):
+    """label_weights_from for an arbitrary per-frame sampling mix (frame_weights = each training frame's sampling
+    probability, e.g. from source_frame_weights with --source_weights). Same weighting rules."""
+    freq = np.zeros(YAW_CLASS_COUNT)
+    stop_freq = 0.0
+    loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=0)
+    i = 0
+    for _, target in loader:
+        for cls, walk in zip(target[:, 1].long().tolist(), target[:, 0].tolist()):
+            freq[cls] += frame_weights[i]
+            stop_freq += frame_weights[i] * (walk < 0.5)
+            i += 1
     total = freq.sum()
     freq, stop_freq = freq / total, stop_freq / total
     print("[LABELS] yaw class frequency under the sampling mix: " + " ".join(f"{f:.3f}" for f in freq))
@@ -377,8 +461,19 @@ def main():
     parser.add_argument("--name_tag", type=str, default="proprio2",
                         help="Model variant in the default output name ImitationAgent_<condition>_<tag>[_f<fold>]_s<seed>.onnx.")
     parser.add_argument("--synthetic_sources", type=str, nargs="+", default=["synthetic_rrw_v3"],
-                        help="Synthetic participant ids to train on (synthetic_rrw_v3 = bot, synthetic_dagger = "
-                             "DaggerHarness), or 'all' = every synthetic* participant id in the manifests.")
+                        help="Synthetic participant ids to train on (synthetic_rrw_v3 = bot, synthetic_dagger* = "
+                             "DaggerHarness), shell-style patterns (synthetic_dagger_run1_r*), or 'all' = every "
+                             "synthetic* participant id in the manifests.")
+    parser.add_argument("--source_weights", type=str, nargs="+", default=None, metavar="PATTERN=WEIGHT",
+                        help="Split the synthetic share of every batch between source patterns by these weights instead "
+                             "of by frame count, e.g. synthetic_rrw_v5=0.7 'synthetic_dagger_*=0.3'. Every synthetic "
+                             "source must match one. Also applies to condition A.")
+    parser.add_argument("--init_from", type=str, default=None,
+                        help="Start from this checkpoint (.pt, written next to every exported .onnx) instead of random "
+                             "weights: fine-tuning, or warm-starting a DAgger round.")
+    parser.add_argument("--freeze_trunk", action="store_true",
+                        help="Keep the convolutional encoder (weights and BatchNorm statistics) fixed; only FiLM and the "
+                             "head train. For fine-tuning on few human episodes; needs --init_from.")
     parser.add_argument("--output_onnx", type=str, default=None,
                         help="Default ../imitation_agent_model/ImitationAgent_<condition>_<name_tag>[_f<fold>]_s<seed>.onnx.")
     parser.add_argument("--reason", type=str, default="manual", help="Why this run was started; written to the sidecar.")
@@ -400,8 +495,9 @@ def main():
     parser.add_argument("--label_smoothing", type=float, default=0.05)
     parser.add_argument("--walk_loss_weight", type=float, default=1.0)
     parser.add_argument("--target_stop_share", type=float, default=0.2,
-                        help="Up-weight stop frames until they carry this share of the walk/stop loss (humans stand in "
-                             "~20%% of samples, v2 synthetic in 4%%). 0 disables.")
+                        help="Up-weight stop frames until they carry this share of the walk/stop loss. 0 disables. The "
+                             "default 0.2 is the pilot's standing share; the thesis participants P01-P08 stand in 8.7%% "
+                             "of samples (eval_tools/compare_bot_to_humans.py), so new runs should pass ~0.09.")
     parser.add_argument("--pitch_loss_weight", type=float, default=0.25)
     parser.add_argument("--rot_aug_deg", type=float, default=15.0)
     parser.add_argument("--rot_aug_prob", type=float, default=0.7)
@@ -428,6 +524,12 @@ def main():
         parser.error(f"condition {args.condition} needs --fold 1 or --fold 2")
     if args.condition == "A" and args.fold is not None:
         parser.error("condition A uses no humans and has no fold; drop --fold")
+    if args.freeze_trunk and not args.init_from:
+        parser.error("--freeze_trunk needs --init_from (a frozen random trunk learns nothing)")
+    try:
+        source_weights = parse_source_weights(args.source_weights)
+    except ValueError as e:
+        parser.error(str(e))
     if args.output_onnx is None:
         fold_part = f"_f{args.fold}" if args.fold else ""
         tag_part = f"_{args.name_tag}" if args.name_tag else ""
@@ -459,7 +561,8 @@ def main():
                       and m["participant_id"] not in listed and not m["participant_id"].startswith(DRY_RUN_PREFIX)})
     if unknown:
         print(f"[DATASET] WARNING: human participants in no fold of {args.splits} (never used): {unknown}")
-    missing = [s for s in args.synthetic_sources if s != "all" and s not in {e[1] for e in selected}]
+    present = {e[1] for e in selected}
+    missing = [s for s in args.synthetic_sources if s != "all" and not expand_sources([s], present)]
     if missing or not any(src != HUMAN for _, src, _ in selected):
         print(f"[ERROR] No synthetic episodes for {missing or args.synthetic_sources} in '{args.recordings_dir}'")
         sys.exit(1)
@@ -482,7 +585,12 @@ def main():
     print(f"[DATASET] frames train={len(train_ds)} val={len(val_ds)} | human frames in train: "
           f"{sum(s == HUMAN for s in train_sources)}")
 
-    if humans:
+    if source_weights:  # explicit per-source shares (also for condition A)
+        human_share = args.human_share if humans else 0.0
+        frame_weights = source_frame_weights(train_sources, human_share, source_weights)
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, num_workers=args.num_workers,
+                                  sampler=frame_sampler(frame_weights))
+    elif humans:
         human_share = args.human_share
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, num_workers=args.num_workers,
                                   sampler=source_balanced_sampler(train_sources, human_share))
@@ -490,13 +598,22 @@ def main():
         human_share = 0.0
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     print(f"[SAMPLER] human share per batch {human_share:.0%}")
+    if source_weights:
+        shares = {}
+        for w, src in zip(frame_weights, train_sources):
+            shares[src] = shares.get(src, 0.0) + w
+        print("[SAMPLER] share per batch by source: " + ", ".join(f"{k}={v:.0%}" for k, v in sorted(shares.items())))
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f"[HARDWARE] Training on device: {device}")
 
-    yaw_class_weights, args.stop_weight = label_weights_from(train_ds, train_sources, human_share,
-                                                             args.class_weight_power, args.target_stop_share)
+    if source_weights:
+        yaw_class_weights, args.stop_weight = label_weights_from_frames(train_ds, frame_weights, args.class_weight_power,
+                                                                        args.target_stop_share)
+    else:
+        yaw_class_weights, args.stop_weight = label_weights_from(train_ds, train_sources, human_share,
+                                                                 args.class_weight_power, args.target_stop_share)
     yaw_class_weights = yaw_class_weights.to(device)
     print("[LABELS] yaw class weights: " + " ".join(f"{w:.2f}" for w in yaw_class_weights.tolist()))
     pitch_std = torch.tensor(max(1e-3, float(np.std([float(train_ds[i][1][2]) for i in
@@ -507,13 +624,30 @@ def main():
     print(f"[MODEL] own-motion input: {'on' if proprio_size else 'off'}"
           + (f" ({proprio_size} values, dropout {args.proprio_dropout:.2f}, keyframe weight walk {args.walk_keyframe_weight:.1f} "
              f"/ yaw {args.yaw_keyframe_weight:.1f})" if proprio_size else ""))
-    model = DiscreteImitation2DCNNModel(proprio_size=proprio_size).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    model = DiscreteImitation2DCNNModel(proprio_size=proprio_size)
+    if args.init_from:
+        checkpoint = torch.load(args.init_from, map_location="cpu")
+        if checkpoint.get("proprio_size") != proprio_size:
+            print(f"[ERROR] --init_from {args.init_from} has proprio_size {checkpoint.get('proprio_size')}, this run "
+                  f"{proprio_size}")
+            sys.exit(1)
+        model.load_state_dict(checkpoint["state_dict"])
+        print(f"[MODEL] initialised from {args.init_from} (condition {checkpoint.get('condition')}, "
+              f"sources {checkpoint.get('synthetic_sources')})")
+    if args.freeze_trunk:
+        for p in model.conv2d_encoder.parameters():
+            p.requires_grad_(False)
+        print("[MODEL] convolutional encoder frozen")
+    model = model.to(device)
+    optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr,
+                                 weight_decay=args.weight_decay)
     min_best_epoch = max(1, args.epochs // 4)
     best = (float("inf"), -1, None)
 
     for epoch in range(1, args.epochs + 1):
         model.train()
+        if args.freeze_trunk:
+            model.conv2d_encoder.eval()  # keep the pretrained BatchNorm statistics
         running, seen = 0.0, 0
         for sensory, target in train_loader:
             sensory, target = sensory.to(device), target.to(device)
@@ -542,6 +676,12 @@ def main():
         report(rows, "best checkpoint, motion input hidden (camera + goal only)")
     model.cpu()
     export_onnx(model, args.output_onnx)
+    checkpoint_path = os.path.splitext(args.output_onnx)[0] + ".pt"
+    torch.save({"state_dict": model.state_dict(), "proprio_size": proprio_size, "condition": args.condition,
+                "fold": args.fold, "seed": args.seed, "best_epoch": best[1],
+                "synthetic_sources": sorted({e[1] for e in selected if e[1] != HUMAN}), "args": vars(args)},
+               checkpoint_path)
+    print(f"[EXPORT] PyTorch checkpoint written to {checkpoint_path}")
 
     sidecar = os.path.splitext(args.output_onnx)[0] + ".json"
     with open(sidecar, "w") as f:
@@ -563,6 +703,10 @@ def main():
                                     "train_human": sum(s == HUMAN for s in train_sources)},
                    "train_episodes": sorted(Path(e[0]).name for e in train_eps),
                    "val_episodes": sorted(Path(e[0]).name for e in val_eps),
+                   "init_from": os.path.abspath(args.init_from) if args.init_from else None,
+                   "freeze_trunk": args.freeze_trunk,
+                   "source_weights": dict(source_weights) if source_weights else None,
+                   "checkpoint": os.path.abspath(checkpoint_path),
                    "best_epoch": best[1], "args": vars(args)}, f, indent=2)
     print(f"[EXPORT] Contract sidecar written to {sidecar}")
 

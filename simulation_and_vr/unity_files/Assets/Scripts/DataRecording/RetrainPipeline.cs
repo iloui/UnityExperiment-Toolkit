@@ -66,6 +66,40 @@ namespace Assets.Scripts.DataRecording
             public string log_path;
             public string exit_path;
             public string script_path;
+            // RequestTraining only; the defaults (from older lock files too) mean RequestFullRetrain's behaviour.
+            public bool skip_latest;      // do not overwrite ImitationAgent_discrete_latest.onnx
+            public string assets_subdir;  // install under Assets/ImitationModel/<subdir>/ instead of Assets/ImitationModel/
+            public string result_path;    // write a TrainingResult JSON here when the run is finalized
+        }
+
+        /// <summary>A training run for RequestTraining: the trainer's arguments and where its model goes.</summary>
+        public sealed class TrainingJob
+        {
+            /// <summary>Arguments after the script name (paths relative to training_pipeline/ or absolute).</summary>
+            public List<string> Arguments = new List<string>();
+            /// <summary>Absolute path of the .onnx the trainer writes (must match --output_onnx in Arguments).</summary>
+            public string OutputOnnx;
+            public string Reason = "manual";
+            /// <summary>Install under Assets/ImitationModel/&lt;subdir&gt;/ (empty = Assets/ImitationModel/).</summary>
+            public string AssetsSubdir = "";
+            /// <summary>Also copy over ImitationAgent_discrete_latest.onnx (hot-reloaded by a running ImitationAgent).</summary>
+            public bool InstallAsLatest = false;
+            /// <summary>If set, a TrainingResult JSON is written here when the run is finalized (success or failure).</summary>
+            public string ResultPath = "";
+            public string Script = "train_2DCNN_discrete.py";
+        }
+
+        /// <summary>Written to TrainingJob.ResultPath when a RequestTraining run is finalized.</summary>
+        [Serializable]
+        public class TrainingResult
+        {
+            public bool ok;
+            public int exit_code = -1;
+            public string output_onnx;
+            /// <summary>Project-relative asset path of the installed model (Assets/ImitationModel/...), empty on failure.</summary>
+            public string model_asset;
+            public string log_path;
+            public string finished_utc;
         }
 
         [Serializable]
@@ -174,6 +208,90 @@ namespace Assets.Scripts.DataRecording
             Debug.Log($"{LogTag} Started full retrain (pid {info.pid}) - '{reason}'.\n" +
                       $"python: {python}\nargs: {string.Join(" ", args)}\nlog: {info.log_path}");
             return true;
+        }
+
+        /// <summary>
+        /// Starts any training run in the background (same process handling, lock, log tailing and re-attaching as
+        /// RequestFullRetrain, which is unchanged). Used by the DAgger loop. Returns false (and logs why) if a run is already
+        /// going or the Python environment is not set up. Call on the main thread.
+        /// </summary>
+        public static bool RequestTraining(TrainingJob job)
+        {
+            if (job == null || string.IsNullOrEmpty(job.OutputOnnx))
+            {
+                Debug.LogError($"{LogTag} RequestTraining: no output path.");
+                return false;
+            }
+            LockInfo running = ReadLiveLock(out _);
+            if (running != null)
+            {
+                Debug.LogWarning($"{LogTag} A training run is already going (pid {running.pid}, '{running.reason}') - not starting '{job.Reason}'.");
+                return false;
+            }
+            string python = ResolvePython(out string envError);
+            if (python == null)
+            {
+                Debug.LogError($"{LogTag} Not started ('{job.Reason}'): {envError}");
+                return false;
+            }
+
+            string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+            Directory.CreateDirectory(LogDirectory);
+            Directory.CreateDirectory(Path.GetDirectoryName(job.OutputOnnx));
+            var info = new LockInfo
+            {
+                started_utc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+                reason = job.Reason,
+                output_onnx = job.OutputOnnx,
+                log_path = Path.Combine(LogDirectory, stamp + ".log"),
+                exit_path = Path.Combine(LogDirectory, stamp + ".exit"),
+                skip_latest = !job.InstallAsLatest,
+                assets_subdir = job.AssetsSubdir ?? "",
+                result_path = job.ResultPath ?? "",
+            };
+            var args = new List<string> { job.Script };
+            args.AddRange(job.Arguments);
+            if (!StartProcess(python, args, info, stamp)) return false;
+            Follow(info, 0);
+            EnsurePump();
+            Debug.Log($"{LogTag} Started training (pid {info.pid}) - '{job.Reason}'.\n" +
+                      $"python: {python}\nargs: {string.Join(" ", args)}\nlog: {info.log_path}");
+            return true;
+        }
+
+        /// <summary>Writes the wrapper script, starts it and the lock file. Shared by RequestTraining.</summary>
+        private static bool StartProcess(string python, List<string> args, LockInfo info, string stamp)
+        {
+            try
+            {
+                bool windows = Application.platform == RuntimePlatform.WindowsEditor || Application.platform == RuntimePlatform.WindowsPlayer;
+                info.script_path = Path.Combine(LogDirectory, stamp + (windows ? ".cmd" : ".sh"));
+                File.WriteAllText(info.script_path, windows ? WindowsScript(python, args, info) : UnixScript(python, args, info));
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = windows ? "cmd.exe" : "/bin/sh",
+                    Arguments = windows ? $"/c \"{info.script_path}\"" : $"\"{info.script_path}\"",
+                    WorkingDirectory = PipelineDir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                using (Process process = Process.Start(startInfo))
+                {
+                    info.pid = process.Id;
+                    if (windows)
+                    {
+                        try { process.PriorityClass = ProcessPriorityClass.BelowNormal; } catch (Exception) { }
+                    }
+                }
+                File.WriteAllText(LockPath, JsonUtility.ToJson(info, true));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"{LogTag} Could not start the training process: {ex.Message}");
+                return false;
+            }
         }
 
         public static bool IsRunning => ReadLiveLock(out _) != null;
@@ -460,11 +578,12 @@ namespace Assets.Scripts.DataRecording
 
         private static void FinishRun(LockInfo info, int? exitCode)
         {
+            string installedAsset = null;
             try
             {
                 if (exitCode == 0 && File.Exists(info.output_onnx))
                 {
-                    InstallModel(info);
+                    installedAsset = InstallModel(info);
                 }
                 else
                 {
@@ -480,9 +599,36 @@ namespace Assets.Scripts.DataRecording
             }
             finally
             {
+                WriteResult(info, exitCode, installedAsset);
                 TryDelete(LockPath);
                 TryDelete(info.exit_path);
                 TryDelete(info.script_path);
+            }
+        }
+
+        private static void WriteResult(LockInfo info, int? exitCode, string installedAsset)
+        {
+            if (string.IsNullOrEmpty(info.result_path)) return;
+            var result = new TrainingResult
+            {
+                ok = installedAsset != null,
+                exit_code = exitCode ?? -1,
+                output_onnx = info.output_onnx,
+                model_asset = installedAsset ?? "",
+                log_path = info.log_path,
+                finished_utc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+            };
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(info.result_path));
+                string temp = info.result_path + ".tmp";
+                File.WriteAllText(temp, JsonUtility.ToJson(result, true));
+                if (File.Exists(info.result_path)) File.Delete(info.result_path);
+                File.Move(temp, info.result_path);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"{LogTag} Could not write the training result to '{info.result_path}': {ex.Message}");
             }
         }
 
@@ -490,21 +636,30 @@ namespace Assets.Scripts.DataRecording
         /// Copies the timestamped model + sidecar into Assets/ImitationModel/ (kept, so eval runs can point at a fixed file)
         /// and over ImitationAgent_discrete_latest.onnx/.json, then re-imports so a hot-reloading ImitationAgent picks it up.
         /// </summary>
-        private static void InstallModel(LockInfo info)
+        private static string InstallModel(LockInfo info)
         {
-            Directory.CreateDirectory(AssetsModelDir);
+            string subdir = string.IsNullOrEmpty(info.assets_subdir) ? "" : info.assets_subdir.Trim('/', '\\');
+            string targetDir = subdir.Length > 0 ? Path.Combine(AssetsModelDir, subdir) : AssetsModelDir;
+            Directory.CreateDirectory(targetDir);
             string name = Path.GetFileName(info.output_onnx);
             string sidecar = Path.ChangeExtension(info.output_onnx, ".json");
-            File.Copy(info.output_onnx, Path.Combine(AssetsModelDir, name), true);
-            if (File.Exists(sidecar)) File.Copy(sidecar, Path.Combine(AssetsModelDir, Path.GetFileName(sidecar)), true);
+            File.Copy(info.output_onnx, Path.Combine(targetDir, name), true);
+            if (File.Exists(sidecar)) File.Copy(sidecar, Path.Combine(targetDir, Path.GetFileName(sidecar)), true);
 
-            ReplaceWith(info.output_onnx, LatestModelPath);
-            if (File.Exists(sidecar)) ReplaceWith(sidecar, Path.ChangeExtension(LatestModelPath, ".json"));
+            if (!info.skip_latest)
+            {
+                ReplaceWith(info.output_onnx, LatestModelPath);
+                if (File.Exists(sidecar)) ReplaceWith(sidecar, Path.ChangeExtension(LatestModelPath, ".json"));
+            }
 
 #if UNITY_EDITOR
             AssetDatabase.Refresh(); // main thread: Poll runs from EditorApplication.update
 #endif
-            Debug.Log($"{LogTag} Retrain '{info.reason}' finished: Assets/ImitationModel/{name} (also as {LatestModelFileName}).");
+            string asset = "Assets/ImitationModel/" + (subdir.Length > 0 ? subdir.Replace('\\', '/') + "/" : "") + name;
+            Debug.Log(info.skip_latest
+                ? $"{LogTag} Training '{info.reason}' finished: {asset}."
+                : $"{LogTag} Retrain '{info.reason}' finished: {asset} (also as {LatestModelFileName}).");
+            return asset;
         }
 
         /// <summary>Copy to a hidden temp file next to the target (Unity ignores dot files), then swap it in.</summary>

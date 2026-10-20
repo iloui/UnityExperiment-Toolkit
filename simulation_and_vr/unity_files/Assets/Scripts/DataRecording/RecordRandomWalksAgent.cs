@@ -48,6 +48,10 @@ namespace Assets.Scripts.DataRecording
         public float lateralOffsetWallMarginMeters = 0.15f;
         [Tooltip("The offset fades to 0 over this distance to the current target (waypoint/end), so arrival stays on target.")]
         public float lateralOffsetFadeDistanceMeters = 3f;
+        [Tooltip("The aim point is pushed away from walls on either side of the path until the capsule centre keeps this distance " +
+                 "from them (centred where the passage is narrower). The NavMesh path hugs every wall at the bake radius, so the " +
+                 "v3 bot walks ~0.5 m closer to walls than the participants. 0 = off (v3 behaviour).")]
+        public float pathWallClearanceMeters = 0f;
 
         [Header("Mouse pitch")]
         [Tooltip("The bot's intended look-up/down angle wanders around level with this OU sigma (deg) / tau (s)...")]
@@ -144,6 +148,121 @@ namespace Assets.Scripts.DataRecording
         public float poiPauseMaxSeconds = 2f;
         [Tooltip("...with a glance to one side with this probability, then turns toward the next target.")]
         [Range(0f, 1f)] public float poiGlanceProbability = 0.3f;
+
+        // v5: the pocket loop. A memoryless policy cannot see which side the NavMesh path takes around a wall, so wall-stop
+        // frames ("wall ahead, goal behind it -> stand, then turn left / right") teach it to stand at the wall but not
+        // where to go. v5 turns while walking where there is room, stands at most once per spot, and - where both ways
+        // around are about equally long - takes the side that looks more open, which a single frame does show.
+        [Header("Pocket handling (v5; defaults = off)")]
+        [Tooltip("At a wall stop with room towards the path side, keep walking and turn in a curve instead of standing and turning on the spot.")]
+        public bool wallTurnWhileWalking = false;
+        [Tooltip("Room = a capsule-wide cast 60 deg towards the path side is free for at least this far, meters.")]
+        public float wallTurnMinSideClearanceMeters = 0.6f;
+        [Tooltip("The walk key stays down through a walking turn for this long, even while the heading error exceeds turnInPlaceDegrees, seconds.")]
+        public float wallTurnHoldSeconds = 1f;
+        [Tooltip("At most this many standing wall stops per walk within wallStopRepeatRadiusMeters of each other; further ones turn while " +
+                 "walking (or fall back to the plain walk-key rule if there is no room). 0 = no limit.")]
+        [Min(0)] public int maxWallStopsPerSpot = 0;
+        public float wallStopRepeatRadiusMeters = 2f;
+        [Tooltip("Facing a wall (wallStopDistanceMeters) with the path off by more than wallStopMinErrorDegrees: if the routes around " +
+                 "either side differ by less than this factor, walk towards the side that looks more open (longer free cast at " +
+                 "+-sideProbeAngleDegrees) instead of the NavMesh side. 0 = off.")]
+        public float sideCommitMaxLengthRatio = 0f;
+        public float sideProbeAngleDegrees = 60f;
+        public float sideProbeMaxDistanceMeters = 6f;
+        [Tooltip("A side commitment ends within this distance of its aim point...")]
+        public float sideCommitArrivalMeters = 1f;
+        [Tooltip("...or after (distance / walk speed + this) seconds.")]
+        public float sideCommitSlackSeconds = 4f;
+
+        /// <summary>participant_id of the recalibrated bot (RecalibratedV4).</summary>
+        public const string V4ParticipantId = "synthetic_rrw_v4";
+        /// <summary>participant_id of the recalibrated bot with pocket handling and hidden-goal tasks (RecalibratedV5).</summary>
+        public const string V5ParticipantId = "synthetic_rrw_v5";
+
+        /// <summary>
+        /// v4: the v3 bot refitted to the thesis participants P01-P08 (96 episodes) instead of the pilot. Measured with
+        /// eval_tools/compare_bot_to_humans.py on the same 0.1 s grid and 0.65 m/s stop threshold as the evaluation:
+        ///
+        ///                                   P01-P08      v3 bot
+        ///   stop share                      8.7%         22.5%
+        ///   start pause (median)            0.7 s        2.4 s
+        ///   mid-walk stop length (median)   0.8 s        2.0 s
+        ///   mid-walk stops within 0.6 m of a wall  17%   41%
+        ///   wall distance while walking (median)   1.58 m  1.09 m
+        ///   yaw exactly 0                   39%          61%
+        ///
+        /// So the stops get shorter and rarer near walls (fewer excursions, wall stops only for walls that really block
+        /// the way), the line moves away from walls (pathWallClearanceMeters, wider offset margin), and mouse turns start
+        /// earlier. Everything not listed keeps its v3 value.
+        /// </summary>
+        public static RandomWalkBotSettings RecalibratedV4()
+        {
+            return new RandomWalkBotSettings
+            {
+                // yaw: humans turn more continuously than the v3 deadband allowed
+                yawDeadbandDegrees = 4f,
+                yawSettleDegrees = 1f,
+
+                // wall clearance
+                lateralOffsetWallMarginMeters = 0.5f,
+                pathWallClearanceMeters = 0.9f,
+
+                // short look-arounds
+                lookAroundRatePerMinute = 1f,
+                lookAroundDwellSeconds = 0.35f,
+                lookAroundSecondGlanceProbability = 0.3f,
+
+                // few wall excursions, short dwell
+                wallExcursionRatePerMinute = 0.5f,
+                wallDwellSeconds = 0.3f,
+
+                // start: humans set off after 0.2-1.4 s (p10-p90)
+                startPauseMinSeconds = 0.2f,
+                startPauseMaxSeconds = 1.4f,
+                startGlanceProbability = 0.2f,
+
+                // scan stops: half as often, a third as long, mostly without a glance
+                scanStopRatePerMinute = 1.5f,
+                scanHoldMinSeconds = 0.3f,
+                scanHoldMaxSeconds = 1.2f,
+                scanNoGlanceProbability = 0.6f,
+                scanGlanceDwellSeconds = 0.4f,
+
+                // wall stops only for a wall that is close and far off the path
+                wallStopDistanceMeters = 0.8f,
+                wallStopMinErrorDegrees = 45f,
+                wallStopDwellMinSeconds = 0.2f,
+                wallStopDwellMaxSeconds = 0.6f,
+                wallStopCooldownSeconds = 4f,
+
+                // POI
+                poiPauseMinSeconds = 0.2f,
+                poiPauseMaxSeconds = 0.8f,
+                poiGlanceProbability = 0.15f,
+            };
+        }
+
+        /// <summary>
+        /// v5 = v4 + pocket handling: walking turns at walls, one standing wall stop per spot, and visible-side commitment
+        /// where the two ways around are within 25% of each other. Recorded together with hidden-goal tasks
+        /// (RecordRandomWalksHarness.hiddenGoalShare, set by "Record Random Walks v5").
+        /// </summary>
+        public static RandomWalkBotSettings RecalibratedV5()
+        {
+            RandomWalkBotSettings s = RecalibratedV4();
+            s.wallTurnWhileWalking = true;
+            s.wallTurnMinSideClearanceMeters = 0.6f;
+            s.wallTurnHoldSeconds = 1f;
+            s.maxWallStopsPerSpot = 1;
+            s.wallStopRepeatRadiusMeters = 2f;
+            s.sideCommitMaxLengthRatio = 1.25f;
+            s.sideProbeAngleDegrees = 60f;
+            s.sideProbeMaxDistanceMeters = 6f;
+            s.sideCommitArrivalMeters = 1f;
+            s.sideCommitSlackSeconds = 4f;
+            return s;
+        }
     }
 
     /// <summary>
@@ -182,6 +301,12 @@ namespace Assets.Scripts.DataRecording
         public int ScanStops { get; private set; }
         public int WallStops { get; private set; }
         public int PoiPauses { get; private set; }
+        /// <summary>v5: wall stops replaced by a walking turn, wall stops over the per-spot limit, near-equal side decisions,
+        /// and commitments to the visibly more open side against the NavMesh side.</summary>
+        public int WalkingTurns { get; private set; }
+        public int SuppressedWallStops { get; private set; }
+        public int SideDecisions { get; private set; }
+        public int SideCommits { get; private set; }
 
         private const string VerticalAxis = "Vertical";
         private const string HorizontalAxis = "Horizontal";
@@ -225,6 +350,17 @@ namespace Assets.Scripts.DataRecording
         private float nextWallStopTime;
         private Transform lastTarget;
 
+        // v5 pocket handling
+        private bool commitActive;
+        private Vector3 commitPoint;
+        private Transform commitTarget;
+        private float commitUntil;
+        private bool pathCommitted;
+        private float nextSideDecisionTime;
+        private float walkTurnUntil;
+        private readonly List<Vector3> wallStopSpots = new List<Vector3>();
+        private NavMeshPath probePath;
+
         public void Configure(FirstPersonController controller, Transform camera, ParticipantRecorder recorder, LayerMask architecture)
         {
             fps = controller;
@@ -233,6 +369,7 @@ namespace Assets.Scripts.DataRecording
             Recorder = recorder;
             architectureMask = architecture;
             if (path == null) path = new NavMeshPath();
+            if (probePath == null) probePath = new NavMeshPath();
         }
 
         /// <summary>Starts playing. The rig must already stand at the start with its (random) start heading.</summary>
@@ -255,8 +392,14 @@ namespace Assets.Scripts.DataRecording
             pathTarget = null;
             nextPathTime = 0f;
             TurnsInPlace = LookArounds = WallExcursions = StallRecoveries = ScanStops = WallStops = PoiPauses = 0;
+            WalkingTurns = SuppressedWallStops = SideDecisions = SideCommits = 0;
             nextWallStopTime = 0f;
             lastTarget = null;
+            commitActive = pathCommitted = false;
+            commitTarget = null;
+            nextSideDecisionTime = 0f;
+            walkTurnUntil = 0f;
+            wallStopSpots.Clear();
             // Start orientation: stand (and maybe glance) before the first turn toward the path.
             BeginStop(transform.eulerAngles.y, UniformRange(settings.startPauseMinSeconds, settings.startPauseMaxSeconds),
                 rng.NextDouble() < settings.startGlanceProbability ? 1 : 0, settings.lookAroundDwellSeconds);
@@ -284,6 +427,10 @@ namespace Assets.Scripts.DataRecording
 
             Vector3 pos = transform.position;
             float yaw = transform.eulerAngles.y;
+            if (commitActive && (target != commitTarget || HorizontalDistance(pos, commitPoint) < settings.sideCommitArrivalMeters || Time.time > commitUntil))
+            {
+                commitActive = false;
+            }
             UpdatePath(pos, target);
 
             // Pause at POI: the recorder switched to the next target, so stand (maybe glance) before turning toward it.
@@ -300,6 +447,12 @@ namespace Assets.Scripts.DataRecording
             lateralOffset = Mathf.Clamp(StepOu(lateralOffset, settings.lateralOffsetSigmaMeters, settings.lateralOffsetTauSeconds, dt), -offsetCap, offsetCap);
             pitchTarget = StepOu(pitchTarget, settings.pitchSigmaDegrees, settings.pitchTauSeconds, dt);
             behaviourCooldown -= dt;
+
+            if (mode == Mode.Walk && settings.sideCommitMaxLengthRatio > 0f && !commitActive && Time.time >= nextSideDecisionTime
+                && Time.time >= recoverUntil && HorizontalDistance(pos, target.position) > settings.behaviourMinTargetDistanceMeters)
+            {
+                MaybeCommitToVisibleSide(pos, yaw, target);
+            }
 
             // --- aim ---
             float aimYaw;
@@ -340,6 +493,16 @@ namespace Assets.Scripts.DataRecording
                         && Physics.Raycast(pos, Flat(transform.forward), settings.wallStopDistanceMeters, architectureMask, QueryTriggerInteraction.Ignore))
                     {
                         nextWallStopTime = Time.time + settings.wallStopCooldownSeconds;
+                        bool repeated = settings.maxWallStopsPerSpot > 0 && WallStopsNear(pos) >= settings.maxWallStopsPerSpot;
+                        if (repeated) SuppressedWallStops++;
+                        if ((settings.wallTurnWhileWalking || repeated) && SideOpen(pos, yaw, error))
+                        {
+                            walkTurnUntil = Time.time + settings.wallTurnHoldSeconds;
+                            WalkingTurns++;
+                            break;
+                        }
+                        if (repeated) break; // no room either: the walk-key rule below turns on the spot if it must
+                        wallStopSpots.Add(pos);
                         BeginStop(yaw, UniformRange(settings.wallStopDwellMinSeconds, settings.wallStopDwellMaxSeconds), 0, 0f);
                         WallStops++;
                         break;
@@ -383,7 +546,7 @@ namespace Assets.Scripts.DataRecording
             {
                 keyDown = false;
             }
-            else if (keyDown && Mathf.Abs(error) > settings.turnInPlaceDegrees)
+            else if (keyDown && Mathf.Abs(error) > settings.turnInPlaceDegrees && Time.time >= walkTurnUntil)
             {
                 keyDown = false;
                 TurnsInPlace++;
@@ -422,12 +585,13 @@ namespace Assets.Scripts.DataRecording
 
         private void UpdatePath(Vector3 pos, Transform target)
         {
-            if (target == pathTarget && Time.time < nextPathTime) return;
+            if (target == pathTarget && commitActive == pathCommitted && Time.time < nextPathTime) return;
             pathTarget = target;
+            pathCommitted = commitActive;
             nextPathTime = Time.time + settings.pathRefreshSeconds;
             corners = null;
             if (!NavMesh.SamplePosition(pos, out NavMeshHit from, 2f, NavMesh.AllAreas)) return;
-            if (!NavMesh.SamplePosition(target.position, out NavMeshHit to, 3f, NavMesh.AllAreas)) return;
+            if (!NavMesh.SamplePosition(commitActive ? commitPoint : target.position, out NavMeshHit to, 3f, NavMesh.AllAreas)) return;
             if (NavMesh.CalculatePath(from.position, to.position, NavMesh.AllAreas, path) && path.corners.Length >= 2) corners = path.corners;
         }
 
@@ -438,7 +602,7 @@ namespace Assets.Scripts.DataRecording
         /// </summary>
         private Vector3 LookAheadPoint(Vector3 pos, Transform target)
         {
-            if (corners == null) return target.position;
+            if (corners == null) return commitActive ? commitPoint : target.position;
             Vector3 flatPos = new Vector3(pos.x, corners[0].y, pos.z);
             bool recovering = Time.time < recoverUntil;
             float lookAhead = recovering ? settings.recoveryLookAheadMeters : settings.lookAheadMeters;
@@ -449,6 +613,7 @@ namespace Assets.Scripts.DataRecording
             for (float d = lookAhead; d > 0.3f; d -= 0.25f)
             {
                 Vector3 p = OffsetPoint(PointAheadOnCorners(corners, flatPos, d), offset, pos.y);
+                p = KeepClearOfWalls(p, pos.y, recovering ? 0f : fade);
                 if (Reachable(pos, p)) return p;
             }
             return PointAheadOnCorners(corners, flatPos, 0.3f);
@@ -476,6 +641,31 @@ namespace Assets.Scripts.DataRecording
             return pathPoint + side * wanted;
         }
 
+        /// <summary>
+        /// `point` moved perpendicular to the path until walls on both sides are at least pathWallClearanceMeters away
+        /// (centred between them where the passage is narrower than twice that), scaled by `strength` (the arrival fade).
+        /// </summary>
+        private Vector3 KeepClearOfWalls(Vector3 point, float rigHeight, float strength)
+        {
+            float clearance = settings.pathWallClearanceMeters;
+            if (clearance <= 0f || strength <= 0f) return point;
+            int seg = NearestSegment(corners, point);
+            Vector3 tangent = corners[seg + 1] - corners[seg];
+            tangent.y = 0f;
+            if (tangent.sqrMagnitude < 1e-6f) return point;
+            Vector3 right = Vector3.Cross(Vector3.up, tangent.normalized);
+            Vector3 origin = new Vector3(point.x, rigHeight, point.z);
+            float range = 2f * clearance;
+            float toRight = Physics.Raycast(origin, right, out RaycastHit r, range, architectureMask, QueryTriggerInteraction.Ignore) ? r.distance : range;
+            float toLeft = Physics.Raycast(origin, -right, out RaycastHit l, range, architectureMask, QueryTriggerInteraction.Ignore) ? l.distance : range;
+
+            float shift = 0f; // + = towards `right`
+            if (toRight + toLeft < 2f * clearance) shift = 0.5f * (toRight - toLeft);
+            else if (toRight < clearance) shift = toRight - clearance;
+            else if (toLeft < clearance) shift = clearance - toLeft;
+            return point + right * (shift * strength);
+        }
+
         private bool Reachable(Vector3 pos, Vector3 point)
         {
             Vector3 to = new Vector3(point.x, pos.y, point.z) - pos;
@@ -491,6 +681,108 @@ namespace Assets.Scripts.DataRecording
             Vector3 v = cc.velocity;
             v.y = 0f;
             return v.magnitude;
+        }
+
+        // ------------------------------------------------------------------
+        // v5 pocket handling
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// Facing a close wall with the path off to one side: probe both sides at +-sideProbeAngleDegrees, estimate the route
+        /// through each (straight to a point short of the probe's hit, then NavMesh to the target), and if the two are within
+        /// sideCommitMaxLengthRatio, commit to the side with the longer free probe - the side the camera sees open. Does
+        /// nothing when that is the NavMesh side anyway, or when one way around is clearly shorter.
+        /// </summary>
+        private void MaybeCommitToVisibleSide(Vector3 pos, float yaw, Transform target)
+        {
+            float naturalError = Mathf.DeltaAngle(yaw, YawTo(pos, LookAheadPoint(pos, target), yaw));
+            if (Mathf.Abs(naturalError) <= settings.wallStopMinErrorDegrees) return;
+            if (!Physics.Raycast(pos, Flat(transform.forward), settings.wallStopDistanceMeters, architectureMask, QueryTriggerInteraction.Ignore)) return;
+            nextSideDecisionTime = Time.time + settings.wallStopCooldownSeconds;
+            bool against = ChooseVisibleSide(pos, yaw, naturalError, target.position, cc.radius, settings.sideProbeAngleDegrees,
+                settings.sideProbeMaxDistanceMeters, settings.sideCommitMaxLengthRatio, architectureMask, probePath,
+                out bool nearEqual, out Vector3 aimPoint);
+            if (nearEqual) SideDecisions++;
+            if (!against) return;
+
+            commitActive = true;
+            commitPoint = aimPoint;
+            commitTarget = target;
+            commitUntil = Time.time + HorizontalDistance(pos, commitPoint) / Mathf.Max(0.3f, fps.WalkSpeed) + settings.sideCommitSlackSeconds;
+            SideCommits++;
+            UpdatePath(pos, target); // re-plan to the commitment point now (pathCommitted differs)
+        }
+
+        /// <summary>
+        /// The visible-side rule, shared with DaggerHarness's expert. From `pos` facing `yaw`, probe both sides at
+        /// +-probeAngle with a body-wide cast, estimate the route through each (straight to a point short of the probe's hit,
+        /// then NavMesh to `target`), and call the two near-equal when they are within maxLengthRatio. Returns true - with
+        /// the aim point on that side - only when they are near-equal AND the visibly more open side is not the one the
+        /// NavMesh path takes (`naturalError` > 0 = path to the right).
+        /// </summary>
+        internal static bool ChooseVisibleSide(Vector3 pos, float yaw, float naturalError, Vector3 target, float bodyRadius,
+            float probeAngle, float probeMaxDistance, float maxLengthRatio, LayerMask mask, NavMeshPath scratch,
+            out bool nearEqual, out Vector3 aimPoint)
+        {
+            nearEqual = false;
+            aimPoint = Vector3.zero;
+            if (!NavMesh.SamplePosition(target, out NavMeshHit targetHit, 3f, NavMesh.AllAreas)) return false;
+
+            var open = new float[2];
+            var length = new float[2];
+            var aim = new Vector3[2];
+            for (int i = 0; i < 2; i++)
+            {
+                float side = i == 0 ? -1f : 1f;
+                Vector3 dir = Quaternion.Euler(0f, yaw + side * probeAngle, 0f) * Vector3.forward;
+                float free = Physics.SphereCast(pos, bodyRadius, dir, out RaycastHit hit, probeMaxDistance, mask, QueryTriggerInteraction.Ignore)
+                    ? hit.distance : probeMaxDistance;
+                open[i] = free;
+                length[i] = float.PositiveInfinity;
+                float reach = free - 0.3f;
+                if (reach < 1f) continue;
+                if (!NavMesh.SamplePosition(pos + dir * reach, out NavMeshHit aimHit, 2f, NavMesh.AllAreas)) continue;
+                if (!NavMesh.CalculatePath(aimHit.position, targetHit.position, NavMesh.AllAreas, scratch)
+                    || scratch.status != NavMeshPathStatus.PathComplete || scratch.corners.Length < 2) continue;
+                // The way on must lead further away from here, not back past the walker (that would be the other side).
+                Vector3 onward = PointAheadOnCorners(scratch.corners, aimHit.position, 1.5f);
+                if (HorizontalDistance(onward, pos) < HorizontalDistance(aimHit.position, pos)) continue;
+                aim[i] = aimHit.position;
+                length[i] = HorizontalDistance(pos, aimHit.position) + PathLength(scratch.corners);
+            }
+            if (float.IsInfinity(length[0]) || float.IsInfinity(length[1])) return false;
+            if (Mathf.Max(length[0], length[1]) > maxLengthRatio * Mathf.Min(length[0], length[1])) return false;
+
+            nearEqual = true;
+            int chosen = open[1] >= open[0] ? 1 : 0;
+            int naturalSide = naturalError > 0f ? 1 : 0; // + = clockwise = right
+            if (chosen == naturalSide) return false;
+            aimPoint = aim[chosen];
+            return true;
+        }
+
+        /// <summary>A capsule-wide cast 60 deg towards the side of `error` is free for wallTurnMinSideClearanceMeters.</summary>
+        private bool SideOpen(Vector3 pos, float yaw, float error)
+        {
+            Vector3 dir = Quaternion.Euler(0f, yaw + Mathf.Sign(error) * 60f, 0f) * Vector3.forward;
+            return !Physics.SphereCast(pos, cc.radius, dir, out _, settings.wallTurnMinSideClearanceMeters, architectureMask, QueryTriggerInteraction.Ignore);
+        }
+
+        private int WallStopsNear(Vector3 pos)
+        {
+            int n = 0;
+            foreach (Vector3 spot in wallStopSpots)
+            {
+                if (HorizontalDistance(spot, pos) < settings.wallStopRepeatRadiusMeters) n++;
+            }
+            return n;
+        }
+
+        private static float PathLength(Vector3[] pathCorners)
+        {
+            float len = 0f;
+            for (int i = 1; i < pathCorners.Length; i++) len += Vector3.Distance(pathCorners[i - 1], pathCorners[i]);
+            return len;
         }
 
         private void BeginLookAround(float yaw)

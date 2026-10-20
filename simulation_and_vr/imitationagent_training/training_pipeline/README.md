@@ -85,3 +85,26 @@ whether the agent saw humans walk the evaluated route (A->B transfer, B->C memor
 - `check_splits.py` fails (exit 1) if a recorded participant is in no fold, if any fold/condition selection (or a given
   sidecar's episode lists) contains the other fold, a test-task walk in B or an excluded task in C, or if B and C of a
   fold differ in participants, validation participant or human episode count.
+
+## Checkpoints, fine-tuning and source weights
+
+- Every run now also writes `<model>.pt` (state dict, proprio size, condition, sources) next to the `.onnx`.
+- `--init_from <model>.pt` starts from those weights instead of random ones; `--freeze_trunk` (needs `--init_from`) keeps
+  the convolutional encoder and its BatchNorm statistics fixed, so only FiLM and the head train. Fine-tuning example:
+  `--condition B --fold 1 --init_from ../imitation_agent_model/ImitationAgent_A_v5_s1.pt --human_share 1.0 --lr 1e-4 --epochs 8`.
+- `--source_weights PATTERN=WEIGHT ...` splits the synthetic share of every batch between source patterns instead of by
+  frame count (`synthetic_rrw_v5=0.7 'synthetic_dagger_run1_r*=0.3'`); works for condition A too. Without it, sampling
+  and loss weighting are exactly as before.
+- `--synthetic_sources` accepts shell-style patterns (`synthetic_dagger_run1_r*`).
+- `--target_stop_share` still defaults to 0.2 (the pilot's standing share) so the thesis models are reproducible; the
+  participants P01-P08 stand in 8.7% of samples, so new runs should pass ~0.09.
+
+## DAgger loop (`Tools > Imitation Learning Agent > 3 · Train Model > Improve Model with DAgger…`)
+
+Window + Editor state machine (`Editor/DaggerLoop.cs`, `DataRecording/DaggerRunBootstrap.cs`). Per round and scene it
+enters Play mode with a runtime-spawned `DaggerHarness` (current policy drives, NavMesh expert labels, optional
+policy-only evaluation episodes on fixed tasks), then trains condition A on the base sources + all DAgger rounds of the
+run via `RetrainPipeline.RequestTraining`. State: `imitationagent_training/dagger/<run>/state.json` (survives domain
+reloads and Editor restarts; Pause / Resume / Abort in the window). Recordings: `synthetic_dagger_<run>_r<n>`. Models:
+`imitation_agent_model/dagger/<run>/` and `Assets/ImitationModel/Dagger/<run>/`. Only synthetic data is used, so the
+results can serve every fold. `Advanced > Add DAgger Harness` (one manual run) is unchanged.
