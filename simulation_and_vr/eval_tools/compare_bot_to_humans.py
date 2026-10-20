@@ -9,6 +9,7 @@ by (RandomWalkBotSettings.RecalibratedV4). Same 0.1 s grid (trajectories.load_hu
   wall distance         while walking
   yaw exactly 0         share of samples without any heading change
 
+Raw episodes (Unity's .bin files) are converted to dataset.zarr first, exactly as training does.
 Humans are every participant_id matching --humans (default P + digits, dry runs excluded).
 
 Usage (from simulation_and_vr/):
@@ -25,6 +26,7 @@ import numpy as np
 
 from layout_metrics import LAYOUTS_DIR, load_layout
 from trajectories import load_human_episode
+from dataset import ensure_all_episodes_ingested  # trajectories put training_pipeline on sys.path
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_RECORDINGS = HERE.parent / "imitationagent_training" / "zarr_recordings"
@@ -65,11 +67,18 @@ def episode_stats_placeholder() -> dict:
             "mid_stop_near_wall": [False], "wall_walking_m": np.zeros(1), "yaw_zero": np.zeros(1, dtype=bool)}
 
 
-def load_group(recordings: Path, keep) -> tuple[list[dict], set[str]]:
+def load_group(recordings: Path, keep, task_kind: str | None = None) -> tuple[list[dict], set[str]]:
+    """Episodes whose participant_id passes `keep`; with task_kind, only synthetic episodes of that synthetic_task_kind
+    ("random" / "hidden_goal"; episodes recorded before participant_recorder_v5 have none and are dropped)."""
     layouts, stats, scenes = {}, [], set()
     for episode in sorted(recordings.iterdir()):
         manifest = episode / "manifest.json"
-        if not manifest.exists() or not keep(json.loads(manifest.read_text()).get("participant_id", "")):
+        if not manifest.exists():
+            continue
+        m = json.loads(manifest.read_text())
+        if not keep(m.get("participant_id", "")):
+            continue
+        if task_kind and m.get("source") != "human" and m.get("synthetic_task_kind", "") != task_kind:
             continue
         try:
             df = load_human_episode(episode)
@@ -109,12 +118,17 @@ def main():
     parser.add_argument("--recordings_dir", type=Path, default=DEFAULT_RECORDINGS)
     parser.add_argument("--bots", nargs="+", default=["synthetic_rrw_v3", "synthetic_rrw_v4", "synthetic_rrw_v5"], help="participant_ids of the bots")
     parser.add_argument("--humans", default=r"^P\d{2,3}$", help="regex for human participant_ids")
+    parser.add_argument("--task_kind", choices=("random", "hidden_goal"), default=None,
+                        help="only bot episodes of this kind (v5 records both); humans are always all episodes")
     args = parser.parse_args()
 
+    # Unity writes raw .bin episodes; training converts them to dataset.zarr on load. Do the same here, so freshly
+    # recorded episodes are read instead of skipped.
+    ensure_all_episodes_ingested(args.recordings_dir)
     human_re = re.compile(args.humans)
     groups = {"humans": load_group(args.recordings_dir, lambda pid: bool(human_re.match(pid)))}
     for bot in args.bots:
-        groups[bot] = load_group(args.recordings_dir, lambda pid, bot=bot: pid == bot)
+        groups[bot] = load_group(args.recordings_dir, lambda pid, bot=bot: pid == bot, args.task_kind)
 
     tables = {name: summary(stats) for name, (stats, _) in groups.items()}
     rows = list(tables["humans"].keys())

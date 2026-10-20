@@ -195,6 +195,12 @@ namespace Assets.Scripts.DataRecording
         /// So the stops get shorter and rarer near walls (fewer excursions, wall stops only for walls that really block
         /// the way), the line moves away from walls (pathWallClearanceMeters, wider offset margin), and mouse turns start
         /// earlier. Everything not listed keeps its v3 value.
+        ///
+        /// Tuning round 1 (2026-10-20; first full v4/v5 recordings, 75 episodes each, archived as
+        /// zarr_recordings_archive/v4v5_tune0): stop share 11.4% / 11.0%, start pause 1.0 s (the random start heading's
+        /// turn on the spot comes on top of the pause), stop length 1.0 / 1.2 s, 2.6 stops per walking minute, wall distance
+        /// 1.43 m (v4) / 1.33 m (v5 normal walks; v5 walks while turning at walls, where v4 stands and is not counted).
+        /// Hence: shorter start pause, scan holds, glances and POI pauses, fewer scan stops, and 1.0 m wall clearance for both.
         /// </summary>
         public static RandomWalkBotSettings RecalibratedV4()
         {
@@ -206,28 +212,28 @@ namespace Assets.Scripts.DataRecording
 
                 // wall clearance
                 lateralOffsetWallMarginMeters = 0.5f,
-                pathWallClearanceMeters = 0.9f,
+                pathWallClearanceMeters = 1.0f,   // round 1: 0.9
 
                 // short look-arounds
                 lookAroundRatePerMinute = 1f,
-                lookAroundDwellSeconds = 0.35f,
+                lookAroundDwellSeconds = 0.25f,   // round 1: 0.35
                 lookAroundSecondGlanceProbability = 0.3f,
 
                 // few wall excursions, short dwell
                 wallExcursionRatePerMinute = 0.5f,
                 wallDwellSeconds = 0.3f,
 
-                // start: humans set off after 0.2-1.4 s (p10-p90)
+                // start: humans set off after 0.2-1.4 s (p10-p90); the bot's start turn on the spot adds to the pause
                 startPauseMinSeconds = 0.2f,
-                startPauseMaxSeconds = 1.4f,
+                startPauseMaxSeconds = 1.0f,      // round 1: 1.4
                 startGlanceProbability = 0.2f,
 
                 // scan stops: half as often, a third as long, mostly without a glance
-                scanStopRatePerMinute = 1.5f,
+                scanStopRatePerMinute = 1.0f,     // round 1: 1.5
                 scanHoldMinSeconds = 0.3f,
-                scanHoldMaxSeconds = 1.2f,
+                scanHoldMaxSeconds = 0.8f,        // round 1: 1.2
                 scanNoGlanceProbability = 0.6f,
-                scanGlanceDwellSeconds = 0.4f,
+                scanGlanceDwellSeconds = 0.3f,    // round 1: 0.4
 
                 // wall stops only for a wall that is close and far off the path
                 wallStopDistanceMeters = 0.8f,
@@ -238,7 +244,7 @@ namespace Assets.Scripts.DataRecording
 
                 // POI
                 poiPauseMinSeconds = 0.2f,
-                poiPauseMaxSeconds = 0.8f,
+                poiPauseMaxSeconds = 0.6f,        // round 1: 0.8
                 poiGlanceProbability = 0.15f,
             };
         }
